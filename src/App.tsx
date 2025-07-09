@@ -38,6 +38,8 @@ function CamLooper() {
   const [isBuffering, setIsBuffering] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [autoStart, setAutoStart] = useState(true);
+  const [currentLoopCount, setCurrentLoopCount] = useState(0);
+  const [isLoopingComplete, setIsLoopingComplete] = useState(false);
   const videoRef = React.useRef<HTMLVideoElement>(null);
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -54,6 +56,8 @@ function CamLooper() {
       setCurrentTime(0);
       setIsBuffering(false);
       setIsMuted(true);
+      setCurrentLoopCount(0);
+      setIsLoopingComplete(false);
       // Note: Keep autoStart setting as user preference
       
       // Create a separate video element to extract metadata
@@ -83,18 +87,12 @@ function CamLooper() {
       };
       
       metadataVideo.onerror = () => {
-        console.error('Error loading video metadata for file:', file.name);
-        if (metadataVideo.error) {
-          console.error('Metadata error code:', metadataVideo.error.code);
-          console.error('Metadata error message:', metadataVideo.error.message);
-        }
+        console.error('Error loading video metadata for:', file.name);
         // Clean up the metadata video URL
         URL.revokeObjectURL(metadataUrl);
       };
       
       metadataVideo.src = metadataUrl;
-    } else {
-      console.error('Invalid file selected:', file?.name, 'Type:', file?.type);
     }
   };
 
@@ -128,6 +126,7 @@ function CamLooper() {
 
     try {
       if (isPlaying) {
+        setAutoStart(false);
         videoRef.current.pause();
       } else {
         await videoRef.current.play();
@@ -140,15 +139,20 @@ function CamLooper() {
 
   const handleStop = () => {
     if (videoRef.current && videoUrl) {
+      setAutoStart(false);
       videoRef.current.pause();
       videoRef.current.currentTime = 0;
     }
     setIsPlaying(false);
+    setCurrentLoopCount(0);
+    setIsLoopingComplete(false);
   };
 
   const handleRestart = () => {
     if (videoRef.current && videoUrl) {
       videoRef.current.currentTime = 0;
+      setCurrentLoopCount(0);
+      setIsLoopingComplete(false);
       if (isPlaying) {
         videoRef.current.play();
       }
@@ -156,20 +160,32 @@ function CamLooper() {
   };
 
   const handleSeek = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (videoRef.current && duration > 0) {
-      const rect = event.currentTarget.getBoundingClientRect();
-      const clickX = event.clientX - rect.left;
-      const seekTime = (clickX / rect.width) * duration;
-      videoRef.current.currentTime = seekTime;
-      setCurrentTime(seekTime); // Update state immediately for UI responsiveness
-    }
+    if (!videoRef.current || duration <= 0) return;
+    
+    const rect = event.currentTarget.getBoundingClientRect();
+    const clickX = event.clientX - rect.left;
+    const seekTime = Math.max(0, Math.min(duration, (clickX / rect.width) * duration));
+    
+    // Set buffering state during seek
+    setIsBuffering(true);
+    
+    // Use requestAnimationFrame for smooth seeking
+    requestAnimationFrame(() => {
+      setCurrentTime(seekTime);
+      if (videoRef.current) {
+        videoRef.current.currentTime = seekTime;
+      }
+    });
   };
 
-  // Keep video muted
+  // Keep video muted and optimized
   React.useEffect(() => {
     if (videoRef.current) {
       videoRef.current.volume = 0;
       videoRef.current.muted = true;
+      // Performance optimizations
+      videoRef.current.preload = 'auto';
+      videoRef.current.playbackRate = 1.0;
     }
   }, [videoUrl]);
 
@@ -190,8 +206,19 @@ function CamLooper() {
     const video = videoRef.current;
     if (!video) return;
 
+    // Throttle time updates to improve performance
+    let timeUpdateThrottle: number | null = null;
     const handleTimeUpdate = () => {
-      setCurrentTime(video.currentTime);
+      if (timeUpdateThrottle) return;
+      
+      timeUpdateThrottle = requestAnimationFrame(() => {
+        setCurrentTime(video.currentTime);
+        // Clear buffering if video is playing smoothly
+        if (video.readyState >= 3 && isBuffering) {
+          setIsBuffering(false);
+        }
+        timeUpdateThrottle = null;
+      });
     };
 
     const handleLoadedMetadata = () => {
@@ -208,7 +235,26 @@ function CamLooper() {
     };
 
     const handleEnded = () => {
-      setIsPlaying(false);
+      const maxLoops = loopCount[0] === 10 ? Infinity : loopCount[0];
+      const newLoopCount = currentLoopCount + 1;
+      
+      if (newLoopCount < maxLoops) {
+        // Continue looping
+        setCurrentLoopCount(newLoopCount);
+        setIsLoopingComplete(false);
+        if (videoRef.current) {
+          videoRef.current.currentTime = 0;
+          videoRef.current.play().catch(console.error);
+        }
+      } else {
+        // Stop looping - reached max count
+        setIsPlaying(false);
+        setCurrentLoopCount(0);
+        setIsLoopingComplete(true);
+        
+        // Auto-hide the complete message after 3 seconds
+        setTimeout(() => setIsLoopingComplete(false), 3000);
+      }
     };
 
     const handlePlay = () => {
@@ -228,9 +274,12 @@ function CamLooper() {
       setIsBuffering(false);
     };
 
+    const handleCanPlayThrough = () => {
+      setIsBuffering(false);
+    };
+
     const handleStalled = () => {
       setIsBuffering(true);
-      console.log('Video playback stalled');
     };
 
     const handleError = (e: Event) => {
@@ -244,6 +293,8 @@ function CamLooper() {
 
     const handleSeeked = () => {
       setCurrentTime(video.currentTime);
+      // Clear buffering when seek completes
+      setIsBuffering(false);
     };
 
     const handleDurationChange = () => {
@@ -257,12 +308,18 @@ function CamLooper() {
     video.addEventListener('pause', handlePause);
     video.addEventListener('waiting', handleWaiting);
     video.addEventListener('canplay', handleCanPlay);
+    video.addEventListener('canplaythrough', handleCanPlayThrough);
     video.addEventListener('stalled', handleStalled);
     video.addEventListener('error', handleError);
     video.addEventListener('seeked', handleSeeked);
     video.addEventListener('durationchange', handleDurationChange);
 
     return () => {
+      // Clean up throttled animation frame
+      if (timeUpdateThrottle) {
+        cancelAnimationFrame(timeUpdateThrottle);
+      }
+      
       video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('ended', handleEnded);
@@ -270,6 +327,7 @@ function CamLooper() {
       video.removeEventListener('pause', handlePause);
       video.removeEventListener('waiting', handleWaiting);
       video.removeEventListener('canplay', handleCanPlay);
+      video.removeEventListener('canplaythrough', handleCanPlayThrough);
       video.removeEventListener('stalled', handleStalled);
       video.removeEventListener('error', handleError);
       video.removeEventListener('seeked', handleSeeked);
@@ -310,7 +368,6 @@ function CamLooper() {
                   src={videoUrl}
                   controls={false}
                   muted={true}
-                  loop
                   preload="auto"
                   playsInline
 
@@ -360,49 +417,19 @@ function CamLooper() {
                     </Button>
                   </div>
                   
-                  {/* Debug button */}
-                  <Button 
-                    variant="glassmorphism" 
-                    size="sm" 
-                    onClick={() => {
-                      console.log('=== DEBUG INFO ===');
-                      console.log('Video URL:', videoUrl);
-                      console.log('Selected video file:', selectedVideo);
-                      console.log('Video metadata:', videoMetadata);
-                      console.log('Is playing:', isPlaying);
-                      console.log('Auto start:', autoStart);
-                      if (videoRef.current) {
-                        console.log('Video element:', videoRef.current);
-                        console.log('Video src:', videoRef.current.src);
-                        console.log('Video readyState:', videoRef.current.readyState);
-                        console.log('Video paused:', videoRef.current.paused);
-                        console.log('Video currentTime:', videoRef.current.currentTime);
-                        console.log('Video duration:', videoRef.current.duration);
-                        console.log('Video muted:', videoRef.current.muted);
-                        console.log('Video volume:', videoRef.current.volume);
-                        if (videoRef.current.error) {
-                          console.log('Video error:', videoRef.current.error);
-                          console.log('Error code:', videoRef.current.error.code);
-                          console.log('Error message:', videoRef.current.error.message);
-                        }
-                      }
-                      console.log('==================');
-                    }}
-                  >
-                    Debug
-                  </Button>
+
 
                 </div>
                 
                 {/* Progress Bar */}
                 <div className="mt-2">
                   <div 
-                    className="w-full bg-white/20 rounded-full h-2 cursor-pointer hover:h-3 transition-all relative"
+                    className={`w-full bg-white/20 rounded-full h-2 cursor-pointer hover:h-3 transition-all relative ${isBuffering ? 'opacity-50' : ''}`}
                     onClick={handleSeek}
                     title={`Click to seek - ${duration > 0 ? `${Math.floor(currentTime / 60)}:${Math.floor(currentTime % 60).toString().padStart(2, '0')} / ${Math.floor(duration / 60)}:${Math.floor(duration % 60).toString().padStart(2, '0')}` : 'No video loaded'}`}
                   >
                     <div 
-                      className="bg-primary h-2 rounded-full hover:h-3 transition-all" 
+                      className={`bg-primary h-2 rounded-full hover:h-3 transition-all ${isBuffering ? 'animate-pulse' : ''}`}
                       style={{ 
                         width: duration > 0 ? `${Math.max(0, Math.min(100, (currentTime / duration) * 100))}%` : '0%' 
                       }} 
@@ -410,7 +437,7 @@ function CamLooper() {
                     {/* Seek handle */}
                     {duration > 0 && (
                       <div 
-                        className="absolute top-0 w-3 h-3 bg-white rounded-full shadow-md transform -translate-y-0.5 -translate-x-1.5 opacity-0 hover:opacity-100 transition-opacity"
+                        className={`absolute top-0 w-3 h-3 bg-white rounded-full shadow-md transform -translate-y-0.5 -translate-x-1.5 opacity-0 hover:opacity-100 transition-opacity ${isBuffering ? 'animate-pulse' : ''}`}
                         style={{ 
                           left: `${Math.max(0, Math.min(100, (currentTime / duration) * 100))}%` 
                         }}
@@ -439,7 +466,17 @@ function CamLooper() {
                 <div className="absolute top-4 right-4">
                   <Badge variant="secondary" className="bg-primary/20 text-primary border-primary/40">
                     <RotateCcw className="h-3 w-3 mr-1" />
-                    Loop Active
+                    Loop {currentLoopCount + 1}/{loopCount[0] === 10 ? '∞' : loopCount[0]}
+                  </Badge>
+                </div>
+              )}
+              
+              {/* Loop Complete Indicator */}
+              {isLoopingComplete && (
+                <div className="absolute top-4 right-4">
+                  <Badge variant="secondary" className="bg-green-500/20 text-green-400 border-green-500/40">
+                    <RotateCcw className="h-3 w-3 mr-1" />
+                    Looping Complete!
                   </Badge>
                 </div>
               )}
