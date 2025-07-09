@@ -17,13 +17,30 @@ import {
   Video, 
   RotateCcw
 } from "lucide-react";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 const queryClient = new QueryClient();
 
+// Types for virtual camera
+interface VirtualCameraStatus {
+  is_active: boolean;
+  camera_name: string;
+  resolution: string;
+  fps: number;
+  frame_count: number;
+}
+
+interface VirtualCameraConfig {
+  width: number;
+  height: number;
+  fps: number;
+  camera_name: string;
+}
+
 function CamLooper() {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isVirtualCamActive, setIsVirtualCamActive] = useState(true);
+  const [isVirtualCamActive, setIsVirtualCamActive] = useState(false);
   const [loopCount, setLoopCount] = useState([5]);
   const [selectedVideo, setSelectedVideo] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -40,7 +57,16 @@ function CamLooper() {
   const [autoStart, setAutoStart] = useState(true);
   const [currentLoopCount, setCurrentLoopCount] = useState(0);
   const [isLoopingComplete, setIsLoopingComplete] = useState(false);
+  const [virtualCameraStatus, setVirtualCameraStatus] = useState<VirtualCameraStatus>({
+    is_active: false,
+    camera_name: "CamLooper Virtual Camera",
+    resolution: "1920x1080",
+    fps: 30,
+    frame_count: 0
+  });
+  const [isVirtualCamLoading, setIsVirtualCamLoading] = useState(false);
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const canvasRef = React.useRef<HTMLCanvasElement>(null);
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -176,6 +202,88 @@ function CamLooper() {
         videoRef.current.currentTime = seekTime;
       }
     });
+  };
+
+  // Virtual camera functions
+  const updateVirtualCameraStatus = async () => {
+    try {
+      const status = await invoke<VirtualCameraStatus>('get_virtual_camera_status');
+      setVirtualCameraStatus(status);
+      setIsVirtualCamActive(status.is_active);
+    } catch (error) {
+      console.error('Failed to get virtual camera status:', error);
+    }
+  };
+
+  const startVirtualCamera = async () => {
+    setIsVirtualCamLoading(true);
+    try {
+      const config: VirtualCameraConfig = {
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        camera_name: "CamLooper Virtual Camera"
+      };
+      
+      const status = await invoke<VirtualCameraStatus>('start_virtual_camera', { config });
+      setVirtualCameraStatus(status);
+      setIsVirtualCamActive(status.is_active);
+      console.log('Virtual camera started successfully');
+    } catch (error) {
+      console.error('Failed to start virtual camera:', error);
+      setIsVirtualCamActive(false);
+    } finally {
+      setIsVirtualCamLoading(false);
+    }
+  };
+
+  const stopVirtualCamera = async () => {
+    setIsVirtualCamLoading(true);
+    try {
+      const status = await invoke<VirtualCameraStatus>('stop_virtual_camera');
+      setVirtualCameraStatus(status);
+      setIsVirtualCamActive(status.is_active);
+      console.log('Virtual camera stopped successfully');
+    } catch (error) {
+      console.error('Failed to stop virtual camera:', error);
+    } finally {
+      setIsVirtualCamLoading(false);
+    }
+  };
+
+  const handleVirtualCameraToggle = async (checked: boolean) => {
+    if (checked) {
+      await startVirtualCamera();
+    } else {
+      await stopVirtualCamera();
+    }
+  };
+
+  const captureVideoFrame = () => {
+    if (!videoRef.current || !canvasRef.current || !isVirtualCamActive) return;
+    
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    if (!ctx) return;
+    
+    // Set canvas size to match video
+    canvas.width = video.videoWidth || 1920;
+    canvas.height = video.videoHeight || 1080;
+    
+    // Draw video frame to canvas
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // Convert canvas to base64
+    const dataURL = canvas.toDataURL('image/jpeg', 0.8);
+    const base64Data = dataURL.split(',')[1];
+    
+    // Send frame to virtual camera
+    invoke('send_frame_to_virtual_camera', { frameData: base64Data })
+      .catch(error => {
+        console.error('Failed to send frame to virtual camera:', error);
+      });
   };
 
   // Keep video muted and optimized
@@ -353,6 +461,22 @@ function CamLooper() {
     };
   }, [videoUrl]);
 
+  // Initialize virtual camera status
+  React.useEffect(() => {
+    updateVirtualCameraStatus();
+  }, []);
+
+  // Capture video frames for virtual camera
+  React.useEffect(() => {
+    if (!isVirtualCamActive || !isPlaying || !videoRef.current) return;
+
+    const intervalId = setInterval(() => {
+      captureVideoFrame();
+    }, 1000 / 30); // 30 FPS
+
+    return () => clearInterval(intervalId);
+  }, [isVirtualCamActive, isPlaying, videoUrl]);
+
   return (
     <div className="min-h-screen bg-background p-6">
       <div className="max-w-7xl mx-auto">
@@ -482,6 +606,14 @@ function CamLooper() {
               )}
             </Card>
 
+            {/* Hidden canvas for video frame capture */}
+            <canvas
+              ref={canvasRef}
+              style={{ display: 'none' }}
+              width={1920}
+              height={1080}
+            />
+
             {/* Upload Area */}
             <Card className="border-dashed border-2 border-border hover:border-primary/40 transition-colors">
               <div 
@@ -520,8 +652,8 @@ function CamLooper() {
                     <Monitor className="h-4 w-4 mr-2" />
                     Virtual Camera
                   </h3>
-                  <Badge variant={isVirtualCamActive ? "default" : "secondary"} className={isVirtualCamActive ? "bg-green-500/20 text-green-400 border-green-500/40" : ""}>
-                    {isVirtualCamActive ? "Active" : "Inactive"}
+                  <Badge variant={virtualCameraStatus.is_active ? "default" : "secondary"} className={virtualCameraStatus.is_active ? "bg-green-500/20 text-green-400 border-green-500/40" : ""}>
+                    {virtualCameraStatus.is_active ? "Active" : "Inactive"}
                   </Badge>
                 </div>
                 
@@ -530,12 +662,20 @@ function CamLooper() {
                     <span className="text-sm">Enable Virtual Camera</span>
                     <Switch 
                       checked={isVirtualCamActive}
-                      onCheckedChange={setIsVirtualCamActive}
+                      onCheckedChange={handleVirtualCameraToggle}
+                      disabled={isVirtualCamLoading}
                     />
                   </div>
                   
                   <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">
-                    Status: {isVirtualCamActive ? 'Ready for apps to use' : 'Disabled'}
+                    Status: {virtualCameraStatus.is_active ? 'Ready for apps to use' : 'Disabled'}
+                    {virtualCameraStatus.is_active && (
+                      <div className="mt-1">
+                        <div>Resolution: {virtualCameraStatus.resolution}</div>
+                        <div>FPS: {virtualCameraStatus.fps}</div>
+                        <div>Frames: {virtualCameraStatus.frame_count}</div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
