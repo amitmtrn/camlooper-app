@@ -5,7 +5,8 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +41,7 @@ pub struct VideoProcessor {
     video_info: Option<VideoInfo>,
     video_path: Option<PathBuf>,
     stream_status: Arc<Mutex<StreamStatus>>,
-    frame_sender: Option<mpsc::UnboundedSender<VideoFrame>>,
+    app_handle: Option<AppHandle>,
     is_streaming: Arc<Mutex<bool>>,
     loop_settings: Arc<Mutex<(u32, bool)>>, // (loop_count, auto_start)
 }
@@ -60,10 +61,14 @@ impl VideoProcessor {
                 loop_count: 5,
                 current_loop: 0,
             })),
-            frame_sender: None,
+            app_handle: None,
             is_streaming: Arc::new(Mutex::new(false)),
             loop_settings: Arc::new(Mutex::new((5, true))),
         }
+    }
+
+    pub fn set_app_handle(&mut self, app_handle: AppHandle) {
+        self.app_handle = Some(app_handle);
     }
 
     pub async fn load_video(&mut self, file_path: PathBuf) -> Result<VideoInfo> {
@@ -118,13 +123,14 @@ impl VideoProcessor {
         Ok(video_info)
     }
 
-    pub async fn start_streaming(&mut self) -> Result<mpsc::UnboundedReceiver<VideoFrame>> {
+    pub async fn start_streaming(&mut self) -> Result<()> {
         let video_path = self.video_path.as_ref()
             .ok_or_else(|| anyhow!("No video loaded"))?
             .clone();
 
-        let (frame_sender, frame_receiver) = mpsc::unbounded_channel::<VideoFrame>();
-        self.frame_sender = Some(frame_sender.clone());
+        let app_handle = self.app_handle.as_ref()
+            .ok_or_else(|| anyhow!("App handle not set"))?
+            .clone();
 
         let stream_status = self.stream_status.clone();
         let is_streaming = self.is_streaming.clone();
@@ -134,7 +140,7 @@ impl VideoProcessor {
         tokio::task::spawn_blocking(move || {
             if let Err(e) = Self::stream_video_frames_blocking(
                 video_path,
-                frame_sender,
+                app_handle,
                 stream_status,
                 is_streaming,
                 loop_settings,
@@ -153,12 +159,12 @@ impl VideoProcessor {
             status.is_playing = true;
         }
 
-        Ok(frame_receiver)
+        Ok(())
     }
 
     fn stream_video_frames_blocking(
         video_path: PathBuf,
-        frame_sender: mpsc::UnboundedSender<VideoFrame>,
+        app_handle: AppHandle,
         stream_status: Arc<Mutex<StreamStatus>>,
         is_streaming: Arc<Mutex<bool>>,
         loop_settings: Arc<Mutex<(u32, bool)>>,
@@ -239,10 +245,10 @@ impl VideoProcessor {
                             status.current_time = timestamp;
                         }
 
-                        // Send frame
-                        if frame_sender.send(video_frame).is_err() {
-                            // Receiver dropped, stop streaming
-                            return Ok(());
+                        // Push frame to frontend via event
+                        if let Err(e) = app_handle.emit("video-frame", &video_frame) {
+                            eprintln!("Failed to emit video frame: {}", e);
+                            // Continue streaming even if emit fails
                         }
 
                         // Intelligent frame rate control - adjust for processing time
@@ -356,7 +362,6 @@ impl VideoProcessor {
             status.current_loop = 0;
         }
 
-        self.frame_sender = None;
         Ok(())
     }
 
@@ -383,10 +388,6 @@ impl VideoProcessor {
 static VIDEO_PROCESSOR: Lazy<Arc<Mutex<VideoProcessor>>> = 
     Lazy::new(|| Arc::new(Mutex::new(VideoProcessor::new())));
 
-// Frame receiver for the frontend
-static FRAME_RECEIVER: Lazy<Arc<RwLock<Option<mpsc::UnboundedReceiver<VideoFrame>>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(None)));
-
 // Helper functions for Tauri commands
 pub async fn load_video_file(file_path: String) -> Result<VideoInfo> {
     let path = PathBuf::from(file_path);
@@ -396,10 +397,7 @@ pub async fn load_video_file(file_path: String) -> Result<VideoInfo> {
 
 pub async fn start_video_stream() -> Result<()> {
     let mut processor = VIDEO_PROCESSOR.lock().await;
-    let receiver = processor.start_streaming().await?;
-    
-    let mut frame_receiver = FRAME_RECEIVER.write().await;
-    *frame_receiver = Some(receiver);
+    processor.start_streaming().await?;
     
     Ok(())
 }
@@ -412,9 +410,6 @@ pub async fn pause_video_stream() -> Result<()> {
 pub async fn stop_video_stream() -> Result<()> {
     let mut processor = VIDEO_PROCESSOR.lock().await;
     processor.stop_streaming().await?;
-    
-    let mut frame_receiver = FRAME_RECEIVER.write().await;
-    *frame_receiver = None;
     
     Ok(())
 }
@@ -434,11 +429,8 @@ pub async fn get_video_info() -> Option<VideoInfo> {
     processor.get_video_info()
 }
 
-pub async fn get_next_frame() -> Option<VideoFrame> {
-    let mut frame_receiver = FRAME_RECEIVER.write().await;
-    if let Some(receiver) = frame_receiver.as_mut() {
-        receiver.recv().await
-    } else {
-        None
-    }
+// Initialize video processor with app handle for event emission
+pub async fn init_video_processor(app_handle: AppHandle) {
+    let mut processor = VIDEO_PROCESSOR.lock().await;
+    processor.set_app_handle(app_handle);
 } 

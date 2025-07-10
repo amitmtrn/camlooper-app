@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 const queryClient = new QueryClient();
 
@@ -153,7 +154,7 @@ function CamLooper() {
         
         // Auto start if enabled
         if (autoStart) {
-          handlePlayPause();
+          await handlePlayPause();
         }
         
       } catch (error) {
@@ -207,7 +208,7 @@ function CamLooper() {
       } else {
         await invoke('start_video_stream');
         setIsPlaying(true);
-        startFrameReceiving();
+        await startFrameReceiving();
       }
     } catch (error) {
       console.error('Error with video playback:', error);
@@ -238,31 +239,35 @@ function CamLooper() {
       await invoke('stop_video_stream');
       await invoke('start_video_stream');
       setIsPlaying(true);
-      startFrameReceiving();
+      await startFrameReceiving();
     } catch (error) {
       console.error('Error restarting video:', error);
     }
   };
 
-  const startFrameReceiving = () => {
+  const startFrameReceiving = async () => {
+    // Stop any existing polling
     if (frameIntervalRef.current) {
       clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
     }
     
-    frameIntervalRef.current = window.setInterval(async () => {
-      try {
-        const frame = await invoke<VideoFrame | null>('get_next_video_frame');
-        if (frame) {
-          setCurrentFrame(frame);
-          // Send frame to virtual camera if active
-          if (isVirtualCamActive) {
-            await invoke('send_frame_to_virtual_camera', { frameData: frame.data });
-          }
+    // Listen for push-based video frames
+    try {
+      await listen<VideoFrame>('video-frame', (event) => {
+        const frame = event.payload;
+        setCurrentFrame(frame);
+        
+        // Send frame to virtual camera if active
+        if (isVirtualCamActive) {
+          invoke('send_frame_to_virtual_camera', { frameData: frame.data }).catch(
+            error => console.error('Error sending frame to virtual camera:', error)
+          );
         }
-      } catch (error) {
-        console.error('Error receiving frame:', error);
-      }
-    }, 1000 / 25); // 25 FPS - slightly lower for better performance
+      });
+    } catch (error) {
+      console.error('Error setting up video frame listener:', error);
+    }
   };
 
   // Update stream status periodically

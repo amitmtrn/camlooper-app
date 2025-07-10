@@ -116,7 +116,7 @@ sequenceDiagram
     F->>F: Update UI with video info
 ```
 
-### 2. Video Streaming Flow
+### 2. Video Streaming Flow (Push-Based)
 
 ```mermaid
 sequenceDiagram
@@ -128,19 +128,16 @@ sequenceDiagram
     F->>T: start_video_stream()
     T->>VP: start_streaming()
     VP->>VP: spawn_blocking(stream_video_frames)
+    F->>T: listen('video-frame')
     
-    loop Frame Processing
+    loop Frame Processing & Push
         VP->>FF: read_frame()
         FF-->>VP: Raw frame data
         VP->>VP: scale_to_rgb24()
         VP->>VP: encode_to_jpeg()
         VP->>VP: encode_base64()
-        VP->>T: send frame via channel
-    end
-    
-    loop Frontend Polling
-        F->>T: get_next_video_frame()
-        T-->>F: Base64 frame data
+        VP->>T: emit('video-frame', frame)
+        T-->>F: Push frame event
         F->>F: Display frame as image
     end
 ```
@@ -205,19 +202,19 @@ const [currentFrame, setCurrentFrame] = useState<VideoFrame | null>(null);
 const [streamStatus, setStreamStatus] = useState<StreamStatus>();
 ```
 
-#### Frame Receiving Loop
+#### Frame Receiving (Push-Based)
 ```typescript
-const startFrameReceiving = () => {
-    frameIntervalRef.current = window.setInterval(async () => {
-        const frame = await invoke<VideoFrame | null>('get_next_video_frame');
-        if (frame) {
-            setCurrentFrame(frame);
-            // Forward to virtual camera if active
-            if (isVirtualCamActive) {
-                await invoke('send_frame_to_virtual_camera', { frameData: frame.data });
-            }
+const startFrameReceiving = async () => {
+    // Listen for push-based video frames
+    await listen<VideoFrame>('video-frame', (event) => {
+        const frame = event.payload;
+        setCurrentFrame(frame);
+        
+        // Forward to virtual camera if active
+        if (isVirtualCamActive) {
+            invoke('send_frame_to_virtual_camera', { frameData: frame.data });
         }
-    }, 1000 / 25); // 25 FPS polling
+    });
 };
 ```
 
@@ -245,9 +242,11 @@ const handlePlayPause = async () => {
 static VIDEO_PROCESSOR: Lazy<Arc<Mutex<VideoProcessor>>> = 
     Lazy::new(|| Arc::new(Mutex::new(VideoProcessor::new())));
 
-// Frame receiver for the frontend
-static FRAME_RECEIVER: Lazy<Arc<RwLock<Option<mpsc::UnboundedReceiver<VideoFrame>>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(None)));
+// Initialize video processor with app handle for event emission
+pub async fn init_video_processor(app_handle: AppHandle) {
+    let mut processor = VIDEO_PROCESSOR.lock().await;
+    processor.set_app_handle(app_handle);
+}
 ```
 
 #### Core Structures
@@ -314,10 +313,10 @@ async fn pause_video_stream() -> Result<(), String>
 async fn stop_video_stream() -> Result<(), String>
 
 #[tauri::command]
-async fn get_next_video_frame() -> Option<VideoFrame>
-
-#[tauri::command]
 async fn get_video_stream_status() -> StreamStatus
+
+// Note: No polling command needed - frames are pushed via events
+// Backend emits 'video-frame' events that frontend listens to
 ```
 
 ### Virtual Camera Operations
@@ -345,9 +344,10 @@ async fn send_frame_to_virtual_camera(frame_data: String) -> Result<(), String>
 
 ### Frontend Optimizations
 
-1. **Reduced Polling**: Frame requests at 25 FPS instead of 30 FPS
-2. **Status Polling**: Reduced from 100ms to 200ms intervals
+1. **Push-Based Streaming**: Eliminated polling entirely - frames pushed via events
+2. **Status Polling**: Reduced from 100ms to 200ms intervals  
 3. **Conditional Virtual Camera**: Only forwards frames when virtual camera is active
+4. **Event-Driven Architecture**: Real-time frame delivery without polling overhead
 
 ### Memory Management
 

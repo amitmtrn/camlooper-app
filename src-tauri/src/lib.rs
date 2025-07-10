@@ -4,7 +4,7 @@ mod video_processor;
 mod video_upload;
 
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
-use video_processor::{VideoInfo, VideoFrame, StreamStatus};
+use video_processor::{VideoInfo, StreamStatus};
 use video_upload::{UploadRequest, UploadResponse};
 use serde::Deserialize;
 
@@ -135,10 +135,7 @@ async fn get_video_info() -> Option<VideoInfo> {
     video_processor::get_video_info().await
 }
 
-#[tauri::command]
-async fn get_next_video_frame() -> Option<VideoFrame> {
-    video_processor::get_next_frame().await
-}
+
 
 // Combined workflow command for uploading and loading a video
 #[tauri::command]
@@ -185,10 +182,17 @@ pub fn run() {
             get_video_stream_status,
             set_video_loop_settings,
             get_video_info,
-            get_next_video_frame,
             // Combined workflow
             upload_and_load_video
         ])
+        .setup(|app| {
+            // Initialize video processor with app handle for push-based frame streaming
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                video_processor::init_video_processor(app_handle).await;
+            });
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
