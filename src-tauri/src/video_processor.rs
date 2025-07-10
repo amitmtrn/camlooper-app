@@ -1,12 +1,16 @@
 use anyhow::{anyhow, Result};
-use base64::Engine;
 use ffmpeg_next as ffmpeg;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,10 +26,17 @@ pub struct VideoInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoFrame {
-    pub data: String, // Base64 encoded JPEG
+    pub data: Vec<u8>, // Raw JPEG bytes
     pub timestamp: f64,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameBatch {
+    pub frames: Vec<VideoFrame>,
+    pub sequence_id: u64,
+    pub total_frames: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,15 +46,147 @@ pub struct StreamStatus {
     pub duration: f64,
     pub loop_count: u32,
     pub current_loop: u32,
+    pub buffer_health: f32, // 0.0 to 1.0
+    pub actual_fps: f64,
+    pub target_fps: f64,
+    pub frames_dropped: u32,
+    pub average_processing_time: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceMetrics {
+    pub frames_processed: u64,
+    pub frames_dropped: u64,
+    pub average_encode_time: f64,
+    pub average_decode_time: f64,
+    pub current_quality: u8,
+    pub buffer_size: usize,
+    pub memory_usage: u64,
+}
+
+// Frame buffer structure for smooth streaming
+struct FrameBuffer {
+    frames: VecDeque<VideoFrame>,
+    max_size: usize,
+    target_size: usize,
+    last_consumed: Instant,
+}
+
+impl FrameBuffer {
+    fn new(max_size: usize) -> Self {
+        Self {
+            frames: VecDeque::with_capacity(max_size),
+            max_size,
+            target_size: max_size / 2, // Keep buffer half full ideally
+            last_consumed: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, frame: VideoFrame) -> bool {
+        if self.frames.len() >= self.max_size {
+            // Buffer is full, drop oldest frame
+            self.frames.pop_front();
+        }
+        self.frames.push_back(frame);
+        true
+    }
+
+    fn pop(&mut self) -> Option<VideoFrame> {
+        self.last_consumed = Instant::now();
+        self.frames.pop_front()
+    }
+
+    fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+
+
+    fn health_ratio(&self) -> f32 {
+        (self.frames.len() as f32 / self.target_size as f32).min(1.0)
+    }
+
+    fn should_drop_frame(&self) -> bool {
+        self.frames.len() > self.max_size * 3 / 4 // Drop if buffer is 75% full
+    }
+}
+
+// Adaptive quality controller
+struct QualityController {
+    current_quality: u8,
+    target_fps: f64,
+    frame_times: VecDeque<Duration>,
+    last_adjustment: Instant,
+    adjustment_interval: Duration,
+}
+
+impl QualityController {
+    fn new(target_fps: f64) -> Self {
+        Self {
+            current_quality: 85, // Start with high quality
+            target_fps,
+            frame_times: VecDeque::with_capacity(30),
+            last_adjustment: Instant::now(),
+            adjustment_interval: Duration::from_secs(2),
+        }
+    }
+
+    fn record_frame_time(&mut self, time: Duration) {
+        if self.frame_times.len() >= 30 {
+            self.frame_times.pop_front();
+        }
+        self.frame_times.push_back(time);
+    }
+
+    fn should_adjust_quality(&self) -> bool {
+        self.last_adjustment.elapsed() > self.adjustment_interval && 
+        self.frame_times.len() >= 10
+    }
+
+    fn adjust_quality(&mut self, buffer_health: f32) -> u8 {
+        if !self.should_adjust_quality() {
+            return self.current_quality;
+        }
+
+        let avg_frame_time = self.frame_times.iter().sum::<Duration>() / self.frame_times.len() as u32;
+        let target_frame_time = Duration::from_secs_f64(1.0 / self.target_fps);
+        
+        let performance_ratio = target_frame_time.as_secs_f64() / avg_frame_time.as_secs_f64();
+        
+        // Adjust quality based on performance and buffer health
+        let new_quality = if performance_ratio < 0.8 || buffer_health < 0.3 {
+            // Performance is poor or buffer is low, reduce quality
+            (self.current_quality as i16 - 10).max(40) as u8
+        } else if performance_ratio > 1.2 && buffer_health > 0.7 {
+            // Performance is good and buffer is healthy, increase quality
+            (self.current_quality as u16 + 5).min(95) as u8
+        } else {
+            self.current_quality
+        };
+
+        if new_quality != self.current_quality {
+            self.current_quality = new_quality;
+            self.last_adjustment = Instant::now();
+        }
+
+        self.current_quality
+    }
 }
 
 pub struct VideoProcessor {
     video_info: Option<VideoInfo>,
     video_path: Option<PathBuf>,
-    stream_status: Arc<Mutex<StreamStatus>>,
+    stream_status: Arc<RwLock<StreamStatus>>,
     app_handle: Option<AppHandle>,
-    is_streaming: Arc<Mutex<bool>>,
-    loop_settings: Arc<Mutex<(u32, bool)>>, // (loop_count, auto_start)
+    is_streaming: Arc<AtomicBool>,
+    loop_settings: Arc<RwLock<(u32, bool)>>, // (loop_count, auto_start)
+    frame_buffer: Arc<Mutex<FrameBuffer>>,
+    quality_controller: Arc<Mutex<QualityController>>,
+    performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+    streaming_task: Option<JoinHandle<()>>,
+    buffer_consumer_task: Option<JoinHandle<()>>,
+    frame_sequence: Arc<AtomicU64>,
+    batch_size: usize,
 }
 
 impl VideoProcessor {
@@ -54,16 +197,36 @@ impl VideoProcessor {
         Self {
             video_info: None,
             video_path: None,
-            stream_status: Arc::new(Mutex::new(StreamStatus {
+            stream_status: Arc::new(RwLock::new(StreamStatus {
                 is_playing: false,
                 current_time: 0.0,
                 duration: 0.0,
                 loop_count: 5,
                 current_loop: 0,
+                buffer_health: 0.0,
+                actual_fps: 0.0,
+                target_fps: 30.0,
+                frames_dropped: 0,
+                average_processing_time: 0.0,
             })),
             app_handle: None,
-            is_streaming: Arc::new(Mutex::new(false)),
-            loop_settings: Arc::new(Mutex::new((5, true))),
+            is_streaming: Arc::new(AtomicBool::new(false)),
+            loop_settings: Arc::new(RwLock::new((5, true))),
+            frame_buffer: Arc::new(Mutex::new(FrameBuffer::new(60))), // 2 seconds at 30fps
+            quality_controller: Arc::new(Mutex::new(QualityController::new(30.0))),
+            performance_metrics: Arc::new(RwLock::new(PerformanceMetrics {
+                frames_processed: 0,
+                frames_dropped: 0,
+                average_encode_time: 0.0,
+                average_decode_time: 0.0,
+                current_quality: 85,
+                buffer_size: 0,
+                memory_usage: 0,
+            })),
+            streaming_task: None,
+            buffer_consumer_task: None,
+            frame_sequence: Arc::new(AtomicU64::new(0)),
+            batch_size: 3, // Send 3 frames per batch
         }
     }
 
@@ -110,12 +273,42 @@ impl VideoProcessor {
             }
         };
 
-        // Update status (now async operations are separated)
-        let mut status = self.stream_status.lock().await;
-        status.duration = video_info.duration;
-        status.current_time = 0.0;
-        status.current_loop = 0;
-        drop(status);
+        // Update status and controllers
+        {
+            let mut status = self.stream_status.write().await;
+            status.duration = video_info.duration;
+            status.current_time = 0.0;
+            status.current_loop = 0;
+            status.target_fps = video_info.fps.min(30.0); // Cap at 30fps
+            status.buffer_health = 0.0;
+            status.frames_dropped = 0;
+        }
+
+        // Reset quality controller for new video
+        {
+            let mut quality_controller = self.quality_controller.lock().await;
+            *quality_controller = QualityController::new(video_info.fps.min(30.0));
+        }
+
+        // Clear buffer
+        {
+            let mut buffer = self.frame_buffer.lock().await;
+            *buffer = FrameBuffer::new(60);
+        }
+
+        // Reset metrics
+        {
+            let mut metrics = self.performance_metrics.write().await;
+            *metrics = PerformanceMetrics {
+                frames_processed: 0,
+                frames_dropped: 0,
+                average_encode_time: 0.0,
+                average_decode_time: 0.0,
+                current_quality: 85,
+                buffer_size: 0,
+                memory_usage: 0,
+            };
+        }
 
         self.video_info = Some(video_info.clone());
         self.video_path = Some(file_path);
@@ -132,43 +325,123 @@ impl VideoProcessor {
             .ok_or_else(|| anyhow!("App handle not set"))?
             .clone();
 
-        let stream_status = self.stream_status.clone();
-        let is_streaming = self.is_streaming.clone();
-        let loop_settings = self.loop_settings.clone();
+        // Stop any existing streaming
+        self.stop_streaming().await?;
 
-        // Start streaming task in a blocking thread to avoid Send issues
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = Self::stream_video_frames_blocking(
-                video_path,
-                app_handle,
-                stream_status,
-                is_streaming,
-                loop_settings,
-            ) {
-                eprintln!("Error streaming video: {}", e);
-            }
-        });
+        // Set streaming flag
+        self.is_streaming.store(true, Ordering::Relaxed);
 
+        // Start frame producer task
+        let producer_task = self.start_frame_producer(video_path).await?;
+        self.streaming_task = Some(producer_task);
+
+        // Start buffer consumer task
+        let consumer_task = self.start_buffer_consumer(app_handle).await?;
+        self.buffer_consumer_task = Some(consumer_task);
+
+        // Update status
         {
-            let mut streaming = self.is_streaming.lock().await;
-            *streaming = true;
-        }
-
-        {
-            let mut status = self.stream_status.lock().await;
+            let mut status = self.stream_status.write().await;
             status.is_playing = true;
         }
 
         Ok(())
     }
 
-    fn stream_video_frames_blocking(
+    async fn start_frame_producer(&self, video_path: PathBuf) -> Result<JoinHandle<()>> {
+        let is_streaming = self.is_streaming.clone();
+        let loop_settings = self.loop_settings.clone();
+        let frame_buffer = self.frame_buffer.clone();
+        let quality_controller = self.quality_controller.clone();
+        let performance_metrics = self.performance_metrics.clone();
+        let stream_status = self.stream_status.clone();
+
+        let task = tokio::task::spawn_blocking(move || {
+            if let Err(e) = Self::produce_frames_blocking(
+                video_path,
+                is_streaming,
+                loop_settings,
+                frame_buffer,
+                quality_controller,
+                performance_metrics,
+                stream_status,
+            ) {
+                eprintln!("Error producing frames: {}", e);
+            }
+        });
+
+        Ok(task)
+    }
+
+    async fn start_buffer_consumer(&self, app_handle: AppHandle) -> Result<JoinHandle<()>> {
+        let is_streaming = self.is_streaming.clone();
+        let frame_buffer = self.frame_buffer.clone();
+        let frame_sequence = self.frame_sequence.clone();
+        let batch_size = self.batch_size;
+        let stream_status = self.stream_status.clone();
+
+        let task = tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(batch_size);
+            let mut last_emit = Instant::now();
+            let emit_interval = Duration::from_millis(16); // ~60fps max emit rate
+
+            while is_streaming.load(Ordering::Relaxed) {
+                // Try to fill batch
+                {
+                    let mut buffer = frame_buffer.lock().await;
+                    while batch.len() < batch_size {
+                        if let Some(frame) = buffer.pop() {
+                            batch.push(frame);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Update buffer health
+                    let buffer_health = buffer.health_ratio();
+                    {
+                        let mut status = stream_status.write().await;
+                        status.buffer_health = buffer_health;
+                    }
+                }
+
+                // Emit batch if we have frames and enough time has passed
+                if !batch.is_empty() && last_emit.elapsed() >= emit_interval {
+                    let frame_batch = FrameBatch {
+                        frames: batch.clone(),
+                        sequence_id: frame_sequence.fetch_add(1, Ordering::Relaxed),
+                        total_frames: batch.len(),
+                    };
+
+                    if let Err(e) = app_handle.emit("video-frame-batch", &frame_batch) {
+                        eprintln!("Failed to emit frame batch: {}", e);
+                    }
+
+                    batch.clear();
+                    last_emit = Instant::now();
+                }
+
+                // Small delay to prevent busy waiting
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        Ok(task)
+    }
+
+    fn produce_frames_blocking(
         video_path: PathBuf,
-        app_handle: AppHandle,
-        stream_status: Arc<Mutex<StreamStatus>>,
-        is_streaming: Arc<Mutex<bool>>,
-        loop_settings: Arc<Mutex<(u32, bool)>>,
+        is_streaming: Arc<AtomicBool>,
+        loop_settings: Arc<RwLock<(u32, bool)>>,
+        frame_buffer: Arc<Mutex<FrameBuffer>>,
+        quality_controller: Arc<Mutex<QualityController>>,
+        performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+        stream_status: Arc<RwLock<StreamStatus>>,
     ) -> Result<()> {
+        // For blocking operations, we need to use blocking versions
+        // Convert async locks to blocking operations using tokio::runtime::Handle
+        let rt = tokio::runtime::Handle::current();
+        
         let mut input = ffmpeg::format::input(&video_path)?;
         
         let video_stream = input
@@ -182,7 +455,7 @@ impl VideoProcessor {
         let context = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
         let mut decoder = context.decoder().video()?;
         
-        // Create scaler for consistent output format - use RGB24 for better performance
+        // Create scaler for consistent output format
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
@@ -190,28 +463,26 @@ impl VideoProcessor {
             ffmpeg::format::Pixel::RGB24,
             decoder.width(),
             decoder.height(),
-            ffmpeg::software::scaling::Flags::FAST_BILINEAR, // Use faster scaling
+            ffmpeg::software::scaling::Flags::FAST_BILINEAR,
         )?;
 
         let mut frame = ffmpeg::util::frame::video::Video::empty();
         let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
         
         let fps = f64::from(video_stream.avg_frame_rate());
-        let frame_duration = 1.0 / fps.min(30.0); // Cap at 30 FPS for better performance
-        let frame_duration_ms = (frame_duration * 1000.0) as u64;
-        let mut frame_count = 0;
+        let target_frame_duration = Duration::from_secs_f64(1.0 / fps.min(30.0));
+        let mut frame_count = 0u64;
+        let mut frames_dropped = 0u32;
+        let mut last_fps_update = Instant::now();
 
         loop {
             // Check if we should continue streaming
-            {
-                let streaming = is_streaming.blocking_lock();
-                if !*streaming {
-                    break;
-                }
+            if !is_streaming.load(Ordering::Relaxed) {
+                break;
             }
 
             let (loop_count, _auto_start) = {
-                let settings = loop_settings.blocking_lock();
+                let settings = rt.block_on(async { loop_settings.read().await });
                 *settings
             };
 
@@ -221,51 +492,81 @@ impl VideoProcessor {
                     decoder.send_packet(&packet)?;
                     
                     while decoder.receive_frame(&mut frame).is_ok() {
-                        let frame_start = std::time::Instant::now();
+                        let frame_start = Instant::now();
                         frame_count += 1;
+                        
+                        // Check if we should drop this frame for performance
+                        let should_drop = {
+                            let buffer = rt.block_on(async { frame_buffer.lock().await });
+                            buffer.should_drop_frame()
+                        };
+
+                        if should_drop {
+                            frames_dropped += 1;
+                            continue;
+                        }
                         
                         // Scale frame to RGB24
                         scaler.run(&frame, &mut rgb_frame)?;
                         
-                        // Convert to JPEG
-                        let jpeg_data = Self::frame_to_jpeg(&rgb_frame)?;
+                        // Get current quality setting
+                        let current_quality = {
+                            let mut quality_controller = rt.block_on(async { quality_controller.lock().await });
+                            let buffer_health = {
+                                let buffer = rt.block_on(async { frame_buffer.lock().await });
+                                buffer.health_ratio()
+                            };
+                            quality_controller.adjust_quality(buffer_health)
+                        };
+                        
+                        // Convert to JPEG with adaptive quality
+                        let jpeg_data = Self::frame_to_jpeg_with_quality(&rgb_frame, current_quality)?;
                         let timestamp = frame.timestamp().unwrap_or(0) as f64 * time_base;
                         
                         // Create video frame
                         let video_frame = VideoFrame {
-                            data: base64::prelude::BASE64_STANDARD.encode(&jpeg_data),
+                            data: jpeg_data,
                             timestamp,
                             width: rgb_frame.width(),
                             height: rgb_frame.height(),
                         };
 
-                        // Update status less frequently (every 5th frame)
-                        if frame_count % 5 == 0 {
-                            let mut status = stream_status.blocking_lock();
-                            status.current_time = timestamp;
+                        // Push frame to buffer
+                        {
+                            let mut buffer = rt.block_on(async { frame_buffer.lock().await });
+                            buffer.push(video_frame);
                         }
 
-                        // Push frame to frontend via event
-                        if let Err(e) = app_handle.emit("video-frame", &video_frame) {
-                            eprintln!("Failed to emit video frame: {}", e);
-                            // Continue streaming even if emit fails
-                        }
-
-                        // Intelligent frame rate control - adjust for processing time
+                        // Record performance metrics
                         let processing_time = frame_start.elapsed();
-                        let target_duration = std::time::Duration::from_millis(frame_duration_ms);
-                        
-                        if processing_time < target_duration {
-                            let sleep_time = target_duration - processing_time;
+                        {
+                            let mut quality_controller = rt.block_on(async { quality_controller.lock().await });
+                            quality_controller.record_frame_time(processing_time);
+                        }
+
+                        // Update status periodically
+                        if frame_count % 5 == 0 {
+                            let mut status = rt.block_on(async { stream_status.write().await });
+                            status.current_time = timestamp;
+                            status.frames_dropped = frames_dropped;
+                            
+                            // Update FPS every second
+                            if last_fps_update.elapsed() >= Duration::from_secs(1) {
+                                let elapsed = last_fps_update.elapsed().as_secs_f64();
+                                status.actual_fps = 5.0 / elapsed; // 5 frames over elapsed time
+                                last_fps_update = Instant::now();
+                            }
+                        }
+
+                        // Intelligent frame rate control
+                        if processing_time < target_frame_duration {
+                            let sleep_time = target_frame_duration - processing_time;
                             std::thread::sleep(sleep_time);
                         }
 
                         // Check if we should stop (every 10th frame)
-                        if frame_count % 10 == 0 {
-                            let streaming = is_streaming.blocking_lock();
-                            if !*streaming {
-                                return Ok(());
-                            }
+                        if frame_count % 10 == 0 && !is_streaming.load(Ordering::Relaxed) {
+                            return Ok(());
                         }
                     }
                 }
@@ -273,7 +574,7 @@ impl VideoProcessor {
 
             // Handle looping
             {
-                let mut status = stream_status.blocking_lock();
+                let mut status = rt.block_on(async { stream_status.write().await });
                 status.current_loop += 1;
                 
                 if loop_count == 10 || status.current_loop < loop_count {
@@ -288,26 +589,27 @@ impl VideoProcessor {
             }
         }
 
+        // Update final metrics
         {
-            let mut streaming = is_streaming.blocking_lock();
-            *streaming = false;
+            let mut metrics = rt.block_on(async { performance_metrics.write().await });
+            metrics.frames_processed = frame_count;
+            metrics.frames_dropped = frames_dropped as u64;
         }
 
+        is_streaming.store(false, Ordering::Relaxed);
         Ok(())
     }
 
-    fn frame_to_jpeg(frame: &ffmpeg::util::frame::video::Video) -> Result<Vec<u8>> {
+    fn frame_to_jpeg_with_quality(frame: &ffmpeg::util::frame::video::Video, quality: u8) -> Result<Vec<u8>> {
         let width = frame.width() as usize;
         let height = frame.height() as usize;
         let linesize = frame.stride(0);
         let data = frame.data(0);
         
-        // Handle stride properly - copy line by line if needed for RGB24 (3 bytes per pixel)
+        // Handle stride properly for RGB24 (3 bytes per pixel)
         let rgb_data = if linesize == width * 3 {
-            // No padding, can use data directly
             data[0..width * height * 3].to_vec()
         } else {
-            // Handle line padding
             let mut rgb_data = Vec::with_capacity(width * height * 3);
             for y in 0..height {
                 let line_start = y * linesize;
@@ -321,28 +623,35 @@ impl VideoProcessor {
         let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data)
             .ok_or_else(|| anyhow!("Failed to create image from frame data"))?;
         
-        // Encode as JPEG with optimized quality for performance
+        // Encode as JPEG with adaptive quality
         let mut jpeg_data = Vec::new();
         {
             use image::codecs::jpeg::JpegEncoder;
             use std::io::Cursor;
             
             let mut cursor = Cursor::new(&mut jpeg_data);
-            let mut encoder = JpegEncoder::new_with_quality(&mut cursor, 65); // Lower quality for better performance
+            let mut encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
             encoder.encode_image(&img)?;
         }
         
         Ok(jpeg_data)
     }
 
+
+
     pub async fn pause_streaming(&mut self) -> Result<()> {
-        {
-            let mut streaming = self.is_streaming.lock().await;
-            *streaming = false;
+        self.is_streaming.store(false, Ordering::Relaxed);
+
+        // Wait for tasks to finish
+        if let Some(task) = self.streaming_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.buffer_consumer_task.take() {
+            task.abort();
         }
 
         {
-            let mut status = self.stream_status.lock().await;
+            let mut status = self.stream_status.write().await;
             status.is_playing = false;
         }
 
@@ -350,30 +659,43 @@ impl VideoProcessor {
     }
 
     pub async fn stop_streaming(&mut self) -> Result<()> {
+        self.is_streaming.store(false, Ordering::Relaxed);
+
+        // Wait for tasks to finish
+        if let Some(task) = self.streaming_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.buffer_consumer_task.take() {
+            task.abort();
+        }
+
+        // Clear buffer
         {
-            let mut streaming = self.is_streaming.lock().await;
-            *streaming = false;
+            let mut buffer = self.frame_buffer.lock().await;
+            *buffer = FrameBuffer::new(60);
         }
 
         {
-            let mut status = self.stream_status.lock().await;
+            let mut status = self.stream_status.write().await;
             status.is_playing = false;
             status.current_time = 0.0;
             status.current_loop = 0;
+            status.buffer_health = 0.0;
+            status.frames_dropped = 0;
         }
 
         Ok(())
     }
 
     pub async fn get_stream_status(&self) -> StreamStatus {
-        self.stream_status.lock().await.clone()
+        self.stream_status.read().await.clone()
     }
 
     pub async fn set_loop_settings(&self, loop_count: u32, auto_start: bool) -> Result<()> {
-        let mut settings = self.loop_settings.lock().await;
+        let mut settings = self.loop_settings.write().await;
         *settings = (loop_count, auto_start);
         
-        let mut status = self.stream_status.lock().await;
+        let mut status = self.stream_status.write().await;
         status.loop_count = loop_count;
         
         Ok(())
@@ -381,6 +703,24 @@ impl VideoProcessor {
 
     pub fn get_video_info(&self) -> Option<VideoInfo> {
         self.video_info.clone()
+    }
+
+    pub async fn get_performance_metrics(&self) -> PerformanceMetrics {
+        let mut metrics = self.performance_metrics.read().await.clone();
+        
+        // Update buffer size
+        {
+            let buffer = self.frame_buffer.lock().await;
+            metrics.buffer_size = buffer.len();
+        }
+
+        // Update current quality
+        {
+            let quality_controller = self.quality_controller.lock().await;
+            metrics.current_quality = quality_controller.current_quality;
+        }
+
+        metrics
     }
 }
 
@@ -427,6 +767,11 @@ pub async fn set_video_loop_settings(loop_count: u32, auto_start: bool) -> Resul
 pub async fn get_video_info() -> Option<VideoInfo> {
     let processor = VIDEO_PROCESSOR.lock().await;
     processor.get_video_info()
+}
+
+pub async fn get_performance_metrics() -> Result<PerformanceMetrics> {
+    let processor = VIDEO_PROCESSOR.lock().await;
+    Ok(processor.get_performance_metrics().await)
 }
 
 // Initialize video processor with app handle for event emission

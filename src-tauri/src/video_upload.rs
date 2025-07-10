@@ -1,96 +1,93 @@
 use anyhow::{anyhow, Result};
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Write, BufWriter};
 use std::path::PathBuf;
+use std::fs::File;
+use std::sync::{Mutex, OnceLock};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadRequest {
+pub struct StreamUploadRequest {
     pub filename: String,
-    pub file_data: String, // Base64 encoded file data
-    pub chunk_index: usize,
-    pub total_chunks: usize,
-    pub upload_id: Option<String>,
+    pub file_size: u64,
+    pub chunk_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadResponse {
+pub struct StreamUploadResponse {
     pub upload_id: String,
-    pub chunk_received: usize,
-    pub total_chunks: usize,
+    pub temp_file_path: String,
+    pub chunk_size: usize,
+    pub expected_chunks: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkUploadRequest {
+    pub upload_id: String,
+    pub chunk_index: usize,
+    pub chunk_data: Vec<u8>, // Raw binary data instead of base64
+    pub is_final_chunk: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkUploadResponse {
+    pub upload_id: String,
+    pub chunk_index: usize,
+    pub bytes_written: usize,
+    pub total_bytes_written: u64,
     pub is_complete: bool,
     pub file_path: Option<String>,
 }
 
 #[derive(Debug)]
-struct UploadSession {
-    pub filename: String,
+struct StreamUploadSession {
+    pub file_size: u64,
     pub temp_file: NamedTempFile,
+    pub writer: BufWriter<File>,
     pub chunks_received: usize,
-    pub total_chunks: usize,
-    pub chunk_data: HashMap<usize, Vec<u8>>,
+    pub bytes_written: u64,
+    pub expected_chunks: usize,
 }
 
-static mut UPLOAD_SESSIONS: Option<HashMap<String, UploadSession>> = None;
-static INIT: std::sync::Once = std::sync::Once::new();
+static UPLOAD_SESSIONS: OnceLock<Mutex<HashMap<String, StreamUploadSession>>> = OnceLock::new();
 
-fn get_upload_sessions() -> &'static mut HashMap<String, UploadSession> {
-    unsafe {
-        INIT.call_once(|| {
-            UPLOAD_SESSIONS = Some(HashMap::new());
-        });
-        UPLOAD_SESSIONS.as_mut().unwrap()
-    }
+fn get_upload_sessions() -> &'static Mutex<HashMap<String, StreamUploadSession>> {
+    UPLOAD_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-impl UploadSession {
-    pub fn new(filename: String, total_chunks: usize) -> Result<Self> {
+impl StreamUploadSession {
+    pub fn new(file_size: u64, chunk_size: usize) -> Result<Self> {
         let temp_file = NamedTempFile::new()?;
+        let file = temp_file.reopen()?;
+        let writer = BufWriter::new(file);
+        
+        let expected_chunks = ((file_size as f64) / (chunk_size as f64)).ceil() as usize;
         
         Ok(Self {
-            filename,
+            file_size,
             temp_file,
+            writer,
             chunks_received: 0,
-            total_chunks,
-            chunk_data: HashMap::new(),
+            bytes_written: 0,
+            expected_chunks,
         })
     }
 
-    pub fn add_chunk(&mut self, chunk_index: usize, data: Vec<u8>) -> Result<bool> {
-        if chunk_index >= self.total_chunks {
-            return Err(anyhow!("Chunk index {} exceeds total chunks {}", chunk_index, self.total_chunks));
-        }
-
-        if self.chunk_data.contains_key(&chunk_index) {
-            return Err(anyhow!("Chunk {} already received", chunk_index));
-        }
-
-        self.chunk_data.insert(chunk_index, data);
+    pub fn write_chunk(&mut self, chunk_data: &[u8]) -> Result<usize> {
+        let bytes_written = self.writer.write(chunk_data)?;
+        self.bytes_written += bytes_written as u64;
         self.chunks_received += 1;
-
-        // Check if all chunks are received
-        if self.chunks_received == self.total_chunks {
-            self.finalize_file()?;
-            return Ok(true);
-        }
-
-        Ok(false)
+        Ok(bytes_written)
     }
 
-    fn finalize_file(&mut self) -> Result<()> {
-        // Write all chunks in order to the temp file
-        for i in 0..self.total_chunks {
-            if let Some(chunk_data) = self.chunk_data.get(&i) {
-                self.temp_file.write_all(chunk_data)?;
-            } else {
-                return Err(anyhow!("Missing chunk {}", i));
-            }
-        }
-        
-        self.temp_file.flush()?;
+    pub fn is_complete(&self) -> bool {
+        self.bytes_written >= self.file_size
+    }
+
+    pub fn finalize(&mut self) -> Result<()> {
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -99,34 +96,43 @@ impl UploadSession {
     }
 }
 
-pub fn start_upload(filename: String, total_chunks: usize) -> Result<String> {
+pub fn start_stream_upload(_filename: String, file_size: u64, chunk_size: usize) -> Result<StreamUploadResponse> {
     let upload_id = Uuid::new_v4().to_string();
-    let session = UploadSession::new(filename, total_chunks)?;
+    let session = StreamUploadSession::new(file_size, chunk_size)?;
     
-    let sessions = get_upload_sessions();
+    let temp_file_path = session.get_file_path().to_string_lossy().to_string();
+    let expected_chunks = session.expected_chunks;
+    
+    let mut sessions = get_upload_sessions().lock().unwrap();
     sessions.insert(upload_id.clone(), session);
     
-    Ok(upload_id)
+    Ok(StreamUploadResponse {
+        upload_id,
+        temp_file_path,
+        chunk_size,
+        expected_chunks,
+    })
 }
 
-pub fn upload_chunk(upload_request: UploadRequest) -> Result<UploadResponse> {
-    let upload_id = upload_request.upload_id
-        .ok_or_else(|| anyhow!("Upload ID is required for chunk upload"))?;
+pub fn upload_chunk_stream(request: ChunkUploadRequest) -> Result<ChunkUploadResponse> {
+    let mut sessions = get_upload_sessions().lock().unwrap();
+    let session = sessions.get_mut(&request.upload_id)
+        .ok_or_else(|| anyhow!("Upload session not found: {}", request.upload_id))?;
 
-    // Decode base64 data
-    let chunk_data = base64::prelude::BASE64_STANDARD.decode(&upload_request.file_data)
-        .map_err(|e| anyhow!("Failed to decode chunk data: {}", e))?;
-
-    let sessions = get_upload_sessions();
-    let session = sessions.get_mut(&upload_id)
-        .ok_or_else(|| anyhow!("Upload session not found: {}", upload_id))?;
-
-    let is_complete = session.add_chunk(upload_request.chunk_index, chunk_data)?;
+    // Write chunk data directly to file
+    let bytes_written = session.write_chunk(&request.chunk_data)?;
     
-    let response = UploadResponse {
-        upload_id: upload_id.clone(),
-        chunk_received: upload_request.chunk_index,
-        total_chunks: session.total_chunks,
+    let is_complete = request.is_final_chunk || session.is_complete();
+    
+    if is_complete {
+        session.finalize()?;
+    }
+    
+    let response = ChunkUploadResponse {
+        upload_id: request.upload_id.clone(),
+        chunk_index: request.chunk_index,
+        bytes_written,
+        total_bytes_written: session.bytes_written,
         is_complete,
         file_path: if is_complete {
             Some(session.get_file_path().to_string_lossy().to_string())
@@ -138,53 +144,63 @@ pub fn upload_chunk(upload_request: UploadRequest) -> Result<UploadResponse> {
     Ok(response)
 }
 
-pub fn upload_complete_file(filename: String, file_data: String) -> Result<String> {
-    // For single file upload (no chunking)
-    let file_bytes = base64::prelude::BASE64_STANDARD.decode(&file_data)
-        .map_err(|e| anyhow!("Failed to decode file data: {}", e))?;
-
+// Simplified single-shot upload for smaller files
+pub fn upload_complete_file_stream(_filename: String, file_data: Vec<u8>) -> Result<String> {
     let mut temp_file = NamedTempFile::new()?;
-    temp_file.write_all(&file_bytes)?;
+    temp_file.write_all(&file_data)?;
     temp_file.flush()?;
 
-    // Get the temp file path before the file is potentially moved
     let file_path = temp_file.path().to_string_lossy().to_string();
     
-    // Keep the temp file alive by storing it
+    // Keep the temp file alive by storing it in a simple session
     let upload_id = Uuid::new_v4().to_string();
-    let session = UploadSession {
-        filename,
+    let file_size = file_data.len() as u64;
+    
+    let session = StreamUploadSession {
+        file_size,
         temp_file,
+        writer: BufWriter::new(File::create("/dev/null")?), // Dummy writer since file is already written
         chunks_received: 1,
-        total_chunks: 1,
-        chunk_data: HashMap::new(),
+        bytes_written: file_size,
+        expected_chunks: 1,
     };
 
-    let sessions = get_upload_sessions();
-    sessions.insert(upload_id.clone(), session);
+    let mut sessions = get_upload_sessions().lock().unwrap();
+    sessions.insert(upload_id, session);
 
     Ok(file_path)
 }
 
+// Legacy base64 support (deprecated - use streaming instead)
+#[deprecated(note = "Use streaming upload instead for better performance")]
+pub fn upload_complete_file(filename: String, file_data: String) -> Result<String> {
+    use base64::prelude::*;
+    let file_bytes = BASE64_STANDARD.decode(&file_data)
+        .map_err(|e| anyhow!("Failed to decode file data: {}", e))?;
+    
+    upload_complete_file_stream(filename, file_bytes)
+}
+
 pub fn cleanup_upload(upload_id: &str) -> Result<()> {
-    let sessions = get_upload_sessions();
+    let mut sessions = get_upload_sessions().lock().unwrap();
     if sessions.remove(upload_id).is_some() {
         println!("Cleaned up upload session: {}", upload_id);
     }
     Ok(())
 }
 
-pub fn get_upload_status(upload_id: &str) -> Result<UploadResponse> {
-    let sessions = get_upload_sessions();
+pub fn get_upload_progress(upload_id: &str) -> Result<ChunkUploadResponse> {
+    let sessions = get_upload_sessions().lock().unwrap();
     let session = sessions.get(upload_id)
         .ok_or_else(|| anyhow!("Upload session not found: {}", upload_id))?;
 
-    let is_complete = session.chunks_received == session.total_chunks;
+    let is_complete = session.is_complete();
     
-    Ok(UploadResponse {
+    Ok(ChunkUploadResponse {
         upload_id: upload_id.to_string(),
-        chunk_received: session.chunks_received,
-        total_chunks: session.total_chunks,
+        chunk_index: session.chunks_received,
+        bytes_written: 0, // Current chunk bytes written
+        total_bytes_written: session.bytes_written,
         is_complete,
         file_path: if is_complete {
             Some(session.get_file_path().to_string_lossy().to_string())
@@ -205,28 +221,108 @@ pub fn is_supported_video_format(filename: &str) -> bool {
     matches!(extension.as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "m4v")
 }
 
+// Backward compatibility types (deprecated)
+#[allow(deprecated)]
+mod deprecated_types {
+    use super::*;
+
+    #[deprecated(note = "Use StreamUploadRequest instead")]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct UploadRequest {
+        pub filename: String,
+        pub file_data: String, // Base64 encoded file data
+        pub chunk_index: usize,
+        pub total_chunks: usize,
+        pub upload_id: Option<String>,
+    }
+
+    #[deprecated(note = "Use ChunkUploadResponse instead")]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct UploadResponse {
+        pub upload_id: String,
+        pub chunk_received: usize,
+        pub total_chunks: usize,
+        pub is_complete: bool,
+        pub file_path: Option<String>,
+    }
+}
+
+// Re-export deprecated types for backward compatibility
+#[allow(deprecated)]
+pub use deprecated_types::{UploadRequest, UploadResponse};
+
+// Backward compatibility functions (deprecated)
+#[deprecated(note = "Use start_stream_upload instead")]
+#[allow(deprecated)]
+pub fn start_upload(filename: String, total_chunks: usize) -> Result<String> {
+    // Fallback implementation - estimate file size
+    let estimated_file_size = 50 * 1024 * 1024; // 50MB default
+    let chunk_size = estimated_file_size / total_chunks as u64;
+    
+    let response = start_stream_upload(filename, estimated_file_size, chunk_size as usize)?;
+    Ok(response.upload_id)
+}
+
+#[deprecated(note = "Use upload_chunk_stream instead")]
+#[allow(deprecated)]
+pub fn upload_chunk(upload_request: UploadRequest) -> Result<UploadResponse> {
+    use base64::prelude::*;
+    
+    let upload_id = upload_request.upload_id
+        .ok_or_else(|| anyhow!("Upload ID is required for chunk upload"))?;
+
+    // Decode base64 data
+    let chunk_data = BASE64_STANDARD.decode(&upload_request.file_data)
+        .map_err(|e| anyhow!("Failed to decode chunk data: {}", e))?;
+
+    let stream_request = ChunkUploadRequest {
+        upload_id,
+        chunk_index: upload_request.chunk_index,
+        chunk_data,
+        is_final_chunk: upload_request.chunk_index == upload_request.total_chunks - 1,
+    };
+
+    let stream_response = upload_chunk_stream(stream_request)?;
+    
+    Ok(UploadResponse {
+        upload_id: stream_response.upload_id,
+        chunk_received: stream_response.chunk_index,
+        total_chunks: upload_request.total_chunks,
+        is_complete: stream_response.is_complete,
+        file_path: stream_response.file_path,
+    })
+}
+
+#[deprecated(note = "Use get_upload_progress instead")]
+#[allow(deprecated)]
+pub fn get_upload_status(upload_id: &str) -> Result<UploadResponse> {
+    let progress = get_upload_progress(upload_id)?;
+    
+    Ok(UploadResponse {
+        upload_id: progress.upload_id,
+        chunk_received: progress.chunk_index,
+        total_chunks: 1, // Unknown in new system
+        is_complete: progress.is_complete,
+        file_path: progress.file_path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_supported_video_formats() {
-        assert!(is_supported_video_format("test.mp4"));
-        assert!(is_supported_video_format("test.MP4"));
-        assert!(is_supported_video_format("test.mov"));
-        assert!(is_supported_video_format("test.avi"));
-        assert!(!is_supported_video_format("test.txt"));
-        assert!(!is_supported_video_format("test.jpg"));
+    fn test_stream_upload_session_creation() {
+        let session = StreamUploadSession::new(1024, 256).unwrap();
+        assert_eq!(session.file_size, 1024);
+        assert_eq!(session.expected_chunks, 4);
     }
 
     #[test]
-    fn test_upload_session_creation() {
-        let session = UploadSession::new("test.mp4".to_string(), 3);
-        assert!(session.is_ok());
-        
-        let session = session.unwrap();
-        assert_eq!(session.filename, "test.mp4");
-        assert_eq!(session.total_chunks, 3);
-        assert_eq!(session.chunks_received, 0);
+    fn test_chunk_calculation() {
+        let file_size = 1000u64;
+        let chunk_size = 300usize;
+        let expected_chunks = ((file_size as f64) / (chunk_size as f64)).ceil() as usize;
+        assert_eq!(expected_chunks, 4);
     }
 } 

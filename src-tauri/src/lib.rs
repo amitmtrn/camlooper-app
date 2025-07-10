@@ -4,9 +4,13 @@ mod video_processor;
 mod video_upload;
 
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
-use video_processor::{VideoInfo, StreamStatus};
-use video_upload::{UploadRequest, UploadResponse};
-use serde::Deserialize;
+use video_processor::{VideoInfo, StreamStatus, PerformanceMetrics};
+
+#[allow(deprecated)]
+use video_upload::{
+    UploadRequest, UploadResponse, // Legacy types
+    StreamUploadResponse, ChunkUploadRequest, ChunkUploadResponse // New streaming types
+};
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -33,11 +37,6 @@ async fn get_virtual_camera_status() -> VirtualCameraStatus {
     virtual_camera::get_virtual_camera_status().await
 }
 
-#[derive(Deserialize)]
-struct FrameData {
-    data: String, // Base64 encoded frame data
-}
-
 #[tauri::command]
 async fn send_frame_to_virtual_camera(frame_data: String) -> Result<(), String> {
     // Decode base64 frame data
@@ -50,18 +49,53 @@ async fn send_frame_to_virtual_camera(frame_data: String) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
-// Video Upload Commands
+// New Streaming Video Upload Commands
+#[tauri::command]
+async fn start_stream_upload(filename: String, file_size: u64, chunk_size: usize) -> Result<StreamUploadResponse, String> {
+    if !video_upload::is_supported_video_format(&filename) {
+        return Err("Unsupported video format".to_string());
+    }
+    
+    video_upload::start_stream_upload(filename, file_size, chunk_size)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn upload_chunk_stream(request: ChunkUploadRequest) -> Result<ChunkUploadResponse, String> {
+    video_upload::upload_chunk_stream(request)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn upload_complete_file_stream(filename: String, file_data: Vec<u8>) -> Result<String, String> {
+    if !video_upload::is_supported_video_format(&filename) {
+        return Err("Unsupported video format".to_string());
+    }
+    
+    video_upload::upload_complete_file_stream(filename, file_data)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_upload_progress(upload_id: String) -> Result<ChunkUploadResponse, String> {
+    video_upload::get_upload_progress(&upload_id)
+        .map_err(|e| e.to_string())
+}
+
+// Legacy Video Upload Commands (deprecated but maintained for backward compatibility)
 #[tauri::command]
 async fn start_video_upload(filename: String, total_chunks: usize) -> Result<String, String> {
     if !video_upload::is_supported_video_format(&filename) {
         return Err("Unsupported video format".to_string());
     }
     
+    #[allow(deprecated)]
     video_upload::start_upload(filename, total_chunks)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[allow(deprecated)]
 async fn upload_video_chunk(upload_request: UploadRequest) -> Result<UploadResponse, String> {
     video_upload::upload_chunk(upload_request)
         .map_err(|e| e.to_string())
@@ -73,11 +107,13 @@ async fn upload_complete_video_file(filename: String, file_data: String) -> Resu
         return Err("Unsupported video format".to_string());
     }
     
+    #[allow(deprecated)]
     video_upload::upload_complete_file(filename, file_data)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[allow(deprecated)]
 async fn get_upload_status(upload_id: String) -> Result<UploadResponse, String> {
     video_upload::get_upload_status(&upload_id)
         .map_err(|e| e.to_string())
@@ -135,16 +171,41 @@ async fn get_video_info() -> Option<VideoInfo> {
     video_processor::get_video_info().await
 }
 
+#[tauri::command]
+async fn get_performance_metrics() -> Result<PerformanceMetrics, String> {
+    video_processor::get_performance_metrics()
+        .await
+        .map_err(|e| e.to_string())
+}
 
+// New efficient streaming workflow command
+#[tauri::command]
+async fn stream_upload_and_load_video(filename: String, file_data: Vec<u8>) -> Result<VideoInfo, String> {
+    if !video_upload::is_supported_video_format(&filename) {
+        return Err("Unsupported video format".to_string());
+    }
+    
+    // Upload the file using streaming (no base64 conversion)
+    let file_path = video_upload::upload_complete_file_stream(filename.clone(), file_data)
+        .map_err(|e| format!("Streaming upload failed: {}", e))?;
+    
+    // Load the video
+    let video_info = video_processor::load_video_file(file_path)
+        .await
+        .map_err(|e| format!("Video loading failed: {}", e))?;
+    
+    Ok(video_info)
+}
 
-// Combined workflow command for uploading and loading a video
+// Combined workflow command for uploading and loading a video (legacy - base64 based)
 #[tauri::command]
 async fn upload_and_load_video(filename: String, file_data: String) -> Result<VideoInfo, String> {
     if !video_upload::is_supported_video_format(&filename) {
         return Err("Unsupported video format".to_string());
     }
     
-    // Upload the file
+    // Upload the file using legacy base64 method
+    #[allow(deprecated)]
     let file_path = video_upload::upload_complete_file(filename.clone(), file_data)
         .map_err(|e| format!("Upload failed: {}", e))?;
     
@@ -168,7 +229,12 @@ pub fn run() {
             stop_virtual_camera,
             get_virtual_camera_status,
             send_frame_to_virtual_camera,
-            // Video Upload
+            // New Streaming Upload Commands
+            start_stream_upload,
+            upload_chunk_stream,
+            upload_complete_file_stream,
+            get_upload_progress,
+            // Legacy Video Upload Commands (deprecated)
             start_video_upload,
             upload_video_chunk,
             upload_complete_video_file,
@@ -182,8 +248,10 @@ pub fn run() {
             get_video_stream_status,
             set_video_loop_settings,
             get_video_info,
-            // Combined workflow
-            upload_and_load_video
+            get_performance_metrics,
+            // Combined workflow commands
+            stream_upload_and_load_video, // New efficient streaming command
+            upload_and_load_video         // Legacy base64 command
         ])
         .setup(|app| {
             // Initialize video processor with app handle for push-based frame streaming

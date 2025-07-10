@@ -51,10 +51,16 @@ interface VideoInfo {
 }
 
 interface VideoFrame {
-  data: string; // Base64 encoded JPEG
+  data: number[]; // Raw JPEG bytes as array
   timestamp: number;
   width: number;
   height: number;
+}
+
+interface FrameBatch {
+  frames: VideoFrame[];
+  sequence_id: number;
+  total_frames: number;
 }
 
 interface StreamStatus {
@@ -63,6 +69,76 @@ interface StreamStatus {
   duration: number;
   loop_count: number;
   current_loop: number;
+  buffer_health: number; // 0.0 to 1.0
+  actual_fps: number;
+  target_fps: number;
+  frames_dropped: number;
+  average_processing_time: number;
+}
+
+interface PerformanceMetrics {
+  frames_processed: number;
+  frames_dropped: number;
+  average_encode_time: number;
+  average_decode_time: number;
+  current_quality: number;
+  buffer_size: number;
+  memory_usage: number;
+}
+
+// Frame buffer for smoother frontend rendering
+class FrontendFrameBuffer {
+  private frames: VideoFrame[] = [];
+  private maxSize: number = 30; // ~1 second at 30fps
+  private currentIndex: number = 0;
+  private lastFrameTime: number = 0;
+  private isPlaying: boolean = false;
+
+  push(frames: VideoFrame[]) {
+    // Add new frames to buffer
+    this.frames.push(...frames);
+    
+    // Remove old frames if buffer is full
+    if (this.frames.length > this.maxSize) {
+      const excess = this.frames.length - this.maxSize;
+      this.frames.splice(0, excess);
+      this.currentIndex = Math.max(0, this.currentIndex - excess);
+    }
+  }
+
+  getNextFrame(): VideoFrame | null {
+    if (this.currentIndex >= this.frames.length) {
+      return null;
+    }
+    
+    const frame = this.frames[this.currentIndex];
+    this.currentIndex++;
+    return frame;
+  }
+
+  clear() {
+    this.frames = [];
+    this.currentIndex = 0;
+  }
+
+  getBufferHealth(): number {
+    const remainingFrames = this.frames.length - this.currentIndex;
+    return Math.min(1.0, remainingFrames / (this.maxSize * 0.5));
+  }
+
+  hasFrames(): boolean {
+    return this.currentIndex < this.frames.length;
+  }
+
+  start() {
+    this.isPlaying = true;
+    this.lastFrameTime = performance.now();
+  }
+
+  stop() {
+    this.isPlaying = false;
+    this.currentIndex = 0;
+  }
 }
 
 function CamLooper() {
@@ -83,7 +159,21 @@ function CamLooper() {
     current_time: 0,
     duration: 0,
     loop_count: 5,
-    current_loop: 0
+    current_loop: 0,
+    buffer_health: 0.0,
+    actual_fps: 0.0,
+    target_fps: 30.0,
+    frames_dropped: 0,
+    average_processing_time: 0.0
+  });
+  const [performanceMetrics, setPerformanceMetrics] = useState<PerformanceMetrics>({
+    frames_processed: 0,
+    frames_dropped: 0,
+    average_encode_time: 0.0,
+    average_decode_time: 0.0,
+    current_quality: 85,
+    buffer_size: 0,
+    memory_usage: 0
   });
   const [isBuffering, setIsBuffering] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -98,23 +188,13 @@ function CamLooper() {
     frame_count: 0
   });
   const [isVirtualCamLoading, setIsVirtualCamLoading] = useState(false);
+  const [showPerformanceMetrics, setShowPerformanceMetrics] = useState(false);
+  
+  // Frontend frame buffer
+  const frameBuffer = React.useRef(new FrontendFrameBuffer());
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const frameIntervalRef = React.useRef<number | null>(null);
-
-  // Helper function to convert file to base64
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        const result = reader.result as string;
-        // Remove the data URL prefix (e.g., "data:video/mp4;base64,")
-        const base64 = result.split(',')[1];
-        resolve(base64);
-      };
-      reader.onerror = reject;
-    });
-  };
+  const renderIntervalRef = React.useRef<number | null>(null);
+  const batchListenerRef = React.useRef<(() => void) | null>(null);
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -124,13 +204,11 @@ function CamLooper() {
       setUploadProgress(0);
       
       try {
-        // Convert file to base64
-        const base64Data = await fileToBase64(file);
+        // Use efficient streaming upload (no base64 conversion)
+        const { uploadVideoFileStream } = await import('./lib/stream-upload');
         
-        // Upload and load video in backend
-        const videoInfo = await invoke<VideoInfo>('upload_and_load_video', {
-          filename: file.name,
-          fileData: base64Data
+        const videoInfo = await uploadVideoFileStream(file, (progress) => {
+          setUploadProgress(progress.progress);
         });
         
         setVideoInfo(videoInfo);
@@ -201,9 +279,9 @@ function CamLooper() {
       if (isPlaying) {
         await invoke('pause_video_stream');
         setIsPlaying(false);
-        if (frameIntervalRef.current) {
-          clearInterval(frameIntervalRef.current);
-          frameIntervalRef.current = null;
+        if (renderIntervalRef.current) {
+          clearInterval(renderIntervalRef.current);
+          renderIntervalRef.current = null;
         }
       } else {
         await invoke('start_video_stream');
@@ -222,9 +300,9 @@ function CamLooper() {
     try {
       await invoke('stop_video_stream');
       setIsPlaying(false);
-      if (frameIntervalRef.current) {
-        clearInterval(frameIntervalRef.current);
-        frameIntervalRef.current = null;
+      if (renderIntervalRef.current) {
+        clearInterval(renderIntervalRef.current);
+        renderIntervalRef.current = null;
       }
       setCurrentFrame(null);
     } catch (error) {
@@ -245,30 +323,52 @@ function CamLooper() {
     }
   };
 
-  const startFrameReceiving = async () => {
-    // Stop any existing polling
-    if (frameIntervalRef.current) {
-      clearInterval(frameIntervalRef.current);
-      frameIntervalRef.current = null;
-    }
-    
-    // Listen for push-based video frames
-    try {
-      await listen<VideoFrame>('video-frame', (event) => {
-        const frame = event.payload;
-        setCurrentFrame(frame);
-        
-        // Send frame to virtual camera if active
-        if (isVirtualCamActive) {
-          invoke('send_frame_to_virtual_camera', { frameData: frame.data }).catch(
-            error => console.error('Error sending frame to virtual camera:', error)
-          );
+      const startFrameReceiving = async () => {
+      // Stop any existing listener
+      if (batchListenerRef.current) {
+        batchListenerRef.current();
+        batchListenerRef.current = null;
+      }
+      
+      // Start frame rendering loop
+      if (renderIntervalRef.current) {
+        clearInterval(renderIntervalRef.current);
+      }
+      
+      frameBuffer.current.start();
+      
+      // Start smooth rendering loop
+      renderIntervalRef.current = setInterval(() => {
+        const nextFrame = frameBuffer.current.getNextFrame();
+        if (nextFrame) {
+          setCurrentFrame(nextFrame);
+          setIsBuffering(false);
+        } else if (frameBuffer.current.hasFrames()) {
+          // Buffer has frames but we're at the end, might need to buffer more
+          setIsBuffering(true);
         }
-      });
-    } catch (error) {
-      console.error('Error setting up video frame listener:', error);
-    }
-  };
+      }, 1000 / 30) as unknown as number; // 30 FPS rendering
+      
+      // Listen for push-based video frame batches
+      try {
+        const unlisten = await listen<FrameBatch>('video-frame-batch', (event) => {
+          const batch = event.payload;
+          frameBuffer.current.push(batch.frames);
+          
+          // Send first frame to virtual camera if active
+          if (isVirtualCamActive && batch.frames.length > 0) {
+            const base64Data = btoa(String.fromCharCode(...batch.frames[0].data));
+            invoke('send_frame_to_virtual_camera', { frameData: base64Data }).catch(
+              error => console.error('Error sending frame to virtual camera:', error)
+            );
+          }
+        });
+        
+        batchListenerRef.current = unlisten;
+      } catch (error) {
+        console.error('Error setting up video frame listener:', error);
+      }
+    };
 
   // Update stream status periodically
   useEffect(() => {
@@ -279,12 +379,19 @@ function CamLooper() {
         const status = await invoke<StreamStatus>('get_video_stream_status');
         setStreamStatus(status);
         
+        // Update performance metrics periodically
+        if (showPerformanceMetrics) {
+          const metrics = await invoke<PerformanceMetrics>('get_performance_metrics');
+          setPerformanceMetrics(metrics);
+        }
+        
         if (!status.is_playing && isPlaying) {
           setIsPlaying(false);
-          if (frameIntervalRef.current) {
-            clearInterval(frameIntervalRef.current);
-            frameIntervalRef.current = null;
+          if (renderIntervalRef.current) {
+            clearInterval(renderIntervalRef.current);
+            renderIntervalRef.current = null;
           }
+          frameBuffer.current.stop();
           
           // Check if looping is complete
           if (status.current_loop >= status.loop_count && status.loop_count !== 10) {
@@ -298,7 +405,7 @@ function CamLooper() {
     }, 200); // Reduce polling frequency from 100ms to 200ms
 
     return () => clearInterval(statusInterval);
-  }, [videoInfo, isPlaying]);
+  }, [videoInfo, isPlaying, showPerformanceMetrics]);
 
   // Update loop settings when changed
   useEffect(() => {
@@ -370,14 +477,19 @@ function CamLooper() {
     updateVirtualCameraStatus();
   }, []);
 
-  // Cleanup on unmount
-  React.useEffect(() => {
-    return () => {
-      if (frameIntervalRef.current) {
-        clearInterval(frameIntervalRef.current);
-      }
-    };
-  }, []);
+      // Cleanup on unmount
+    React.useEffect(() => {
+      const currentFrameBuffer = frameBuffer.current;
+      return () => {
+        if (renderIntervalRef.current) {
+          clearInterval(renderIntervalRef.current);
+        }
+        if (batchListenerRef.current) {
+          batchListenerRef.current();
+        }
+        currentFrameBuffer.stop();
+      };
+    }, []);
 
   return (
     <div className="min-h-screen bg-background p-6">
@@ -389,7 +501,7 @@ function CamLooper() {
             <Card className="aspect-video bg-black/50 border-border relative overflow-hidden">
               {currentFrame ? (
                 <img
-                  src={`data:image/jpeg;base64,${currentFrame.data}`}
+                  src={`data:image/jpeg;base64,${btoa(String.fromCharCode(...currentFrame.data))}`}
                   alt="Video frame"
                   className="w-full h-full object-cover"
                 />
@@ -500,6 +612,43 @@ function CamLooper() {
                 </div>
               )}
 
+              {/* Buffer Health Indicator */}
+              {isPlaying && (
+                <div className="absolute top-16 right-4">
+                  <div className="bg-black/50 rounded-lg p-2 text-xs text-white">
+                    <div className="flex items-center space-x-2">
+                      <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                      <span>Buffer: {Math.round(streamStatus.buffer_health * 100)}%</span>
+                    </div>
+                    <div className="flex items-center space-x-2 mt-1">
+                      <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                      <span>FPS: {streamStatus.actual_fps.toFixed(1)}</span>
+                    </div>
+                    {streamStatus.frames_dropped > 0 && (
+                      <div className="flex items-center space-x-2 mt-1">
+                        <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
+                        <span>Dropped: {streamStatus.frames_dropped}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {/* Performance Metrics Toggle */}
+              {videoInfo && (
+                <div className="absolute bottom-16 right-4">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowPerformanceMetrics(!showPerformanceMetrics)}
+                    className="bg-black/50 border-white/20 text-white hover:bg-black/70"
+                  >
+                    <Settings className="h-3 w-3 mr-1" />
+                    Metrics
+                  </Button>
+                </div>
+              )}
+
               {/* Upload Progress */}
               {isUploading && (
                 <div className="absolute top-4 left-4">
@@ -509,6 +658,68 @@ function CamLooper() {
                 </div>
               )}
             </Card>
+
+            {/* Performance Metrics Panel */}
+            {showPerformanceMetrics && (
+              <Card className="mt-4 p-4 bg-black/5 border-gray-700">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold text-sm">Performance Metrics</h3>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setShowPerformanceMetrics(false)}
+                    >
+                      ×
+                    </Button>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4 text-xs">
+                    <div>
+                      <span className="text-muted-foreground">Frames Processed:</span>
+                      <span className="ml-2 font-mono">{performanceMetrics.frames_processed}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Frames Dropped:</span>
+                      <span className="ml-2 font-mono">{performanceMetrics.frames_dropped}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Encode Time:</span>
+                      <span className="ml-2 font-mono">{performanceMetrics.average_encode_time.toFixed(2)}ms</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Current Quality:</span>
+                      <span className="ml-2 font-mono">{performanceMetrics.current_quality}%</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Buffer Size:</span>
+                      <span className="ml-2 font-mono">{performanceMetrics.buffer_size} frames</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Buffer Health:</span>
+                      <span className="ml-2 font-mono">{Math.round(streamStatus.buffer_health * 100)}%</span>
+                    </div>
+                  </div>
+                  
+                  {/* Buffer Health Bar */}
+                  <div className="mt-3">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span>Buffer Health</span>
+                      <span>{Math.round(streamStatus.buffer_health * 100)}%</span>
+                    </div>
+                    <div className="w-full bg-gray-700 rounded-full h-2">
+                      <div 
+                        className={`h-2 rounded-full transition-all ${
+                          streamStatus.buffer_health > 0.7 ? 'bg-green-500' : 
+                          streamStatus.buffer_health > 0.3 ? 'bg-yellow-500' : 'bg-red-500'
+                        }`}
+                        style={{ width: `${Math.max(0, Math.min(100, streamStatus.buffer_health * 100))}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
 
             {/* Hidden canvas for frame processing */}
             <canvas
