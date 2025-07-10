@@ -1,5 +1,5 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-mod virtual_camera;
+pub mod virtual_camera;
 mod video_processor;
 mod video_upload;
 
@@ -45,6 +45,13 @@ async fn send_frame_to_virtual_camera(frame_data: String) -> Result<(), String> 
         .map_err(|e| format!("Failed to decode frame data: {}", e))?;
     
     virtual_camera::send_frame_to_virtual_camera(decoded_data)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_video_devices() -> Result<Vec<String>, String> {
+    virtual_camera::list_video_devices()
         .await
         .map_err(|e| e.to_string())
 }
@@ -229,6 +236,7 @@ pub fn run() {
             stop_virtual_camera,
             get_virtual_camera_status,
             send_frame_to_virtual_camera,
+            list_video_devices,
             // New Streaming Upload Commands
             start_stream_upload,
             upload_chunk_stream,
