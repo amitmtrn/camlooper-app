@@ -38,24 +38,56 @@ interface VirtualCameraConfig {
   camera_name: string;
 }
 
+// Types for video processing
+interface VideoInfo {
+  id: string;
+  filename: string;
+  duration: number;
+  width: number;
+  height: number;
+  fps: number;
+  format: string;
+}
+
+interface VideoFrame {
+  data: string; // Base64 encoded JPEG
+  timestamp: number;
+  width: number;
+  height: number;
+}
+
+interface StreamStatus {
+  is_playing: boolean;
+  current_time: number;
+  duration: number;
+  loop_count: number;
+  current_loop: number;
+}
+
 function CamLooper() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVirtualCamActive, setIsVirtualCamActive] = useState(false);
   const [loopCount, setLoopCount] = useState([5]);
   const [selectedVideo, setSelectedVideo] = useState<File | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
+  const [currentFrame, setCurrentFrame] = useState<VideoFrame | null>(null);
   const [videoMetadata, setVideoMetadata] = useState({
     name: "No Video Selected",
     duration: "0:00",
     dimensions: "",
     fps: ""
   });
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>({
+    is_playing: false,
+    current_time: 0,
+    duration: 0,
+    loop_count: 5,
+    current_loop: 0
+  });
   const [isBuffering, setIsBuffering] = useState(false);
-  const [isMuted, setIsMuted] = useState(true);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [autoStart, setAutoStart] = useState(true);
-  const [currentLoopCount, setCurrentLoopCount] = useState(0);
   const [isLoopingComplete, setIsLoopingComplete] = useState(false);
   const [virtualCameraStatus, setVirtualCameraStatus] = useState<VirtualCameraStatus>({
     is_active: false,
@@ -65,60 +97,74 @@ function CamLooper() {
     frame_count: 0
   });
   const [isVirtualCamLoading, setIsVirtualCamLoading] = useState(false);
-  const videoRef = React.useRef<HTMLVideoElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const frameIntervalRef = React.useRef<number | null>(null);
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+  // Helper function to convert file to base64
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const result = reader.result as string;
+        // Remove the data URL prefix (e.g., "data:video/mp4;base64,")
+        const base64 = result.split(',')[1];
+        resolve(base64);
+      };
+      reader.onerror = reject;
+    });
+  };
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file && file.type.startsWith('video/')) {
       setSelectedVideo(file);
+      setIsUploading(true);
+      setUploadProgress(0);
       
-      // Create new video URL
-      const url = URL.createObjectURL(file);
-      setVideoUrl(url);
-      
-      // Reset playback state
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setIsBuffering(false);
-      setIsMuted(true);
-      setCurrentLoopCount(0);
-      setIsLoopingComplete(false);
-      // Note: Keep autoStart setting as user preference
-      
-      // Create a separate video element to extract metadata
-      const metadataVideo = document.createElement('video');
-      metadataVideo.preload = 'metadata';
-      
-      // Create a separate blob URL for metadata extraction
-      const metadataUrl = URL.createObjectURL(file);
-      
-      metadataVideo.onloadedmetadata = () => {
-        const duration = metadataVideo.duration;
-        const minutes = Math.floor(duration / 60);
-        const seconds = Math.floor(duration % 60);
+      try {
+        // Convert file to base64
+        const base64Data = await fileToBase64(file);
+        
+        // Upload and load video in backend
+        const videoInfo = await invoke<VideoInfo>('upload_and_load_video', {
+          filename: file.name,
+          fileData: base64Data
+        });
+        
+        setVideoInfo(videoInfo);
+        
+        // Update metadata display
+        const minutes = Math.floor(videoInfo.duration / 60);
+        const seconds = Math.floor(videoInfo.duration % 60);
         const formattedDuration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
         
         setVideoMetadata({
-          name: file.name,
+          name: videoInfo.filename,
           duration: formattedDuration,
-          dimensions: `${metadataVideo.videoWidth}x${metadataVideo.videoHeight}`,
-          fps: "30fps" // This is harder to detect, so we'll keep a default
+          dimensions: `${videoInfo.width}x${videoInfo.height}`,
+          fps: `${Math.round(videoInfo.fps)}fps`
         });
         
-        setDuration(metadataVideo.duration);
-        setCurrentTime(0);
-        // Clean up the metadata video URL
-        URL.revokeObjectURL(metadataUrl);
-      };
-      
-      metadataVideo.onerror = () => {
-        console.error('Error loading video metadata for:', file.name);
-        // Clean up the metadata video URL
-        URL.revokeObjectURL(metadataUrl);
-      };
-      
-      metadataVideo.src = metadataUrl;
+        // Reset state
+        setIsPlaying(false);
+        setIsBuffering(false);
+        setIsLoopingComplete(false);
+        
+        // Auto start if enabled
+        if (autoStart) {
+          handlePlayPause();
+        }
+        
+      } catch (error) {
+        console.error('Error uploading video:', error);
+        // Reset on error
+        setSelectedVideo(null);
+        setVideoInfo(null);
+      } finally {
+        setIsUploading(false);
+        setUploadProgress(100);
+      }
     }
   };
 
@@ -146,16 +192,22 @@ function CamLooper() {
   };
 
   const handlePlayPause = async () => {
-    if (!videoRef.current || !videoUrl) {
+    if (!videoInfo) {
       return;
     }
 
     try {
       if (isPlaying) {
-        setAutoStart(false);
-        videoRef.current.pause();
+        await invoke('pause_video_stream');
+        setIsPlaying(false);
+        if (frameIntervalRef.current) {
+          clearInterval(frameIntervalRef.current);
+          frameIntervalRef.current = null;
+        }
       } else {
-        await videoRef.current.play();
+        await invoke('start_video_stream');
+        setIsPlaying(true);
+        startFrameReceiving();
       }
     } catch (error) {
       console.error('Error with video playback:', error);
@@ -163,46 +215,95 @@ function CamLooper() {
     }
   };
 
-  const handleStop = () => {
-    if (videoRef.current && videoUrl) {
-      setAutoStart(false);
-      videoRef.current.pause();
-      videoRef.current.currentTime = 0;
-    }
-    setIsPlaying(false);
-    setCurrentLoopCount(0);
-    setIsLoopingComplete(false);
-  };
-
-  const handleRestart = () => {
-    if (videoRef.current && videoUrl) {
-      videoRef.current.currentTime = 0;
-      setCurrentLoopCount(0);
-      setIsLoopingComplete(false);
-      if (isPlaying) {
-        videoRef.current.play();
+  const handleStop = async () => {
+    if (!videoInfo) return;
+    
+    try {
+      await invoke('stop_video_stream');
+      setIsPlaying(false);
+      if (frameIntervalRef.current) {
+        clearInterval(frameIntervalRef.current);
+        frameIntervalRef.current = null;
       }
+      setCurrentFrame(null);
+    } catch (error) {
+      console.error('Error stopping video:', error);
     }
   };
 
-  const handleSeek = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!videoRef.current || duration <= 0) return;
+  const handleRestart = async () => {
+    if (!videoInfo) return;
     
-    const rect = event.currentTarget.getBoundingClientRect();
-    const clickX = event.clientX - rect.left;
-    const seekTime = Math.max(0, Math.min(duration, (clickX / rect.width) * duration));
-    
-    // Set buffering state during seek
-    setIsBuffering(true);
-    
-    // Use requestAnimationFrame for smooth seeking
-    requestAnimationFrame(() => {
-      setCurrentTime(seekTime);
-      if (videoRef.current) {
-        videoRef.current.currentTime = seekTime;
-      }
-    });
+    try {
+      await invoke('stop_video_stream');
+      await invoke('start_video_stream');
+      setIsPlaying(true);
+      startFrameReceiving();
+    } catch (error) {
+      console.error('Error restarting video:', error);
+    }
   };
+
+  const startFrameReceiving = () => {
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+    }
+    
+    frameIntervalRef.current = window.setInterval(async () => {
+      try {
+        const frame = await invoke<VideoFrame | null>('get_next_video_frame');
+        if (frame) {
+          setCurrentFrame(frame);
+          // Send frame to virtual camera if active
+          if (isVirtualCamActive) {
+            await invoke('send_frame_to_virtual_camera', { frameData: frame.data });
+          }
+        }
+      } catch (error) {
+        console.error('Error receiving frame:', error);
+      }
+    }, 1000 / 25); // 25 FPS - slightly lower for better performance
+  };
+
+  // Update stream status periodically
+  useEffect(() => {
+    if (!videoInfo) return;
+
+    const statusInterval = setInterval(async () => {
+      try {
+        const status = await invoke<StreamStatus>('get_video_stream_status');
+        setStreamStatus(status);
+        
+        if (!status.is_playing && isPlaying) {
+          setIsPlaying(false);
+          if (frameIntervalRef.current) {
+            clearInterval(frameIntervalRef.current);
+            frameIntervalRef.current = null;
+          }
+          
+          // Check if looping is complete
+          if (status.current_loop >= status.loop_count && status.loop_count !== 10) {
+            setIsLoopingComplete(true);
+            setTimeout(() => setIsLoopingComplete(false), 3000);
+          }
+        }
+      } catch (error) {
+        console.error('Error getting stream status:', error);
+      }
+    }, 200); // Reduce polling frequency from 100ms to 200ms
+
+    return () => clearInterval(statusInterval);
+  }, [videoInfo, isPlaying]);
+
+  // Update loop settings when changed
+  useEffect(() => {
+    if (videoInfo) {
+      invoke('set_video_loop_settings', {
+        loopCount: loopCount[0],
+        autoStart
+      }).catch(console.error);
+    }
+  }, [loopCount, autoStart, videoInfo]);
 
   // Virtual camera functions
   const updateVirtualCameraStatus = async () => {
@@ -259,223 +360,19 @@ function CamLooper() {
     }
   };
 
-  const captureVideoFrame = () => {
-    if (!videoRef.current || !canvasRef.current || !isVirtualCamActive) return;
-    
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    
-    if (!ctx) return;
-    
-    // Set canvas size to match video
-    canvas.width = video.videoWidth || 1920;
-    canvas.height = video.videoHeight || 1080;
-    
-    // Draw video frame to canvas
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    // Convert canvas to base64
-    const dataURL = canvas.toDataURL('image/jpeg', 0.8);
-    const base64Data = dataURL.split(',')[1];
-    
-    // Send frame to virtual camera
-    invoke('send_frame_to_virtual_camera', { frameData: base64Data })
-      .catch(error => {
-        console.error('Failed to send frame to virtual camera:', error);
-      });
-  };
-
-  // Keep video muted and optimized
-  React.useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.volume = 0;
-      videoRef.current.muted = true;
-      // Performance optimizations
-      videoRef.current.preload = 'auto';
-      videoRef.current.playbackRate = 1.0;
-    }
-  }, [videoUrl]);
-
-  // Handle autoStart toggle - start video when enabled
-  React.useEffect(() => {
-    if (autoStart && videoRef.current && videoUrl && !isPlaying) {
-      const video = videoRef.current;
-      if (video.readyState >= 2) {
-        video.play().catch((error) => {
-          console.log('Auto-play prevented:', error);
-        });
-      }
-    }
-  }, [autoStart, videoUrl, isPlaying]);
-
-  // Add event listeners to video element
-  React.useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    // Throttle time updates to improve performance
-    let timeUpdateThrottle: number | null = null;
-    const handleTimeUpdate = () => {
-      if (timeUpdateThrottle) return;
-      
-      timeUpdateThrottle = requestAnimationFrame(() => {
-        setCurrentTime(video.currentTime);
-        // Clear buffering if video is playing smoothly
-        if (video.readyState >= 3 && isBuffering) {
-          setIsBuffering(false);
-        }
-        timeUpdateThrottle = null;
-      });
-    };
-
-    const handleLoadedMetadata = () => {
-      setDuration(video.duration);
-      setCurrentTime(0);
-      setIsBuffering(false);
-      
-      // Auto start video if enabled
-      if (autoStart) {
-        video.play().catch((error) => {
-          console.log('Auto-play prevented:', error);
-        });
-      }
-    };
-
-    const handleEnded = () => {
-      const maxLoops = loopCount[0] === 10 ? Infinity : loopCount[0];
-      const newLoopCount = currentLoopCount + 1;
-      
-      if (newLoopCount < maxLoops) {
-        // Continue looping
-        setCurrentLoopCount(newLoopCount);
-        setIsLoopingComplete(false);
-        if (videoRef.current) {
-          videoRef.current.currentTime = 0;
-          videoRef.current.play().catch(console.error);
-        }
-      } else {
-        // Stop looping - reached max count
-        setIsPlaying(false);
-        setCurrentLoopCount(0);
-        setIsLoopingComplete(true);
-        
-        // Auto-hide the complete message after 3 seconds
-        setTimeout(() => setIsLoopingComplete(false), 3000);
-      }
-    };
-
-    const handlePlay = () => {
-      setIsPlaying(true);
-      setIsBuffering(false);
-    };
-
-    const handlePause = () => {
-      setIsPlaying(false);
-    };
-
-    const handleWaiting = () => {
-      setIsBuffering(true);
-    };
-
-    const handleCanPlay = () => {
-      setIsBuffering(false);
-    };
-
-    const handleCanPlayThrough = () => {
-      setIsBuffering(false);
-    };
-
-    const handleStalled = () => {
-      setIsBuffering(true);
-    };
-
-    const handleError = (e: Event) => {
-      const videoElement = e.target as HTMLVideoElement;
-      if (videoElement && videoElement.error) {
-        console.error('Video error:', videoElement.error.message, 'Code:', videoElement.error.code);
-      }
-      setIsPlaying(false);
-      setIsBuffering(false);
-    };
-
-    const handleSeeked = () => {
-      setCurrentTime(video.currentTime);
-      // Clear buffering when seek completes
-      setIsBuffering(false);
-    };
-
-    const handleDurationChange = () => {
-      setDuration(video.duration);
-    };
-
-    video.addEventListener('timeupdate', handleTimeUpdate);
-    video.addEventListener('loadedmetadata', handleLoadedMetadata);
-    video.addEventListener('ended', handleEnded);
-    video.addEventListener('play', handlePlay);
-    video.addEventListener('pause', handlePause);
-    video.addEventListener('waiting', handleWaiting);
-    video.addEventListener('canplay', handleCanPlay);
-    video.addEventListener('canplaythrough', handleCanPlayThrough);
-    video.addEventListener('stalled', handleStalled);
-    video.addEventListener('error', handleError);
-    video.addEventListener('seeked', handleSeeked);
-    video.addEventListener('durationchange', handleDurationChange);
-
-    return () => {
-      // Clean up throttled animation frame
-      if (timeUpdateThrottle) {
-        cancelAnimationFrame(timeUpdateThrottle);
-      }
-      
-      video.removeEventListener('timeupdate', handleTimeUpdate);
-      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      video.removeEventListener('ended', handleEnded);
-      video.removeEventListener('play', handlePlay);
-      video.removeEventListener('pause', handlePause);
-      video.removeEventListener('waiting', handleWaiting);
-      video.removeEventListener('canplay', handleCanPlay);
-      video.removeEventListener('canplaythrough', handleCanPlayThrough);
-      video.removeEventListener('stalled', handleStalled);
-      video.removeEventListener('error', handleError);
-      video.removeEventListener('seeked', handleSeeked);
-      video.removeEventListener('durationchange', handleDurationChange);
-    };
-  }, [videoUrl]);
-
-  // Keep track of previous URL for cleanup
-  const previousUrlRef = React.useRef<string | null>(null);
-
-  React.useEffect(() => {
-    // Clean up previous URL when a new one is set
-    if (previousUrlRef.current && previousUrlRef.current !== videoUrl) {
-      URL.revokeObjectURL(previousUrlRef.current);
-    }
-    previousUrlRef.current = videoUrl;
-
-    // Cleanup on unmount
-    return () => {
-      if (videoUrl) {
-        URL.revokeObjectURL(videoUrl);
-      }
-    };
-  }, [videoUrl]);
-
   // Initialize virtual camera status
   React.useEffect(() => {
     updateVirtualCameraStatus();
   }, []);
 
-  // Capture video frames for virtual camera
+  // Cleanup on unmount
   React.useEffect(() => {
-    if (!isVirtualCamActive || !isPlaying || !videoRef.current) return;
-
-    const intervalId = setInterval(() => {
-      captureVideoFrame();
-    }, 1000 / 30); // 30 FPS
-
-    return () => clearInterval(intervalId);
-  }, [isVirtualCamActive, isPlaying, videoUrl]);
+    return () => {
+      if (frameIntervalRef.current) {
+        clearInterval(frameIntervalRef.current);
+      }
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-background p-6">
@@ -485,17 +382,26 @@ function CamLooper() {
           <div className="lg:col-span-2 space-y-4">
             {/* Video Preview */}
             <Card className="aspect-video bg-black/50 border-border relative overflow-hidden">
-              {videoUrl ? (
-                <video
-                  ref={videoRef}
+              {currentFrame ? (
+                <img
+                  src={`data:image/jpeg;base64,${currentFrame.data}`}
+                  alt="Video frame"
                   className="w-full h-full object-cover"
-                  src={videoUrl}
-                  controls={false}
-                  muted={true}
-                  preload="auto"
-                  playsInline
-
                 />
+              ) : videoInfo ? (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="text-center space-y-4">
+                    <div className="w-24 h-24 bg-primary/20 rounded-full flex items-center justify-center mx-auto">
+                      <Video className="h-12 w-12 text-primary" />
+                    </div>
+                    <div>
+                      <p className="text-lg font-medium">{videoMetadata.name}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {isBuffering ? "Loading..." : "Ready to play"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="text-center space-y-4">
@@ -523,7 +429,7 @@ function CamLooper() {
                       variant="glassmorphism"
                       size="icon"
                       onClick={handlePlayPause}
-                      disabled={isBuffering}
+                      disabled={isBuffering || !videoInfo}
                     >
                       {isBuffering ? (
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -533,51 +439,35 @@ function CamLooper() {
                         <Play className="h-4 w-4" />
                       )}
                     </Button>
-                    <Button variant="glassmorphism" size="icon" onClick={handleStop}>
+                    <Button variant="glassmorphism" size="icon" onClick={handleStop} disabled={!videoInfo}>
                       <Square className="h-4 w-4" />
                     </Button>
-                    <Button variant="glassmorphism" size="icon" onClick={handleRestart}>
+                    <Button variant="glassmorphism" size="icon" onClick={handleRestart} disabled={!videoInfo}>
                       <RotateCcw className="h-4 w-4" />
                     </Button>
                   </div>
-                  
-
-
                 </div>
                 
                 {/* Progress Bar */}
                 <div className="mt-2">
-                  <div 
-                    className={`w-full bg-white/20 rounded-full h-2 cursor-pointer hover:h-3 transition-all relative ${isBuffering ? 'opacity-50' : ''}`}
-                    onClick={handleSeek}
-                    title={`Click to seek - ${duration > 0 ? `${Math.floor(currentTime / 60)}:${Math.floor(currentTime % 60).toString().padStart(2, '0')} / ${Math.floor(duration / 60)}:${Math.floor(duration % 60).toString().padStart(2, '0')}` : 'No video loaded'}`}
-                  >
+                  <div className={`w-full bg-white/20 rounded-full h-2 transition-all relative ${isBuffering ? 'opacity-50' : ''}`}>
                     <div 
-                      className={`bg-primary h-2 rounded-full hover:h-3 transition-all ${isBuffering ? 'animate-pulse' : ''}`}
+                      className={`bg-primary h-2 rounded-full transition-all ${isBuffering ? 'animate-pulse' : ''}`}
                       style={{ 
-                        width: duration > 0 ? `${Math.max(0, Math.min(100, (currentTime / duration) * 100))}%` : '0%' 
+                        width: streamStatus.duration > 0 ? `${Math.max(0, Math.min(100, (streamStatus.current_time / streamStatus.duration) * 100))}%` : '0%' 
                       }} 
                     />
-                    {/* Seek handle */}
-                    {duration > 0 && (
-                      <div 
-                        className={`absolute top-0 w-3 h-3 bg-white rounded-full shadow-md transform -translate-y-0.5 -translate-x-1.5 opacity-0 hover:opacity-100 transition-opacity ${isBuffering ? 'animate-pulse' : ''}`}
-                        style={{ 
-                          left: `${Math.max(0, Math.min(100, (currentTime / duration) * 100))}%` 
-                        }}
-                      />
-                    )}
                   </div>
                   <div className="flex justify-between text-xs text-white/80 mt-1">
                     <span>
-                      {duration > 0 
-                        ? `${Math.floor(currentTime / 60)}:${Math.floor(currentTime % 60).toString().padStart(2, '0')}`
+                      {streamStatus.duration > 0 
+                        ? `${Math.floor(streamStatus.current_time / 60)}:${Math.floor(streamStatus.current_time % 60).toString().padStart(2, '0')}`
                         : '0:00'
                       }
                     </span>
                     <span>
-                      {duration > 0 
-                        ? `${Math.floor(duration / 60)}:${Math.floor(duration % 60).toString().padStart(2, '0')}`
+                      {streamStatus.duration > 0 
+                        ? `${Math.floor(streamStatus.duration / 60)}:${Math.floor(streamStatus.duration % 60).toString().padStart(2, '0')}`
                         : '0:00'
                       }
                     </span>
@@ -590,7 +480,7 @@ function CamLooper() {
                 <div className="absolute top-4 right-4">
                   <Badge variant="secondary" className="bg-primary/20 text-primary border-primary/40">
                     <RotateCcw className="h-3 w-3 mr-1" />
-                    Loop {currentLoopCount + 1}/{loopCount[0] === 10 ? '∞' : loopCount[0]}
+                    Loop {streamStatus.current_loop + 1}/{streamStatus.loop_count === 10 ? '∞' : streamStatus.loop_count}
                   </Badge>
                 </div>
               )}
@@ -604,9 +494,18 @@ function CamLooper() {
                   </Badge>
                 </div>
               )}
+
+              {/* Upload Progress */}
+              {isUploading && (
+                <div className="absolute top-4 left-4">
+                  <Badge variant="secondary" className="bg-blue-500/20 text-blue-400 border-blue-500/40">
+                    Uploading... {uploadProgress}%
+                  </Badge>
+                </div>
+              )}
             </Card>
 
-            {/* Hidden canvas for video frame capture */}
+            {/* Hidden canvas for frame processing */}
             <canvas
               ref={canvasRef}
               style={{ display: 'none' }}
@@ -625,11 +524,11 @@ function CamLooper() {
                 <Upload className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
                 <p className="text-lg font-medium mb-1">Choose Video File</p>
                 <p className="text-sm text-muted-foreground mb-4">
-                  Supports MP4, MOV, AVI, WebM
+                  Supports MP4, MOV, AVI, WebM, MKV, FLV, WMV, M4V
                 </p>
-                <Button variant="outline" onClick={triggerFileInput}>
+                <Button variant="outline" onClick={triggerFileInput} disabled={isUploading}>
                   <Upload className="h-4 w-4 mr-2" />
-                  Choose Files
+                  {isUploading ? 'Uploading...' : 'Choose Files'}
                 </Button>
                 <input
                   id="video-file-input"
@@ -718,6 +617,38 @@ function CamLooper() {
                 </div>
               </div>
             </Card>
+
+            {/* Video Info */}
+            {videoInfo && (
+              <Card className="p-4">
+                <div className="space-y-4">
+                  <h3 className="font-semibold">Video Information</h3>
+                  
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Name:</span>
+                      <span>{videoInfo.filename}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Duration:</span>
+                      <span>{Math.floor(videoInfo.duration / 60)}:{Math.floor(videoInfo.duration % 60).toString().padStart(2, '0')}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Resolution:</span>
+                      <span>{videoInfo.width}x{videoInfo.height}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">FPS:</span>
+                      <span>{Math.round(videoInfo.fps)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Format:</span>
+                      <span>{videoInfo.format}</span>
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
 
             {/* App Compatibility */}
             <Card className="p-4">
