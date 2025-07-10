@@ -89,7 +89,7 @@ interface PerformanceMetrics {
 // Frame buffer for smoother frontend rendering
 class FrontendFrameBuffer {
   private frames: VideoFrame[] = [];
-  private maxSize: number = 30; // ~1 second at 30fps
+  private maxSize: number = 60; // ~2 seconds at 30fps for better buffering
   private currentIndex: number = 0;
   private lastFrameTime: number = 0;
   private isPlaying: boolean = false;
@@ -337,7 +337,7 @@ function CamLooper() {
       
       frameBuffer.current.start();
       
-      // Start smooth rendering loop
+      // Start smooth rendering loop - optimized for better performance
       renderIntervalRef.current = setInterval(() => {
         const nextFrame = frameBuffer.current.getNextFrame();
         if (nextFrame) {
@@ -402,7 +402,7 @@ function CamLooper() {
       } catch (error) {
         console.error('Error getting stream status:', error);
       }
-    }, 200); // Reduce polling frequency from 100ms to 200ms
+    }, 100); // Optimized polling frequency for better performance tracking
 
     return () => clearInterval(statusInterval);
   }, [videoInfo, isPlaying, showPerformanceMetrics]);

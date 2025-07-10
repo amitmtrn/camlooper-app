@@ -123,11 +123,11 @@ struct QualityController {
 impl QualityController {
     fn new(target_fps: f64) -> Self {
         Self {
-            current_quality: 85, // Start with high quality
+            current_quality: 75, // Start with medium quality for better performance
             target_fps,
-            frame_times: VecDeque::with_capacity(30),
+            frame_times: VecDeque::with_capacity(10), // Reduce buffer size for faster response
             last_adjustment: Instant::now(),
-            adjustment_interval: Duration::from_secs(2),
+            adjustment_interval: Duration::from_secs(1), // Adjust more frequently
         }
     }
 
@@ -212,21 +212,21 @@ impl VideoProcessor {
             app_handle: None,
             is_streaming: Arc::new(AtomicBool::new(false)),
             loop_settings: Arc::new(RwLock::new((5, true))),
-            frame_buffer: Arc::new(Mutex::new(FrameBuffer::new(60))), // 2 seconds at 30fps
+            frame_buffer: Arc::new(Mutex::new(FrameBuffer::new(90))), // 3 seconds at 30fps for better buffering
             quality_controller: Arc::new(Mutex::new(QualityController::new(30.0))),
             performance_metrics: Arc::new(RwLock::new(PerformanceMetrics {
                 frames_processed: 0,
                 frames_dropped: 0,
                 average_encode_time: 0.0,
                 average_decode_time: 0.0,
-                current_quality: 85,
+                current_quality: 75, // Start with medium quality
                 buffer_size: 0,
                 memory_usage: 0,
             })),
             streaming_task: None,
             buffer_consumer_task: None,
             frame_sequence: Arc::new(AtomicU64::new(0)),
-            batch_size: 3, // Send 3 frames per batch
+            batch_size: 5, // Send 5 frames per batch for better throughput
         }
     }
 
@@ -290,10 +290,10 @@ impl VideoProcessor {
             *quality_controller = QualityController::new(video_info.fps.min(30.0));
         }
 
-        // Clear buffer
+        // Clear buffer - use larger buffer for better performance
         {
             let mut buffer = self.frame_buffer.lock().await;
-            *buffer = FrameBuffer::new(60);
+            *buffer = FrameBuffer::new(90); // 3 seconds at 30fps
         }
 
         // Reset metrics
@@ -304,7 +304,7 @@ impl VideoProcessor {
                 frames_dropped: 0,
                 average_encode_time: 0.0,
                 average_decode_time: 0.0,
-                current_quality: 85,
+                current_quality: 75, // Start with medium quality for better performance
                 buffer_size: 0,
                 memory_usage: 0,
             };
@@ -383,10 +383,10 @@ impl VideoProcessor {
         let task = tokio::spawn(async move {
             let mut batch = Vec::with_capacity(batch_size);
             let mut last_emit = Instant::now();
-            let emit_interval = Duration::from_millis(16); // ~60fps max emit rate
+            let emit_interval = Duration::from_millis(16); // ~60fps max emit rate for responsiveness
 
             while is_streaming.load(Ordering::Relaxed) {
-                // Try to fill batch
+                // Try to fill batch aggressively
                 {
                     let mut buffer = frame_buffer.lock().await;
                     while batch.len() < batch_size {
@@ -397,16 +397,21 @@ impl VideoProcessor {
                         }
                     }
 
-                    // Update buffer health
-                    let buffer_health = buffer.health_ratio();
-                    {
-                        let mut status = stream_status.write().await;
-                        status.buffer_health = buffer_health;
+                    // Update buffer health only when we have frames
+                    if !batch.is_empty() {
+                        let buffer_health = buffer.health_ratio();
+                        {
+                            let mut status = stream_status.write().await;
+                            status.buffer_health = buffer_health;
+                        }
                     }
                 }
 
-                // Emit batch if we have frames and enough time has passed
-                if !batch.is_empty() && last_emit.elapsed() >= emit_interval {
+                // Emit batch more aggressively - emit immediately if we have frames and enough time passed
+                let should_emit = !batch.is_empty() && 
+                    (last_emit.elapsed() >= emit_interval || batch.len() >= batch_size);
+
+                if should_emit {
                     let frame_batch = FrameBatch {
                         frames: batch.clone(),
                         sequence_id: frame_sequence.fetch_add(1, Ordering::Relaxed),
@@ -421,8 +426,8 @@ impl VideoProcessor {
                     last_emit = Instant::now();
                 }
 
-                // Small delay to prevent busy waiting
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                // Even shorter delay for maximum responsiveness
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         });
 
@@ -434,7 +439,7 @@ impl VideoProcessor {
         is_streaming: Arc<AtomicBool>,
         loop_settings: Arc<RwLock<(u32, bool)>>,
         frame_buffer: Arc<Mutex<FrameBuffer>>,
-        quality_controller: Arc<Mutex<QualityController>>,
+        _quality_controller: Arc<Mutex<QualityController>>,
         performance_metrics: Arc<RwLock<PerformanceMetrics>>,
         stream_status: Arc<RwLock<StreamStatus>>,
     ) -> Result<()> {
@@ -455,14 +460,14 @@ impl VideoProcessor {
         let context = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
         let mut decoder = context.decoder().video()?;
         
-        // Create scaler for consistent output format
+        // Create scaler for consistent output format - use RGB24 for faster processing
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
             decoder.height(),
-            ffmpeg::format::Pixel::RGB24,
-            decoder.width(),
-            decoder.height(),
+            ffmpeg::format::Pixel::RGB24, // Use RGB24 for simpler processing
+            decoder.width().min(640), // Downscale for better performance
+            decoder.height().min(480), // Downscale for better performance
             ffmpeg::software::scaling::Flags::FAST_BILINEAR,
         )?;
 
@@ -470,11 +475,21 @@ impl VideoProcessor {
         let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
         
         let fps = f64::from(video_stream.avg_frame_rate());
-        let target_frame_duration = Duration::from_secs_f64(1.0 / fps.min(30.0));
+        let target_fps = fps.min(30.0);
+        let frame_duration = Duration::from_nanos(1_000_000_000 / target_fps as u64);
+        
         let mut frame_count = 0u64;
         let mut frames_dropped = 0u32;
         let mut last_fps_update = Instant::now();
+        let mut fps_frame_count = 0u64;
+        let mut current_quality = 50u8; // Start with lower quality for better performance
+        let mut frame_times = VecDeque::with_capacity(5);
+        let mut last_buffer_check = Instant::now();
 
+        // Frame skipping for better performance
+        let mut frame_skip_counter = 0u32;
+        let frame_skip_interval = 2; // Process every 2nd frame
+        
         loop {
             // Check if we should continue streaming
             if !is_streaming.load(Ordering::Relaxed) {
@@ -494,11 +509,21 @@ impl VideoProcessor {
                     while decoder.receive_frame(&mut frame).is_ok() {
                         let frame_start = Instant::now();
                         frame_count += 1;
+                        fps_frame_count += 1;
                         
-                        // Check if we should drop this frame for performance
-                        let should_drop = {
+                        // Frame skipping for better performance
+                        frame_skip_counter += 1;
+                        if frame_skip_counter % frame_skip_interval != 0 {
+                            continue;
+                        }
+                        
+                        // Fast buffer health check - only check every 10th frame
+                        let should_drop = if frame_count % 10 == 0 && last_buffer_check.elapsed() > Duration::from_millis(100) {
                             let buffer = rt.block_on(async { frame_buffer.lock().await });
+                            last_buffer_check = Instant::now();
                             buffer.should_drop_frame()
+                        } else {
+                            false
                         };
 
                         if should_drop {
@@ -506,21 +531,21 @@ impl VideoProcessor {
                             continue;
                         }
                         
-                        // Scale frame to RGB24
+                        // Scale frame to RGB24 (downscaled for better performance)
                         scaler.run(&frame, &mut rgb_frame)?;
                         
-                        // Get current quality setting
-                        let current_quality = {
-                            let mut quality_controller = rt.block_on(async { quality_controller.lock().await });
-                            let buffer_health = {
-                                let buffer = rt.block_on(async { frame_buffer.lock().await });
-                                buffer.health_ratio()
-                            };
-                            quality_controller.adjust_quality(buffer_health)
-                        };
+                        // Adaptive quality control based on performance
+                        if frame_times.len() >= 5 {
+                            let avg_time = frame_times.iter().sum::<Duration>() / frame_times.len() as u32;
+                            if avg_time > Duration::from_millis(20) { // If taking more than 20ms per frame
+                                current_quality = (current_quality as i16 - 5).max(25) as u8;
+                            } else if avg_time < Duration::from_millis(10) && current_quality < 70 {
+                                current_quality = (current_quality as u16 + 2).min(70) as u8;
+                            }
+                        }
                         
-                        // Convert to JPEG with adaptive quality
-                        let jpeg_data = Self::frame_to_jpeg_with_quality(&rgb_frame, current_quality)?;
+                        // Convert to JPEG with aggressive optimization
+                        let jpeg_data = Self::rgb_frame_to_jpeg_fast(&rgb_frame, current_quality)?;
                         let timestamp = frame.timestamp().unwrap_or(0) as f64 * time_base;
                         
                         // Create video frame
@@ -537,35 +562,44 @@ impl VideoProcessor {
                             buffer.push(video_frame);
                         }
 
-                        // Record performance metrics
+                        // Record frame time for performance tracking
                         let processing_time = frame_start.elapsed();
-                        {
-                            let mut quality_controller = rt.block_on(async { quality_controller.lock().await });
-                            quality_controller.record_frame_time(processing_time);
+                        if frame_times.len() >= 5 {
+                            frame_times.pop_front();
                         }
+                        frame_times.push_back(processing_time);
 
-                        // Update status periodically
-                        if frame_count % 5 == 0 {
+                        // Update status every 15 frames instead of every 10
+                        if frame_count % 15 == 0 {
                             let mut status = rt.block_on(async { stream_status.write().await });
                             status.current_time = timestamp;
                             status.frames_dropped = frames_dropped;
+                            status.average_processing_time = frame_times.iter().sum::<Duration>().as_secs_f64() / frame_times.len() as f64;
+                        }
+
+                        // Update FPS every second
+                        if last_fps_update.elapsed() >= Duration::from_secs(1) {
+                            let elapsed = last_fps_update.elapsed().as_secs_f64();
+                            let actual_fps = fps_frame_count as f64 / elapsed;
                             
-                            // Update FPS every second
-                            if last_fps_update.elapsed() >= Duration::from_secs(1) {
-                                let elapsed = last_fps_update.elapsed().as_secs_f64();
-                                status.actual_fps = 5.0 / elapsed; // 5 frames over elapsed time
-                                last_fps_update = Instant::now();
+                            let mut status = rt.block_on(async { stream_status.write().await });
+                            status.actual_fps = actual_fps;
+                            
+                            last_fps_update = Instant::now();
+                            fps_frame_count = 0;
+                        }
+
+                        // Minimal frame rate control - only sleep if we're way too fast
+                        if processing_time < frame_duration {
+                            let sleep_time = frame_duration - processing_time;
+                            // Only sleep if the sleep time is very significant (> 10ms)
+                            if sleep_time > Duration::from_millis(10) {
+                                std::thread::sleep(sleep_time / 4); // Sleep for quarter the time
                             }
                         }
 
-                        // Intelligent frame rate control
-                        if processing_time < target_frame_duration {
-                            let sleep_time = target_frame_duration - processing_time;
-                            std::thread::sleep(sleep_time);
-                        }
-
-                        // Check if we should stop (every 10th frame)
-                        if frame_count % 10 == 0 && !is_streaming.load(Ordering::Relaxed) {
+                        // Check if we should stop less frequently
+                        if frame_count % 30 == 0 && !is_streaming.load(Ordering::Relaxed) {
                             return Ok(());
                         }
                     }
@@ -594,13 +628,15 @@ impl VideoProcessor {
             let mut metrics = rt.block_on(async { performance_metrics.write().await });
             metrics.frames_processed = frame_count;
             metrics.frames_dropped = frames_dropped as u64;
+            metrics.current_quality = current_quality;
         }
 
         is_streaming.store(false, Ordering::Relaxed);
         Ok(())
     }
 
-    fn frame_to_jpeg_with_quality(frame: &ffmpeg::util::frame::video::Video, quality: u8) -> Result<Vec<u8>> {
+    // Fast RGB to JPEG conversion with minimal allocations
+    fn rgb_frame_to_jpeg_fast(frame: &ffmpeg::util::frame::video::Video, quality: u8) -> Result<Vec<u8>> {
         let width = frame.width() as usize;
         let height = frame.height() as usize;
         let linesize = frame.stride(0);
@@ -608,23 +644,31 @@ impl VideoProcessor {
         
         // Handle stride properly for RGB24 (3 bytes per pixel)
         let rgb_data = if linesize == width * 3 {
-            data[0..width * height * 3].to_vec()
+            // Fast path - no stride issues
+            &data[0..width * height * 3]
         } else {
+            // Slow path - need to handle stride
             let mut rgb_data = Vec::with_capacity(width * height * 3);
             for y in 0..height {
                 let line_start = y * linesize;
                 let line_end = line_start + width * 3;
                 rgb_data.extend_from_slice(&data[line_start..line_end]);
             }
-            rgb_data
+            return Self::encode_jpeg_fast(&rgb_data, width, height, quality);
         };
         
+        Self::encode_jpeg_fast(rgb_data, width, height, quality)
+    }
+
+    // Ultra-fast JPEG encoding with minimal overhead
+    fn encode_jpeg_fast(rgb_data: &[u8], width: usize, height: usize, quality: u8) -> Result<Vec<u8>> {
         // Convert RGB to image::RgbImage
-        let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data)
+        let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data.to_vec())
             .ok_or_else(|| anyhow!("Failed to create image from frame data"))?;
         
-        // Encode as JPEG with adaptive quality
-        let mut jpeg_data = Vec::new();
+        // Pre-allocate JPEG buffer for better performance
+        let mut jpeg_data = Vec::with_capacity(width * height / 4); // Estimate compression
+        
         {
             use image::codecs::jpeg::JpegEncoder;
             use std::io::Cursor;
@@ -669,10 +713,10 @@ impl VideoProcessor {
             task.abort();
         }
 
-        // Clear buffer
+        // Clear buffer - use larger buffer for better performance
         {
             let mut buffer = self.frame_buffer.lock().await;
-            *buffer = FrameBuffer::new(60);
+            *buffer = FrameBuffer::new(90); // 3 seconds at 30fps
         }
 
         {
