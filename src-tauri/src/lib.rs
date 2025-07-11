@@ -3,6 +3,9 @@ pub mod virtual_camera;
 mod video_processor;
 mod video_upload;
 
+#[cfg(windows)]
+mod windows_vcam;
+
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
 use video_processor::{VideoInfo, StreamStatus, PerformanceMetrics};
 
