@@ -216,11 +216,12 @@ async fn start_platform_camera(&mut self, frame_receiver: mpsc::UnboundedReceive
 
 ### Manual Testing
 
-1. Start the virtual camera
-2. Open Windows Camera app or OBS Studio
-3. Look for "CamLooper Virtual Camera" in device list
-4. Select the virtual camera as video source
-5. Send test frames and verify display
+1. Build the application: `npm run build:windows`
+2. Start the virtual camera
+3. Open Windows Camera app or OBS Studio
+4. Look for "CamLooper Virtual Camera" in device list
+5. Select the virtual camera as video source
+6. Send test frames and verify display
 
 ### Automated Testing
 
@@ -239,6 +240,21 @@ mod tests {
         assert!(!stop_status.is_active);
     }
 }
+```
+
+### Build Commands
+
+```bash
+# Development
+npm run tauri:dev              # Start development server
+npm run tauri:build:debug      # Debug build
+
+# Production
+npm run tauri:build            # Standard cross-platform build  
+npm run build:windows          # Windows-specific build (MSVC)
+
+# Testing
+./build-test.sh                # Comprehensive build verification
 ```
 
 ## Troubleshooting

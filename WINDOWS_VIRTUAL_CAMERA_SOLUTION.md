@@ -96,11 +96,15 @@ cargo build
 
 ### After (✅ Success)
 ```bash
+# Install dependencies
+npm install
+
+# Run build verification
 ./build-test.sh
-# ✅ Checks platform requirements
-# ✅ Verifies dependencies
-# ✅ Windows: Native APIs only
-# ✅ Linux/macOS: FFmpeg when available
+
+# Or build directly
+npm run build:windows  # Windows-specific build with MSVC
+npm run tauri:build     # Standard cross-platform build
 ```
 
 ## 🎮 Usage Examples
@@ -162,39 +166,42 @@ for device in devices {
 ./build-test.sh
 
 # Manual verification
-cd src-tauri
-cargo check  # Should pass without FFmpeg errors
-cargo build  # Should build successfully
+npm install                # Install dependencies
+npm run tauri:dev         # Start development server
+npm run build:windows     # Test Windows build
 ```
 
 ### 2. Virtual Camera Testing
 
 **Windows:**
 1. Run the application with admin privileges
-2. Start virtual camera: `start_virtual_camera()`
-3. Open Windows Camera app or OBS Studio
-4. Look for "CamLooper Virtual Camera" in device list
-5. Select and verify video feed
+2. Build with: `npm run build:windows`
+3. Start virtual camera: `start_virtual_camera()`
+4. Open Windows Camera app or OBS Studio
+5. Look for "CamLooper Virtual Camera" in device list
+6. Select and verify video feed
 
 **Linux:**
 1. Load v4l2loopback: `sudo modprobe v4l2loopback`
-2. Start virtual camera
-3. Check: `ls /dev/video*`
-4. Test with: `ffplay /dev/videoN`
+2. Build with: `npm run tauri:build`
+3. Start virtual camera
+4. Check: `ls /dev/video*`
+5. Test with: `ffplay /dev/videoN`
 
 ## 🔧 Troubleshooting
 
 ### Windows Issues
 
+**Build failures:**
+- Install Visual Studio Build Tools with MSVC compiler
+- Ensure Windows SDK is available
+- Try: `npm run build:windows`
+- For clean build: `cd src-tauri && cargo clean && cd .. && npm run build:windows`
+
 **Virtual camera not appearing:**
 - Run application as administrator
 - Check Event Viewer for COM registration errors
 - Verify DirectShow service is running
-
-**Build failures:**
-- Install Visual Studio Build Tools
-- Ensure Windows SDK is available
-- Try: `cargo clean && cargo build`
 
 ### Linux Issues
 
@@ -220,16 +227,20 @@ sudo modprobe v4l2loopback
 ## 🎯 Next Steps
 
 ### Immediate Actions
-1. ✅ Build should now work without FFmpeg errors
+1. ✅ Build should now work: `npm run build:windows`
 2. ✅ Virtual camera functionality available on all platforms
-3. ✅ Professional-grade Windows implementation ready
+3. ✅ Simplified build process with npm scripts
 
-### Future Enhancements
-- **macOS AVFoundation**: Replace FFmpeg with native APIs
-- **Hardware Acceleration**: GPU-based frame processing
-- **Audio Support**: Virtual audio device integration
-- **Multiple Formats**: YUV, NV12, etc. support
-- **Installer Package**: MSI installer for easy deployment
+### Build Commands Available
+```bash
+# Development
+npm run tauri:dev              # Start development server
+npm run tauri:build:debug      # Debug build
+
+# Production  
+npm run tauri:build            # Standard cross-platform build
+npm run build:windows          # Windows-specific build (MSVC)
+```
 
 ## 🏁 Conclusion
 

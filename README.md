@@ -66,6 +66,23 @@ A Tauri-based video looping application with virtual camera functionality.
   xcode-select --install
   ```
 
+## Building for Production
+
+### Standard Build (All Platforms)
+```bash
+npm run tauri:build
+```
+
+### Windows-Specific Build
+```bash
+npm run build:windows
+```
+
+### Debug Build
+```bash
+npm run tauri:build:debug
+```
+
 ## Quick Start
 
 1. **Clone the repository**:
@@ -87,20 +104,8 @@ A Tauri-based video looping application with virtual camera functionality.
 
 4. **Start development server**:
    ```bash
-   npm run tauri dev
+   npm run tauri:dev
    ```
-
-## Building for Production
-
-### Development Build
-```bash
-npm run tauri build
-```
-
-### Release Build
-```bash
-npm run tauri build --release
-```
 
 ## Virtual Camera Architecture
 

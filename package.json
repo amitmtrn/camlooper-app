@@ -13,16 +13,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:build:debug": "tauri build --debug",
-    "build:windows": "tauri build --target x86_64-pc-windows-gnu",
-    "build:windows:32": "tauri build --target i686-pc-windows-gnu",
-    "build:windows:msvc": "tauri build --target x86_64-pc-windows-msvc",
-    "build:windows:msvc:32": "tauri build --target i686-pc-windows-msvc",
-    "build:windows:arm": "tauri build --target aarch64-pc-windows-msvc",
-    "build:windows:all": "npm run build:windows && npm run build:windows:32",
-    "build:windows:debug": "tauri build --debug --target x86_64-pc-windows-gnu",
-    "build:exe:windows": "npm run build && cargo build --release --target x86_64-pc-windows-gnu --manifest-path src-tauri/Cargo.toml",
-    "build:exe:windows:32": "npm run build && cargo build --release --target i686-pc-windows-gnu --manifest-path src-tauri/Cargo.toml",
-    "build:exe:windows:debug": "npm run build && cargo build --target x86_64-pc-windows-gnu --manifest-path src-tauri/Cargo.toml"
+    "build:windows": "tauri build --target x86_64-pc-windows-msvc"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

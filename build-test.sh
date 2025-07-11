@@ -4,15 +4,31 @@ echo "🔧 CamLooper Build Test Script"
 echo "==============================="
 
 # Check if we're in the right directory
-if [ ! -f "src-tauri/Cargo.toml" ]; then
+if [ ! -f "package.json" ]; then
     echo "❌ Error: Please run this script from the project root directory"
     exit 1
 fi
 
 echo "📁 Current directory: $(pwd)"
-echo "🦀 Rust version check..."
 
-# Check Rust installation
+# Check Node.js and npm
+echo "📦 Checking Node.js and npm..."
+if command -v node &> /dev/null; then
+    echo "✅ Node.js found: $(node --version)"
+else
+    echo "❌ Node.js not found. Please install Node.js from https://nodejs.org/"
+    exit 1
+fi
+
+if command -v npm &> /dev/null; then
+    echo "✅ npm found: $(npm --version)"
+else
+    echo "❌ npm not found"
+    exit 1
+fi
+
+# Check Rust and Cargo
+echo "🦀 Checking Rust and Cargo..."
 if command -v rustc &> /dev/null; then
     echo "✅ Rust found: $(rustc --version)"
 else
@@ -20,7 +36,6 @@ else
     exit 1
 fi
 
-# Check Cargo
 if command -v cargo &> /dev/null; then
     echo "✅ Cargo found: $(cargo --version)"
 else
@@ -67,7 +82,15 @@ case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         echo "🪟 Windows detected"
         echo "📦 Windows build will use native APIs (no FFmpeg required)"
-        echo "✅ Windows-specific dependencies will be handled by Cargo"
+        echo "✅ Windows-specific dependencies will be handled by Tauri"
+        
+        # Check for Windows build tools
+        if command -v cl &> /dev/null; then
+            echo "✅ MSVC compiler found"
+        else
+            echo "⚠️  MSVC compiler not found"
+            echo "   Install Visual Studio Build Tools or Visual Studio Community"
+        fi
         ;;
     *)
         echo "❓ Unknown platform: $(uname -s)"
@@ -75,11 +98,19 @@ case "$(uname -s)" in
 esac
 
 echo ""
-echo "🔨 Starting Cargo check..."
+echo "� Installing npm dependencies..."
+if npm install; then
+    echo "✅ npm dependencies installed"
+else
+    echo "❌ Failed to install npm dependencies"
+    exit 1
+fi
+
+echo ""
+echo "🔨 Testing Tauri development setup..."
+echo "📋 Running cargo check in src-tauri..."
 cd src-tauri
 
-# First try a simple check
-echo "📋 Running cargo check..."
 if cargo check; then
     echo "✅ Cargo check passed!"
 else
@@ -93,21 +124,44 @@ else
     exit 1
 fi
 
+cd ..
+
 echo ""
-echo "🎯 Attempting to build..."
-if cargo build; then
-    echo "✅ Build successful!"
-    echo ""
-    echo "🚀 Your CamLooper Tauri app should now be ready!"
-    echo "   Run with: cargo tauri dev"
-else
-    echo "❌ Build failed"
-    echo "   Check the error messages above for specific issues"
-    exit 1
-fi
+echo "🎯 Testing Tauri build process..."
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        echo "🪟 Testing Windows build with npm run build:windows..."
+        if npm run build:windows; then
+            echo "✅ Windows build successful!"
+        else
+            echo "❌ Windows build failed"
+            echo "   Make sure Visual Studio Build Tools are installed"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "🔨 Testing general Tauri build..."
+        if npm run tauri:build; then
+            echo "✅ Tauri build successful!"
+        else
+            echo "❌ Tauri build failed"
+            echo "   Check the error messages above for specific issues"
+            exit 1
+        fi
+        ;;
+esac
 
 echo ""
 echo "🎉 Build test completed successfully!"
-echo "   Next steps:"
-echo "   1. Run 'cargo tauri dev' to start development"
-echo "   2. Or run 'cargo tauri build' for production build"
+echo ""
+echo "📋 Available build commands:"
+echo "   Development:"
+echo "   • npm run tauri:dev        - Start development server"
+echo "   • npm run tauri:build:debug - Debug build"
+echo ""
+echo "   Production:"
+echo "   • npm run tauri:build      - Standard production build"
+echo "   • npm run build:windows    - Windows-specific build (MSVC)"
+echo ""
+echo "🚀 Your CamLooper app is ready for development!"
