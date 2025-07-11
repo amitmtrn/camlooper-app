@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ffmpeg_next as ffmpeg;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -192,6 +193,7 @@ pub struct VideoProcessor {
 impl VideoProcessor {
     pub fn new() -> Self {
         // Initialize ffmpeg
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         ffmpeg::init().ok();
         
         Self {
@@ -234,6 +236,7 @@ impl VideoProcessor {
         self.app_handle = Some(app_handle);
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub async fn load_video(&mut self, file_path: PathBuf) -> Result<VideoInfo> {
         // Extract all video information synchronously to avoid Send issues
         let video_info = {
@@ -313,6 +316,70 @@ impl VideoProcessor {
         self.video_info = Some(video_info.clone());
         self.video_path = Some(file_path);
 
+        Ok(video_info)
+    }
+
+    #[cfg(windows)]
+    pub async fn load_video(&mut self, file_path: PathBuf) -> Result<VideoInfo> {
+        // For Windows, we'll use a simplified approach without FFmpeg
+        // In a real implementation, you could use Windows Media Foundation
+        
+        // Create a mock video info for Windows (you can enhance this)
+        let video_info = VideoInfo {
+            id: Uuid::new_v4().to_string(),
+            filename: file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            duration: 60.0, // Default 60 seconds
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            format: "Unknown".to_string(),
+        };
+
+        // Update status and controllers
+        {
+            let mut status = self.stream_status.write().await;
+            status.duration = video_info.duration;
+            status.current_time = 0.0;
+            status.current_loop = 0;
+            status.target_fps = video_info.fps.min(30.0);
+            status.buffer_health = 0.0;
+            status.frames_dropped = 0;
+        }
+
+        // Reset quality controller for new video
+        {
+            let mut quality_controller = self.quality_controller.lock().await;
+            *quality_controller = QualityController::new(video_info.fps.min(30.0));
+        }
+
+        // Clear buffer
+        {
+            let mut buffer = self.frame_buffer.lock().await;
+            *buffer = FrameBuffer::new(90);
+        }
+
+        // Reset metrics
+        {
+            let mut metrics = self.performance_metrics.write().await;
+            *metrics = PerformanceMetrics {
+                frames_processed: 0,
+                frames_dropped: 0,
+                average_encode_time: 0.0,
+                average_decode_time: 0.0,
+                current_quality: 80,
+                buffer_size: 0,
+                memory_usage: 0,
+            };
+        }
+
+        self.video_info = Some(video_info.clone());
+        self.video_path = Some(file_path);
+
+        println!("Video loaded on Windows (FFmpeg not available): {}", video_info.filename);
         Ok(video_info)
     }
 
@@ -434,6 +501,7 @@ impl VideoProcessor {
         Ok(task)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn produce_frames_blocking(
         video_path: PathBuf,
         is_streaming: Arc<AtomicBool>,
@@ -502,7 +570,7 @@ impl VideoProcessor {
             target_height,
             ffmpeg::software::scaling::Flags::LANCZOS, // Better quality scaling
         )?;
-
+        
         let mut frame = ffmpeg::util::frame::video::Video::empty();
         let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
         
@@ -660,71 +728,94 @@ impl VideoProcessor {
         Ok(())
     }
 
-    // Improved RGB to JPEG conversion with robust stride handling
-    fn rgb_frame_to_jpeg_fast(frame: &ffmpeg::util::frame::video::Video, quality: u8) -> Result<Vec<u8>> {
-        let width = frame.width() as usize;
-        let height = frame.height() as usize;
-        let linesize = frame.stride(0);
-        let data = frame.data(0);
+    #[cfg(windows)]
+    fn produce_frames_blocking(
+        video_path: PathBuf,
+        is_streaming: Arc<AtomicBool>,
+        loop_settings: Arc<RwLock<(u32, bool)>>,
+        frame_buffer: Arc<Mutex<FrameBuffer>>,
+        _quality_controller: Arc<Mutex<QualityController>>,
+        performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+        stream_status: Arc<RwLock<StreamStatus>>,
+    ) -> Result<()> {
+        println!("Video processing on Windows (simplified mode without FFmpeg)");
         
-        // Validate frame data bounds
-        let expected_data_size = linesize * height;
-        if data.len() < expected_data_size {
-            return Err(anyhow!("Invalid frame data size: got {}, expected at least {}", 
-                              data.len(), expected_data_size));
-        }
+        // Simulate frame processing for Windows
+        let frame_count = Arc::new(AtomicU64::new(0));
         
-        // Handle stride properly for RGB24 (3 bytes per pixel)
-        let rgb_data = if linesize == width * 3 {
-            // Fast path - no stride issues, direct slice
-            &data[0..width * height * 3]
-        } else {
-            // Slow path - handle stride/padding properly
-            let mut rgb_data = Vec::with_capacity(width * height * 3);
-            for y in 0..height {
-                let line_start = y * linesize;
-                let line_end = line_start + (width * 3);
+        std::thread::spawn(move || {
+            while is_streaming.load(Ordering::Relaxed) {
+                // Generate a test frame (black frame)
+                let test_frame = vec![0u8; 640 * 480 * 3]; // RGB24 black frame
                 
-                // Bounds check for safety
-                if line_end <= data.len() {
-                    rgb_data.extend_from_slice(&data[line_start..line_end]);
-                } else {
-                    // Handle edge case where stride calculation might be off
-                    let safe_end = data.len().min(line_end);
-                    rgb_data.extend_from_slice(&data[line_start..safe_end]);
-                    
-                    // Pad with zeros if needed (shouldn't happen with proper scaling)
-                    let remaining = (width * 3) - (safe_end - line_start);
-                    if remaining > 0 {
-                        rgb_data.extend(vec![0u8; remaining]);
+                // Convert to JPEG for consistency with other platforms
+                if let Ok(jpeg_data) = Self::rgb_to_jpeg_fast(&test_frame, 640, 480, 80) {
+                    // Try to send to frame buffer
+                    if let Ok(mut buffer) = frame_buffer.try_lock() {
+                        let video_frame = crate::video_processor::VideoFrame {
+                            data: jpeg_data,
+                            timestamp: frame_count.load(Ordering::Relaxed) as f64 / 30.0,
+                            width: 640,
+                            height: 480,
+                        };
+                        buffer.push(video_frame);
                     }
                 }
+                
+                frame_count.fetch_add(1, Ordering::Relaxed);
+                
+                // 30 FPS timing
+                std::thread::sleep(std::time::Duration::from_millis(33));
             }
-            return Self::encode_jpeg_fast(&rgb_data, width, height, quality);
-        };
+        });
         
-        Self::encode_jpeg_fast(rgb_data, width, height, quality)
+        Ok(())
     }
 
-    // Ultra-fast JPEG encoding with minimal overhead
-    fn encode_jpeg_fast(rgb_data: &[u8], width: usize, height: usize, quality: u8) -> Result<Vec<u8>> {
-        // Convert RGB to image::RgbImage
-        let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data.to_vec())
-            .ok_or_else(|| anyhow!("Failed to create image from frame data"))?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn rgb_frame_to_jpeg_fast(frame: &ffmpeg::util::frame::video::Video, quality: u8) -> Result<Vec<u8>> {
+        use image::{ImageBuffer, Rgb};
         
-        // Pre-allocate JPEG buffer for better performance
-        let mut jpeg_data = Vec::with_capacity(width * height / 4); // Estimate compression
+        let width = frame.width() as u32;
+        let height = frame.height() as u32;
+        let data = frame.data(0);
+        let stride = frame.stride(0);
         
-        {
-            use image::codecs::jpeg::JpegEncoder;
-            use std::io::Cursor;
-            
-            let mut cursor = Cursor::new(&mut jpeg_data);
-            let mut encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
-            encoder.encode_image(&img)?;
+        // Create image buffer from frame data
+        let mut img_data = Vec::with_capacity((width * height * 3) as usize);
+        
+        for y in 0..height {
+            let row_start = (y as usize) * stride;
+            let row_end = row_start + (width as usize * 3);
+            if row_end <= data.len() {
+                img_data.extend_from_slice(&data[row_start..row_start + (width as usize * 3)]);
+            }
         }
         
-        Ok(jpeg_data)
+        if let Ok(img_buffer) = ImageBuffer::<Rgb<u8>, _>::from_raw(width, height, img_data) {
+            let mut jpeg_data = Vec::new();
+            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_data, quality)
+                .encode_image(&img_buffer).is_ok() {
+                return Ok(jpeg_data);
+            }
+        }
+        
+        Err(anyhow!("Failed to encode frame as JPEG"))
+    }
+
+    #[cfg(windows)]
+    fn rgb_to_jpeg_fast(rgb_data: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+        use image::{ImageBuffer, Rgb};
+        
+        if let Ok(img_buffer) = ImageBuffer::<Rgb<u8>, _>::from_raw(width, height, rgb_data.to_vec()) {
+            let mut jpeg_data = Vec::new();
+            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_data, quality)
+                .encode_image(&img_buffer).is_ok() {
+                return Ok(jpeg_data);
+            }
+        }
+        
+        Err(anyhow!("Failed to encode RGB as JPEG"))
     }
 
 
