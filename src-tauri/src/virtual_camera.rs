@@ -264,30 +264,37 @@ impl VirtualCamera {
                 };
                 
                 // Convert frame data to RGB if available
-                let rgb_data = if let Some(frame_data) = current_frame_data {
+                let (rgb_data, frame_width, frame_height) = if let Some(frame_data) = current_frame_data {
                     match Self::jpeg_to_raw_rgb(&frame_data) {
-                        Ok(data) => {
-                            // Cache this frame for frame repetition
+                        Ok((data, width, height)) => {
+                            // Cache this frame for frame repetition  
                             last_frame_rgb = Some(data.clone());
-                            Some(data)
+                            (Some(data), width, height)
                         }
                         Err(e) => {
                             eprintln!("Failed to convert JPEG to RGB: {}", e);
-                            // Use last known good frame
-                            last_frame_rgb.clone()
+                            // Use last known good frame with default dimensions
+                            if let Some(ref cached_frame) = last_frame_rgb {
+                                (Some(cached_frame.clone()), 640, 480)
+                            } else {
+                                (None, 640, 480)
+                            }
                         }
                     }
                 } else {
                     // No new frame available, repeat last frame
-                    last_frame_rgb.clone()
+                    if let Some(ref cached_frame) = last_frame_rgb {
+                        (Some(cached_frame.clone()), 640, 480)
+                    } else {
+                        (None, 640, 480)
+                    }
                 };
                 
                 // Send frame to FFmpeg (or black frame if no data available)
                 let final_rgb_data = if let Some(rgb_data) = rgb_data {
                     // Scale to target resolution if needed
-                    let (src_width, src_height) = (640, 480);
-                    if (src_width, src_height) != (640, 480) {
-                        Self::scale_rgb_data(&rgb_data, src_width, src_height, 640, 480)
+                    if (frame_width, frame_height) != (640, 480) {
+                        Self::scale_rgb_data(&rgb_data, frame_width, frame_height, 640, 480)
                     } else {
                         rgb_data
                     }
@@ -459,13 +466,16 @@ impl VirtualCamera {
 
 
     #[cfg(target_os = "linux")]
-    fn jpeg_to_raw_rgb(jpeg_data: &[u8]) -> Result<Vec<u8>> {
+    fn jpeg_to_raw_rgb(jpeg_data: &[u8]) -> Result<(Vec<u8>, usize, usize)> {
         // Decode JPEG to image
         let img = image::load_from_memory(jpeg_data)?;
         let rgb_img = img.to_rgb8();
         
+        let width = rgb_img.width() as usize;
+        let height = rgb_img.height() as usize;
+        
         // Convert to raw RGB bytes
-        Ok(rgb_img.into_raw())
+        Ok((rgb_img.into_raw(), width, height))
     }
 
     #[cfg(target_os = "linux")]

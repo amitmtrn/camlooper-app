@@ -123,11 +123,11 @@ struct QualityController {
 impl QualityController {
     fn new(target_fps: f64) -> Self {
         Self {
-            current_quality: 75, // Start with medium quality for better performance
+            current_quality: 80, // Start with higher quality
             target_fps,
-            frame_times: VecDeque::with_capacity(10), // Reduce buffer size for faster response
+            frame_times: VecDeque::with_capacity(10), 
             last_adjustment: Instant::now(),
-            adjustment_interval: Duration::from_secs(1), // Adjust more frequently
+            adjustment_interval: Duration::from_secs(2), // Less frequent adjustments for stability
         }
     }
 
@@ -219,7 +219,7 @@ impl VideoProcessor {
                 frames_dropped: 0,
                 average_encode_time: 0.0,
                 average_decode_time: 0.0,
-                current_quality: 75, // Start with medium quality
+                current_quality: 80, // Start with higher quality
                 buffer_size: 0,
                 memory_usage: 0,
             })),
@@ -304,7 +304,7 @@ impl VideoProcessor {
                 frames_dropped: 0,
                 average_encode_time: 0.0,
                 average_decode_time: 0.0,
-                current_quality: 75, // Start with medium quality for better performance
+                current_quality: 80, // Start with higher quality
                 buffer_size: 0,
                 memory_usage: 0,
             };
@@ -460,15 +460,47 @@ impl VideoProcessor {
         let context = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
         let mut decoder = context.decoder().video()?;
         
-        // Create scaler for consistent output format - use RGB24 for faster processing
+        // Calculate proper aspect ratio preserving dimensions
+        let (target_width, target_height) = {
+            let src_width = decoder.width() as f64;
+            let src_height = decoder.height() as f64;
+            let src_aspect = src_width / src_height;
+            
+            // Target resolution constraints
+            let max_width = 640.0;
+            let max_height = 480.0;
+            
+            // Calculate dimensions that fit within constraints while preserving aspect ratio
+            let (width, height) = if src_width > max_width || src_height > max_height {
+                let scale_x = max_width / src_width;
+                let scale_y = max_height / src_height;
+                let scale = scale_x.min(scale_y);
+                
+                let new_width = (src_width * scale).round() as u32;
+                let new_height = (src_height * scale).round() as u32;
+                
+                // Ensure dimensions are even (required for many codecs)
+                ((new_width / 2) * 2, (new_height / 2) * 2)
+            } else {
+                // Keep original size if it fits
+                (decoder.width(), decoder.height())
+            };
+            
+            println!("Video scaling: {}x{} -> {}x{} (aspect ratio: {:.3})", 
+                     decoder.width(), decoder.height(), width, height, src_aspect);
+            
+            (width, height)
+        };
+
+        // Create scaler with proper quality and color space handling
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
             decoder.height(),
-            ffmpeg::format::Pixel::RGB24, // Use RGB24 for simpler processing
-            decoder.width().min(640), // Downscale for better performance
-            decoder.height().min(480), // Downscale for better performance
-            ffmpeg::software::scaling::Flags::FAST_BILINEAR,
+            ffmpeg::format::Pixel::RGB24,
+            target_width,
+            target_height,
+            ffmpeg::software::scaling::Flags::LANCZOS, // Better quality scaling
         )?;
 
         let mut frame = ffmpeg::util::frame::video::Video::empty();
@@ -482,13 +514,12 @@ impl VideoProcessor {
         let mut frames_dropped = 0u32;
         let mut last_fps_update = Instant::now();
         let mut fps_frame_count = 0u64;
-        let mut current_quality = 50u8; // Start with lower quality for better performance
-        let mut frame_times = VecDeque::with_capacity(5);
+        let mut current_quality = 80u8; // Start with higher quality for better visual quality
+        let mut frame_times = VecDeque::with_capacity(10);
         let mut last_buffer_check = Instant::now();
 
-        // Frame skipping for better performance
-        let mut frame_skip_counter = 0u32;
-        let frame_skip_interval = 2; // Process every 2nd frame
+        // Remove frame skipping to avoid temporal artifacts
+        // Process all frames for better quality
         
         loop {
             // Check if we should continue streaming
@@ -511,12 +542,6 @@ impl VideoProcessor {
                         frame_count += 1;
                         fps_frame_count += 1;
                         
-                        // Frame skipping for better performance
-                        frame_skip_counter += 1;
-                        if frame_skip_counter % frame_skip_interval != 0 {
-                            continue;
-                        }
-                        
                         // Fast buffer health check - only check every 10th frame
                         let should_drop = if frame_count % 10 == 0 && last_buffer_check.elapsed() > Duration::from_millis(100) {
                             let buffer = rt.block_on(async { frame_buffer.lock().await });
@@ -534,13 +559,13 @@ impl VideoProcessor {
                         // Scale frame to RGB24 (downscaled for better performance)
                         scaler.run(&frame, &mut rgb_frame)?;
                         
-                        // Adaptive quality control based on performance
-                        if frame_times.len() >= 5 {
+                        // More conservative adaptive quality control
+                        if frame_times.len() >= 10 {
                             let avg_time = frame_times.iter().sum::<Duration>() / frame_times.len() as u32;
-                            if avg_time > Duration::from_millis(20) { // If taking more than 20ms per frame
-                                current_quality = (current_quality as i16 - 5).max(25) as u8;
-                            } else if avg_time < Duration::from_millis(10) && current_quality < 70 {
-                                current_quality = (current_quality as u16 + 2).min(70) as u8;
+                            if avg_time > Duration::from_millis(33) { // If taking more than 33ms per frame (slower than 30fps)
+                                current_quality = (current_quality as i16 - 3).max(60) as u8; // Don't go below 60 quality
+                            } else if avg_time < Duration::from_millis(15) && current_quality < 90 {
+                                current_quality = (current_quality as u16 + 1).min(90) as u8; // Allow up to 90 quality
                             }
                         }
                         
@@ -564,7 +589,7 @@ impl VideoProcessor {
 
                         // Record frame time for performance tracking
                         let processing_time = frame_start.elapsed();
-                        if frame_times.len() >= 5 {
+                        if frame_times.len() >= 10 {
                             frame_times.pop_front();
                         }
                         frame_times.push_back(processing_time);
@@ -635,24 +660,45 @@ impl VideoProcessor {
         Ok(())
     }
 
-    // Fast RGB to JPEG conversion with minimal allocations
+    // Improved RGB to JPEG conversion with robust stride handling
     fn rgb_frame_to_jpeg_fast(frame: &ffmpeg::util::frame::video::Video, quality: u8) -> Result<Vec<u8>> {
         let width = frame.width() as usize;
         let height = frame.height() as usize;
         let linesize = frame.stride(0);
         let data = frame.data(0);
         
+        // Validate frame data bounds
+        let expected_data_size = linesize * height;
+        if data.len() < expected_data_size {
+            return Err(anyhow!("Invalid frame data size: got {}, expected at least {}", 
+                              data.len(), expected_data_size));
+        }
+        
         // Handle stride properly for RGB24 (3 bytes per pixel)
         let rgb_data = if linesize == width * 3 {
-            // Fast path - no stride issues
+            // Fast path - no stride issues, direct slice
             &data[0..width * height * 3]
         } else {
-            // Slow path - need to handle stride
+            // Slow path - handle stride/padding properly
             let mut rgb_data = Vec::with_capacity(width * height * 3);
             for y in 0..height {
                 let line_start = y * linesize;
-                let line_end = line_start + width * 3;
-                rgb_data.extend_from_slice(&data[line_start..line_end]);
+                let line_end = line_start + (width * 3);
+                
+                // Bounds check for safety
+                if line_end <= data.len() {
+                    rgb_data.extend_from_slice(&data[line_start..line_end]);
+                } else {
+                    // Handle edge case where stride calculation might be off
+                    let safe_end = data.len().min(line_end);
+                    rgb_data.extend_from_slice(&data[line_start..safe_end]);
+                    
+                    // Pad with zeros if needed (shouldn't happen with proper scaling)
+                    let remaining = (width * 3) - (safe_end - line_start);
+                    if remaining > 0 {
+                        rgb_data.extend(vec![0u8; remaining]);
+                    }
+                }
             }
             return Self::encode_jpeg_fast(&rgb_data, width, height, quality);
         };
