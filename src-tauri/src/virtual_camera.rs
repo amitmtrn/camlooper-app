@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-
 #[cfg(target_os = "linux")]
 use v4l::Device;
 #[cfg(target_os = "linux")]
@@ -16,6 +15,9 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 #[cfg(target_os = "linux")]
 use image;
+
+#[cfg(windows)]
+use crate::windows_vcam;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualCameraConfig {
@@ -71,9 +73,11 @@ impl VirtualCamera {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        let mut is_running = self.is_running.lock().await;
-        if *is_running {
-            return Ok(());
+        {
+            let is_running = self.is_running.lock().await;
+            if *is_running {
+                return Ok(());
+            }
         }
 
         // Create frame channel
@@ -84,19 +88,27 @@ impl VirtualCamera {
         self.start_platform_camera(frame_receiver).await?;
 
         // Update status
-        let mut status = self.status.lock().await;
-        status.is_active = true;
-        status.frame_count = 0;
+        {
+            let mut status = self.status.lock().await;
+            status.is_active = true;
+            status.frame_count = 0;
+        }
 
-        *is_running = true;
+        {
+            let mut is_running = self.is_running.lock().await;
+            *is_running = true;
+        }
+        
         println!("Virtual camera started: {}", self.config.camera_name);
         Ok(())
     }
 
     pub async fn stop(&mut self) -> Result<()> {
-        let mut is_running = self.is_running.lock().await;
-        if !*is_running {
-            return Ok(());
+        {
+            let is_running = self.is_running.lock().await;
+            if !*is_running {
+                return Ok(());
+            }
         }
 
         // Stop frame sender
@@ -106,10 +118,16 @@ impl VirtualCamera {
         self.stop_platform_camera().await?;
 
         // Update status
-        let mut status = self.status.lock().await;
-        status.is_active = false;
+        {
+            let mut status = self.status.lock().await;
+            status.is_active = false;
+        }
 
-        *is_running = false;
+        {
+            let mut is_running = self.is_running.lock().await;
+            *is_running = false;
+        }
+        
         println!("Virtual camera stopped: {}", self.config.camera_name);
         Ok(())
     }
@@ -136,28 +154,67 @@ impl VirtualCamera {
     #[cfg(target_os = "windows")]
     async fn start_platform_camera(&self, mut frame_receiver: mpsc::UnboundedReceiver<Vec<u8>>) -> Result<()> {
         // Windows DirectShow implementation
-        let _config = self.config.clone();
-        let _status = self.status.clone();
+        let config = self.config.clone();
+        let status = self.status.clone();
+        
+        // Initialize Windows virtual camera
+        let mut vcam = windows_vcam::WindowsVirtualCamera::new(
+            &config.camera_name,
+            config.width,
+            config.height,
+            config.fps,
+        )?;
+        
+        vcam.start()?;
         
         tokio::spawn(async move {
             println!("Starting Windows DirectShow virtual camera...");
             
-            // TODO: Implement Windows DirectShow virtual camera
-            // This would involve:
-            // 1. Creating a DirectShow filter
-            // 2. Registering it as a capture device
-            // 3. Streaming frames to the filter
+            let mut frame_count = 0u64;
+            let target_frame_duration = tokio::time::Duration::from_millis(1000 / config.fps as u64);
+            let mut frame_timer = tokio::time::interval(target_frame_duration);
+            frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             
-            while let Some(frame_data) = frame_receiver.recv().await {
-                // Process frame for DirectShow
-                // Convert frame_data to DirectShow format and stream
-                println!("Processing frame for Windows virtual camera: {} bytes", frame_data.len());
+            // Buffer for latest frame
+            let mut latest_frame: Option<Vec<u8>> = None;
+            
+            loop {
+                // Wait for the next frame time
+                frame_timer.tick().await;
                 
-                // Simulate frame processing
-                tokio::time::sleep(tokio::time::Duration::from_millis(33)).await; // ~30 FPS
+                // Collect any available frames (non-blocking)
+                while let Ok(frame_data) = frame_receiver.try_recv() {
+                    latest_frame = Some(frame_data);
+                }
+                
+                // Send frame to DirectShow
+                if let Some(ref frame_data) = latest_frame {
+                    // Convert JPEG to RGB if needed
+                    if let Ok((rgb_data, width, height)) = Self::jpeg_to_rgb(frame_data) {
+                        // Send to Windows virtual camera
+                        if let Err(e) = windows_vcam::send_frame_to_virtual_camera(&rgb_data, width, height) {
+                            eprintln!("Failed to send frame to Windows virtual camera: {}", e);
+                        }
+                    }
+                } else {
+                    // Send black frame if no data available
+                    let black_frame = vec![0u8; (config.width * config.height * 3) as usize];
+                    if let Err(e) = windows_vcam::send_frame_to_virtual_camera(&black_frame, config.width, config.height) {
+                        eprintln!("Failed to send black frame to Windows virtual camera: {}", e);
+                    }
+                }
+                
+                frame_count += 1;
+                if frame_count % 30 == 0 {
+                    println!("Sent {} frames to Windows virtual camera", frame_count);
+                }
+                
+                // Update status
+                {
+                    let mut status_lock = status.lock().await;
+                    status_lock.frame_count = frame_count;
+                }
             }
-            
-            println!("Windows virtual camera stopped");
         });
         
         Ok(())
@@ -391,9 +448,22 @@ impl VirtualCamera {
     }
 
     async fn stop_platform_camera(&self) -> Result<()> {
-        // Platform-specific cleanup would go here
+        // Platform-specific cleanup - simplified for now
         println!("Stopping platform-specific virtual camera...");
         Ok(())
+    }
+
+    #[cfg(windows)]
+    fn jpeg_to_rgb(jpeg_data: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
+        // Decode JPEG to image
+        let img = image::load_from_memory(jpeg_data)?;
+        let rgb_img = img.to_rgb8();
+        
+        let width = rgb_img.width();
+        let height = rgb_img.height();
+        
+        // Convert to raw RGB bytes
+        Ok((rgb_img.into_raw(), width, height))
     }
 
     #[cfg(target_os = "linux")]
@@ -463,8 +533,6 @@ impl VirtualCamera {
         false
     }
 
-
-
     #[cfg(target_os = "linux")]
     fn jpeg_to_raw_rgb(jpeg_data: &[u8]) -> Result<(Vec<u8>, usize, usize)> {
         // Decode JPEG to image
@@ -501,48 +569,43 @@ impl VirtualCamera {
         
         scaled_data
     }
-
-
 }
 
 // Global virtual camera instance
-static VIRTUAL_CAMERA: Lazy<Arc<Mutex<Option<VirtualCamera>>>> = 
-    Lazy::new(|| Arc::new(Mutex::new(None)));
+static VIRTUAL_CAMERA: Lazy<Arc<Mutex<Option<VirtualCamera>>>> = Lazy::new(|| {
+    Arc::new(Mutex::new(None))
+});
 
-// Helper functions for the Tauri commands
+// Public API functions
 pub async fn start_virtual_camera(config: Option<VirtualCameraConfig>) -> Result<VirtualCameraStatus> {
     let config = config.unwrap_or_default();
+    let mut camera = VirtualCamera::new(config);
     
-    let mut camera_opt = VIRTUAL_CAMERA.lock().await;
+    camera.start().await?;
+    let status = camera.get_status().await;
     
-    // Create new camera if none exists
-    if camera_opt.is_none() {
-        *camera_opt = Some(VirtualCamera::new(config));
-    }
+    // Store the camera instance
+    let mut global_camera = VIRTUAL_CAMERA.lock().await;
+    *global_camera = Some(camera);
     
-    if let Some(camera) = camera_opt.as_mut() {
-        camera.start().await?;
-        Ok(camera.get_status().await)
-    } else {
-        Err(anyhow::anyhow!("Failed to create virtual camera"))
-    }
+    Ok(status)
 }
 
 pub async fn stop_virtual_camera() -> Result<VirtualCameraStatus> {
-    let mut camera_opt = VIRTUAL_CAMERA.lock().await;
-    
-    if let Some(camera) = camera_opt.as_mut() {
+    let mut global_camera = VIRTUAL_CAMERA.lock().await;
+    if let Some(ref mut camera) = global_camera.as_mut() {
         camera.stop().await?;
-        Ok(camera.get_status().await)
+        let status = camera.get_status().await;
+        *global_camera = None;
+        Ok(status)
     } else {
-        Err(anyhow::anyhow!("No virtual camera to stop"))
+        Err(anyhow::anyhow!("Virtual camera not running"))
     }
 }
 
 pub async fn get_virtual_camera_status() -> VirtualCameraStatus {
-    let camera_opt = VIRTUAL_CAMERA.lock().await;
-    
-    if let Some(camera) = camera_opt.as_ref() {
+    let global_camera = VIRTUAL_CAMERA.lock().await;
+    if let Some(ref camera) = global_camera.as_ref() {
         camera.get_status().await
     } else {
         VirtualCameraStatus {
@@ -556,50 +619,35 @@ pub async fn get_virtual_camera_status() -> VirtualCameraStatus {
 }
 
 pub async fn send_frame_to_virtual_camera(frame_data: Vec<u8>) -> Result<()> {
-    let camera_opt = VIRTUAL_CAMERA.lock().await;
-    
-    if let Some(camera) = camera_opt.as_ref() {
-        if camera.is_active().await {
-            camera.send_frame(frame_data).await?;
-        }
+    let global_camera = VIRTUAL_CAMERA.lock().await;
+    if let Some(ref camera) = global_camera.as_ref() {
+        camera.send_frame(frame_data).await
+    } else {
+        Err(anyhow::anyhow!("Virtual camera not running"))
     }
-    
-    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub async fn list_video_devices() -> Result<Vec<String>> {
+    windows_vcam::list_video_devices()
 }
 
 #[cfg(target_os = "linux")]
 pub async fn list_video_devices() -> Result<Vec<String>> {
     let mut devices = Vec::new();
     
-    println!("Scanning for video devices...");
-    
     for i in 0..20 {
         let device_path = format!("/dev/video{}", i);
         if std::path::Path::new(&device_path).exists() {
             match Device::new(i) {
                 Ok(device) => {
-                    match device.query_caps() {
-                        Ok(caps) => {
-                            let is_loopback = VirtualCamera::is_v4l2loopback_device(&caps);
-                            let device_info = format!(
-                                "{}: driver='{}', card='{}', bus='{}', loopback={}",
-                                device_path, caps.driver, caps.card, caps.bus, is_loopback
-                            );
-                            println!("{}", device_info);
-                            devices.push(device_info);
-                        }
-                        Err(e) => {
-                            let error_info = format!("{}: Failed to query capabilities: {}", device_path, e);
-                            println!("{}", error_info);
-                            devices.push(error_info);
-                        }
+                    if let Ok(caps) = device.query_caps() {
+                        devices.push(format!("{}: {} ({})", device_path, caps.card, caps.driver));
+                    } else {
+                        devices.push(format!("{}: Unknown device", device_path));
                     }
                 }
-                Err(e) => {
-                    let error_info = format!("{}: Failed to open device: {}", device_path, e);
-                    println!("{}", error_info);
-                    devices.push(error_info);
-                }
+                Err(_) => continue,
             }
         }
     }
@@ -607,7 +655,7 @@ pub async fn list_video_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub async fn list_video_devices() -> Result<Vec<String>> {
-    Ok(vec!["Video device listing not implemented for this platform".to_string()])
+    Ok(vec!["Virtual camera not supported on this platform".to_string()])
 } 
