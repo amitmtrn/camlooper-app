@@ -412,6 +412,8 @@ newgrp video
 
 ## Platform-Specific Issues
 
+> **Windows Users**: For comprehensive Windows troubleshooting, see the dedicated [Windows Troubleshooting Guide](WINDOWS_TROUBLESHOOTING.md).
+
 ### Windows-Specific
 
 #### Issue: DirectShow errors

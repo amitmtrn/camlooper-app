@@ -15,7 +15,12 @@ import {
   Settings, 
   Monitor, 
   Video, 
-  RotateCcw
+  RotateCcw,
+  FileText,
+  Download,
+  Trash2,
+  Eye,
+  EyeOff
 } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -151,6 +156,9 @@ function CamLooper() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [autoStart, setAutoStart] = useState(true);
   const [isLoopingComplete, setIsLoopingComplete] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
   const [virtualCameraStatus, setVirtualCameraStatus] = useState<VirtualCameraStatus>({
     is_active: false,
     camera_name: "CamLooper Virtual Camera",
@@ -165,22 +173,94 @@ function CamLooper() {
   const frameHolder = React.useRef(new SimpleFrameHolder());
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const batchListenerRef = React.useRef<(() => void) | null>(null);
+  const logTextareaRef = React.useRef<HTMLTextAreaElement>(null);
+
+  // Log management
+  const addLog = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const logEntry = `[${timestamp}] ${message}`;
+    setLogs(prev => {
+      const newLogs = [...prev, logEntry];
+      // Keep only last 100 entries to prevent memory issues
+      return newLogs.slice(-100);
+    });
+    
+    // Auto-scroll to bottom
+    setTimeout(() => {
+      if (logTextareaRef.current) {
+        logTextareaRef.current.scrollTop = logTextareaRef.current.scrollHeight;
+      }
+    }, 100);
+  };
+
+  const clearLogs = () => {
+    setLogs([]);
+  };
+
+  const exportLogs = () => {
+    const logText = logs.join('\n');
+    const blob = new Blob([logText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `camlooper-logs-${new Date().toISOString().split('T')[0]}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Override console.log to capture logs
+  React.useEffect(() => {
+    const originalLog = console.log;
+    const originalError = console.error;
+    const originalWarn = console.warn;
+
+    console.log = (...args) => {
+      originalLog(...args);
+      addLog(`LOG: ${args.join(' ')}`);
+    };
+
+    console.error = (...args) => {
+      originalError(...args);
+      addLog(`ERROR: ${args.join(' ')}`);
+    };
+
+    console.warn = (...args) => {
+      originalWarn(...args);
+      addLog(`WARN: ${args.join(' ')}`);
+    };
+
+    // Add initial log entry
+    addLog('CamLooper application started - logging enabled');
+
+    return () => {
+      console.log = originalLog;
+      console.error = originalError;
+      console.warn = originalWarn;
+    };
+  }, []);
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file && file.type.startsWith('video/')) {
+      console.log('File selected:', file.name, 'Size:', file.size, 'Type:', file.type);
       setSelectedVideo(file);
       setIsUploading(true);
       setUploadProgress(0);
+      setUploadError(null); // Clear any previous error
       
       try {
         // Use efficient streaming upload (no base64 conversion)
         const { uploadVideoFileStream } = await import('./lib/stream-upload');
         
+        console.log('Starting video upload...');
         const videoInfo = await uploadVideoFileStream(file, (progress) => {
+          console.log('Upload progress:', progress.progress + '%');
           setUploadProgress(progress.progress);
         });
         
+        console.log('Video uploaded successfully:', videoInfo);
         setVideoInfo(videoInfo);
         
         // Update metadata display
@@ -195,24 +275,46 @@ function CamLooper() {
           fps: `${Math.round(videoInfo.fps)}fps`
         });
         
+        console.log('Video metadata updated:', {
+          name: videoInfo.filename,
+          duration: formattedDuration,
+          dimensions: `${videoInfo.width}x${videoInfo.height}`,
+          fps: `${Math.round(videoInfo.fps)}fps`
+        });
+        
+        // Clear any previous error on success
+        setUploadError(null);
+        
         // Reset state
         setIsPlaying(false);
         setIsLoopingComplete(false);
         
         // Auto start if enabled
         if (autoStart) {
+          console.log('Auto-starting video playback...');
           await handlePlayPause();
         }
         
       } catch (error) {
         console.error('Error uploading video:', error);
+        // Set error message
+        setUploadError(error instanceof Error ? error.message : 'Failed to upload video');
         // Reset on error
         setSelectedVideo(null);
         setVideoInfo(null);
+        // Reset metadata display back to initial state
+        setVideoMetadata({
+          name: "No Video Selected",
+          duration: "0:00",
+          dimensions: "",
+          fps: ""
+        });
       } finally {
         setIsUploading(false);
         setUploadProgress(100);
       }
+    } else {
+      console.log('Invalid file selected or no file selected');
     }
   };
 
@@ -700,6 +802,11 @@ function CamLooper() {
                 <p className="text-sm text-muted-foreground mb-4">
                   Supports MP4, MOV, AVI, WebM, MKV, FLV, WMV, M4V
                 </p>
+                {uploadError && (
+                  <div className="mb-4 p-3 bg-red-500/20 text-red-400 border border-red-500/40 rounded text-sm">
+                    <strong>Upload Error:</strong> {uploadError}
+                  </div>
+                )}
                 <Button variant="outline" onClick={triggerFileInput} disabled={isUploading}>
                   <Upload className="h-4 w-4 mr-2" />
                   {isUploading ? 'Uploading...' : 'Choose Files'}
@@ -834,6 +941,66 @@ function CamLooper() {
               </Button>
             </div>
           </div>
+        </div>
+
+        {/* Debug Logs */}
+        <div className="mt-6">
+          <Card className="p-4">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold flex items-center">
+                  <FileText className="h-4 w-4 mr-2" />
+                  <span className="text-sm">Debug Logs</span>
+                  <Badge variant="secondary" className="ml-2">
+                    {logs.length}
+                  </Badge>
+                </h3>
+                <div className="flex items-center space-x-2">
+                  <Button variant="ghost" size="sm" onClick={exportLogs} disabled={logs.length === 0}>
+                    <Download className="h-3 w-3 mr-1" />
+                    Export
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={clearLogs} disabled={logs.length === 0}>
+                    <Trash2 className="h-3 w-3 mr-1" />
+                    Clear
+                  </Button>
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    onClick={() => setShowLogs(!showLogs)}
+                  >
+                    {showLogs ? <EyeOff className="h-3 w-3 mr-1" /> : <Eye className="h-3 w-3 mr-1" />}
+                    {showLogs ? 'Hide' : 'Show'}
+                  </Button>
+                </div>
+              </div>
+              
+              {showLogs && (
+                <div className="relative">
+                  <textarea
+                    ref={logTextareaRef}
+                    value={logs.join('\n')}
+                    readOnly
+                    className="w-full h-40 p-3 text-xs font-mono bg-gray-950 text-green-400 rounded border border-gray-700 resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 overflow-y-auto"
+                    placeholder="Debug logs will appear here..."
+                    style={{
+                      fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace',
+                      lineHeight: '1.4'
+                    }}
+                  />
+                  <div className="absolute bottom-2 right-2 text-xs text-gray-500">
+                    {logs.length} entries
+                  </div>
+                </div>
+              )}
+              
+              {!showLogs && logs.length > 0 && (
+                <div className="text-sm text-muted-foreground">
+                  Latest: {logs[logs.length - 1]?.substring(0, 100)}...
+                </div>
+              )}
+            </div>
+          </Card>
         </div>
       </div>
     </div>

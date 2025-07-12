@@ -147,41 +147,55 @@ export async function uploadVideoFileStream(
   file: File,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<VideoInfo> {
-  // For smaller files, use the complete file upload
-  if (file.size <= 10 * 1024 * 1024) { // 10MB or less
-    const arrayBuffer = await file.arrayBuffer();
-    const fileData = Array.from(new Uint8Array(arrayBuffer));
-    
-    if (onProgress) {
-      onProgress({
-        progress: 50,
-        bytesUploaded: file.size / 2,
-        totalBytes: file.size,
-        chunksUploaded: 1,
-        totalChunks: 1,
+  console.log('uploadVideoFileStream called with file:', file.name, 'size:', file.size);
+  
+  try {
+    // For smaller files, use the complete file upload
+    if (file.size <= 10 * 1024 * 1024) { // 10MB or less
+      console.log('Using complete file upload for small file...');
+      const arrayBuffer = await file.arrayBuffer();
+      const fileData = Array.from(new Uint8Array(arrayBuffer));
+      
+      console.log('File converted to array buffer, size:', fileData.length);
+      
+      if (onProgress) {
+        onProgress({
+          progress: 50,
+          bytesUploaded: file.size / 2,
+          totalBytes: file.size,
+          chunksUploaded: 1,
+          totalChunks: 1,
+        });
+      }
+      
+      console.log('Calling stream_upload_and_load_video...');
+      const videoInfo = await invoke<VideoInfo>('stream_upload_and_load_video', {
+        filename: file.name,
+        fileData,
       });
+      
+      console.log('stream_upload_and_load_video returned:', videoInfo);
+      
+      if (onProgress) {
+        onProgress({
+          progress: 100,
+          bytesUploaded: file.size,
+          totalBytes: file.size,
+          chunksUploaded: 1,
+          totalChunks: 1,
+        });
+      }
+      
+      return videoInfo;
+    } else {
+      console.log('Using chunked upload for large file...');
+      // For larger files, use chunked upload
+      const uploader = new StreamUploader(file, { onProgress });
+      return await uploader.upload();
     }
-    
-    const videoInfo = await invoke<VideoInfo>('stream_upload_and_load_video', {
-      filename: file.name,
-      fileData,
-    });
-    
-    if (onProgress) {
-      onProgress({
-        progress: 100,
-        bytesUploaded: file.size,
-        totalBytes: file.size,
-        chunksUploaded: 1,
-        totalChunks: 1,
-      });
-    }
-    
-    return videoInfo;
-  } else {
-    // For larger files, use chunked upload
-    const uploader = new StreamUploader(file, { onProgress });
-    return await uploader.upload();
+  } catch (error) {
+    console.error('Error in uploadVideoFileStream:', error);
+    throw error;
   }
 }
 

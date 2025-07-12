@@ -191,18 +191,33 @@ async fn get_performance_metrics() -> Result<PerformanceMetrics, String> {
 // New efficient streaming workflow command
 #[tauri::command]
 async fn stream_upload_and_load_video(filename: String, file_data: Vec<u8>) -> Result<VideoInfo, String> {
+    println!("stream_upload_and_load_video called with filename: {}, data_size: {}", filename, file_data.len());
+    
     if !video_upload::is_supported_video_format(&filename) {
+        println!("Unsupported video format: {}", filename);
         return Err("Unsupported video format".to_string());
     }
     
+    println!("Video format is supported, proceeding with upload...");
+    
     // Upload the file using streaming (no base64 conversion)
     let file_path = video_upload::upload_complete_file_stream(filename.clone(), file_data)
-        .map_err(|e| format!("Streaming upload failed: {}", e))?;
+        .map_err(|e| {
+            println!("Streaming upload failed: {}", e);
+            format!("Streaming upload failed: {}", e)
+        })?;
+    
+    println!("File uploaded successfully to: {}", file_path);
     
     // Load the video
     let video_info = video_processor::load_video_file(file_path)
         .await
-        .map_err(|e| format!("Video loading failed: {}", e))?;
+        .map_err(|e| {
+            println!("Video loading failed: {}", e);
+            format!("Video loading failed: {}", e)
+        })?;
+    
+    println!("Video loaded successfully: {:?}", video_info);
     
     Ok(video_info)
 }

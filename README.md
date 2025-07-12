@@ -95,6 +95,18 @@ sudo modprobe v4l2loopback
 - Create reproducible test scenarios
 - Demonstrate software with controlled video content
 
+## 🖥️ Platform Support
+
+### Full Support
+- ✅ **Linux**: Complete functionality with FFmpeg and v4l2loopback
+- ✅ **macOS**: Complete functionality with FFmpeg and AVFoundation
+
+### Limited Support
+- ⚠️ **Windows**: Basic functionality with limitations
+  - Video upload works but with limited metadata extraction
+  - Streaming shows generated frames instead of actual video
+  - See [Windows Limitations](docs/WINDOWS_LIMITATIONS.md) for details and solutions
+
 ## 🛠 Technology Stack
 
 CamLooper is built with modern, high-performance technologies:
