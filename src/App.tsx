@@ -86,58 +86,29 @@ interface PerformanceMetrics {
   memory_usage: number;
 }
 
-// Frame buffer for smoother frontend rendering
-class FrontendFrameBuffer {
-  private frames: VideoFrame[] = [];
-  private maxSize: number = 60; // ~2 seconds at 30fps for better buffering
-  private currentIndex: number = 0;
-  private lastFrameTime: number = 0;
+// Simple frame holder for immediate playback
+class SimpleFrameHolder {
+  private latestFrame: VideoFrame | null = null;
   private isPlaying: boolean = false;
 
-  push(frames: VideoFrame[]) {
-    // Add new frames to buffer
-    this.frames.push(...frames);
-    
-    // Remove old frames if buffer is full
-    if (this.frames.length > this.maxSize) {
-      const excess = this.frames.length - this.maxSize;
-      this.frames.splice(0, excess);
-      this.currentIndex = Math.max(0, this.currentIndex - excess);
-    }
+  setLatestFrame(frame: VideoFrame) {
+    this.latestFrame = frame;
   }
 
-  getNextFrame(): VideoFrame | null {
-    if (this.currentIndex >= this.frames.length) {
-      return null;
-    }
-    
-    const frame = this.frames[this.currentIndex];
-    this.currentIndex++;
-    return frame;
+  getLatestFrame(): VideoFrame | null {
+    return this.isPlaying ? this.latestFrame : null;
   }
 
   clear() {
-    this.frames = [];
-    this.currentIndex = 0;
-  }
-
-  getBufferHealth(): number {
-    const remainingFrames = this.frames.length - this.currentIndex;
-    return Math.min(1.0, remainingFrames / (this.maxSize * 0.5));
-  }
-
-  hasFrames(): boolean {
-    return this.currentIndex < this.frames.length;
+    this.latestFrame = null;
   }
 
   start() {
     this.isPlaying = true;
-    this.lastFrameTime = performance.now();
   }
 
   stop() {
     this.isPlaying = false;
-    this.currentIndex = 0;
   }
 }
 
@@ -175,7 +146,7 @@ function CamLooper() {
     buffer_size: 0,
     memory_usage: 0
   });
-  const [isBuffering, setIsBuffering] = useState(false);
+
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [autoStart, setAutoStart] = useState(true);
@@ -190,10 +161,9 @@ function CamLooper() {
   const [isVirtualCamLoading, setIsVirtualCamLoading] = useState(false);
   const [showPerformanceMetrics, setShowPerformanceMetrics] = useState(false);
   
-  // Frontend frame buffer
-  const frameBuffer = React.useRef(new FrontendFrameBuffer());
+  // Simple frame holder
+  const frameHolder = React.useRef(new SimpleFrameHolder());
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const renderIntervalRef = React.useRef<number | null>(null);
   const batchListenerRef = React.useRef<(() => void) | null>(null);
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -227,7 +197,6 @@ function CamLooper() {
         
         // Reset state
         setIsPlaying(false);
-        setIsBuffering(false);
         setIsLoopingComplete(false);
         
         // Auto start if enabled
@@ -279,10 +248,7 @@ function CamLooper() {
       if (isPlaying) {
         await invoke('pause_video_stream');
         setIsPlaying(false);
-        if (renderIntervalRef.current) {
-          clearInterval(renderIntervalRef.current);
-          renderIntervalRef.current = null;
-        }
+        frameHolder.current.stop();
       } else {
         await invoke('start_video_stream');
         setIsPlaying(true);
@@ -300,10 +266,7 @@ function CamLooper() {
     try {
       await invoke('stop_video_stream');
       setIsPlaying(false);
-      if (renderIntervalRef.current) {
-        clearInterval(renderIntervalRef.current);
-        renderIntervalRef.current = null;
-      }
+      frameHolder.current.stop();
       setCurrentFrame(null);
     } catch (error) {
       console.error('Error stopping video:', error);
@@ -330,30 +293,28 @@ function CamLooper() {
         batchListenerRef.current = null;
       }
       
-      // Start frame rendering loop
-      if (renderIntervalRef.current) {
-        clearInterval(renderIntervalRef.current);
-      }
-      
-      frameBuffer.current.start();
-      
-      // Start smooth rendering loop - optimized for better performance
-      renderIntervalRef.current = setInterval(() => {
-        const nextFrame = frameBuffer.current.getNextFrame();
-        if (nextFrame) {
-          setCurrentFrame(nextFrame);
-          setIsBuffering(false);
-        } else if (frameBuffer.current.hasFrames()) {
-          // Buffer has frames but we're at the end, might need to buffer more
-          setIsBuffering(true);
-        }
-      }, 1000 / 30) as unknown as number; // 30 FPS rendering
+      frameHolder.current.start();
       
       // Listen for push-based video frame batches
       try {
         const unlisten = await listen<FrameBatch>('video-frame-batch', (event) => {
           const batch = event.payload;
-          frameBuffer.current.push(batch.frames);
+          console.log('Received video frame batch:', batch.frames.length, 'frames, sequence:', batch.sequence_id);
+          
+          // Handle test event
+          if (batch.sequence_id === 999) {
+            console.log('Received test event - event system is working!');
+            return;
+          }
+          
+          // Display frames immediately as they arrive
+          if (batch.frames.length > 0) {
+            // Use the latest frame from the batch
+            const latestFrame = batch.frames[batch.frames.length - 1];
+            frameHolder.current.setLatestFrame(latestFrame);
+            setCurrentFrame(latestFrame);
+            console.log('Displaying frame with timestamp:', latestFrame.timestamp);
+          }
           
           // Send first frame to virtual camera if active
           if (isVirtualCamActive && batch.frames.length > 0) {
@@ -365,6 +326,7 @@ function CamLooper() {
         });
         
         batchListenerRef.current = unlisten;
+        console.log('Video frame batch listener set up successfully');
       } catch (error) {
         console.error('Error setting up video frame listener:', error);
       }
@@ -387,11 +349,7 @@ function CamLooper() {
         
         if (!status.is_playing && isPlaying) {
           setIsPlaying(false);
-          if (renderIntervalRef.current) {
-            clearInterval(renderIntervalRef.current);
-            renderIntervalRef.current = null;
-          }
-          frameBuffer.current.stop();
+          frameHolder.current.stop();
           
           // Check if looping is complete
           if (status.current_loop >= status.loop_count && status.loop_count !== 10) {
@@ -479,15 +437,12 @@ function CamLooper() {
 
       // Cleanup on unmount
     React.useEffect(() => {
-      const currentFrameBuffer = frameBuffer.current;
+      const currentFrameHolder = frameHolder.current;
       return () => {
-        if (renderIntervalRef.current) {
-          clearInterval(renderIntervalRef.current);
-        }
         if (batchListenerRef.current) {
           batchListenerRef.current();
         }
-        currentFrameBuffer.stop();
+        currentFrameHolder.stop();
       };
     }, []);
 
@@ -514,7 +469,7 @@ function CamLooper() {
                     <div>
                       <p className="text-lg font-medium">{videoMetadata.name}</p>
                       <p className="text-sm text-muted-foreground">
-                        {isBuffering ? "Loading..." : "Ready to play"}
+                        {isPlaying ? "Playing..." : "Ready to play"}
                       </p>
                     </div>
                   </div>
@@ -546,11 +501,9 @@ function CamLooper() {
                       variant="glassmorphism"
                       size="icon"
                       onClick={handlePlayPause}
-                      disabled={isBuffering || !videoInfo}
+                      disabled={!videoInfo}
                     >
-                      {isBuffering ? (
-                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      ) : isPlaying ? (
+                      {isPlaying ? (
                         <Pause className="h-4 w-4" />
                       ) : (
                         <Play className="h-4 w-4" />
@@ -567,9 +520,9 @@ function CamLooper() {
                 
                 {/* Progress Bar */}
                 <div className="mt-2">
-                  <div className={`w-full bg-white/20 rounded-full h-2 transition-all relative ${isBuffering ? 'opacity-50' : ''}`}>
+                  <div className="w-full bg-white/20 rounded-full h-2 transition-all">
                     <div 
-                      className={`bg-primary h-2 rounded-full transition-all ${isBuffering ? 'animate-pulse' : ''}`}
+                      className="bg-primary h-2 rounded-full transition-all"
                       style={{ 
                         width: streamStatus.duration > 0 ? `${Math.max(0, Math.min(100, (streamStatus.current_time / streamStatus.duration) * 100))}%` : '0%' 
                       }} 
@@ -692,28 +645,33 @@ function CamLooper() {
                       <span className="ml-2 font-mono">{performanceMetrics.current_quality}%</span>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">Buffer Size:</span>
-                      <span className="ml-2 font-mono">{performanceMetrics.buffer_size} frames</span>
+                      <span className="text-muted-foreground">Status:</span>
+                      <span className="ml-2 font-mono">
+                        {isPlaying ? 'Playing' : 'Stopped'}
+                      </span>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">Buffer Health:</span>
-                      <span className="ml-2 font-mono">{Math.round(streamStatus.buffer_health * 100)}%</span>
+                      <span className="text-muted-foreground">FPS:</span>
+                      <span className="ml-2 font-mono">{streamStatus.actual_fps.toFixed(1)}/{streamStatus.target_fps.toFixed(0)}</span>
                     </div>
                   </div>
                   
-                  {/* Buffer Health Bar */}
+                  {/* Playback Status Bar */}
                   <div className="mt-3">
                     <div className="flex justify-between text-xs mb-1">
-                      <span>Buffer Health</span>
-                      <span>{Math.round(streamStatus.buffer_health * 100)}%</span>
+                      <span>Playback Status</span>
+                      <span>
+                        {isPlaying ? 'Playing' : 'Stopped'}
+                      </span>
                     </div>
                     <div className="w-full bg-gray-700 rounded-full h-2">
                       <div 
                         className={`h-2 rounded-full transition-all ${
-                          streamStatus.buffer_health > 0.7 ? 'bg-green-500' : 
-                          streamStatus.buffer_health > 0.3 ? 'bg-yellow-500' : 'bg-red-500'
+                          isPlaying ? 'bg-green-500' : 'bg-gray-500'
                         }`}
-                        style={{ width: `${Math.max(0, Math.min(100, streamStatus.buffer_health * 100))}%` }}
+                        style={{ 
+                          width: isPlaying ? '100%' : '0%'
+                        }}
                       />
                     </div>
                   </div>
