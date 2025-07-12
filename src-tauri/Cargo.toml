@@ -32,9 +32,7 @@ base64 = "0.22"
 uuid = { version = "1.0", features = ["v4"] }
 futures-util = "0.3"
 tempfile = "3.0"
-
-# FFmpeg only for non-Windows platforms (Windows uses DirectShow)
-[target.'cfg(not(windows))'.dependencies]
+# FFmpeg for all platforms including Windows
 ffmpeg-next = "7.0"
 
 # Platform-specific dependencies for virtual camera

@@ -115,7 +115,7 @@ class SimpleFrameHolder {
 function CamLooper() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVirtualCamActive, setIsVirtualCamActive] = useState(false);
-  const [loopCount, setLoopCount] = useState([5]);
+  const [loopCount, setLoopCount] = useState([10]);
   const [selectedVideo, setSelectedVideo] = useState<File | null>(null);
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [currentFrame, setCurrentFrame] = useState<VideoFrame | null>(null);
@@ -129,7 +129,7 @@ function CamLooper() {
     is_playing: false,
     current_time: 0,
     duration: 0,
-    loop_count: 5,
+    loop_count: 10,
     current_loop: 0,
     buffer_health: 0.0,
     actual_fps: 0.0,
@@ -824,39 +824,10 @@ function CamLooper() {
               </Card>
             )}
 
-            {/* App Compatibility */}
-            <Card className="p-4">
-              <div className="space-y-4">
-                <h3 className="font-semibold">Compatible Apps</h3>
-                
-                <div className="space-y-2">
-                  {[
-                    { name: "Zoom", status: "detected" },
-                    { name: "Discord", status: "ready" },
-                    { name: "OBS Studio", status: "ready" },
-                    { name: "Microsoft Teams", status: "ready" }
-                  ].map((app, index) => (
-                    <div key={index} className="flex items-center justify-between p-2 bg-muted/50 rounded">
-                      <span className="text-sm">{app.name}</span>
-                      <Badge variant="secondary" className={
-                        app.status === "detected" 
-                          ? "bg-green-500/20 text-green-400 border-green-500/40" 
-                          : "bg-muted-foreground/20"
-                      }>
-                        {app.status === "detected" ? "Detected" : "Ready"}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </Card>
+
 
             {/* Quick Actions */}
             <div className="space-y-2">
-              <Button variant="outline" size="sm" className="w-full">
-                <Settings className="h-4 w-4 mr-2" />
-                Advanced Settings
-              </Button>
               <Button variant="outline" size="sm" className="w-full">
                 <Video className="h-4 w-4 mr-2" />
                 Record New Video
