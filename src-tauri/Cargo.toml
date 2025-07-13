@@ -55,6 +55,7 @@ windows = { version = "0.58", features = [
     "implement"
 ] }
 widestring = "1.0"
+mp4 = "0.14.0"  # Pure Rust MP4 library for Windows video processing
 # For Windows builds, we'll use a simpler implementation without FFmpeg
 # This avoids cross-compilation issues with native libraries
 

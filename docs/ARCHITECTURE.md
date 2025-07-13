@@ -163,13 +163,16 @@ Manages file uploads with support for both streaming and complete file uploads.
 - **Session Management**: Temporary file handling and cleanup
 
 #### Virtual Camera Manager (`virtual_camera.rs`)
-Platform-specific virtual camera implementation.
+Platform-specific virtual camera implementation with automatic frame resizing.
 
 **Capabilities:**
 - Cross-platform virtual camera creation
 - Frame injection into virtual camera devices
 - Camera configuration and status management
 - Device enumeration and selection
+- Automatic frame resizing with bilinear interpolation
+- High-quality scaling for consistent output resolution
+- Platform-optimized frame processing (Windows DirectShow, Linux V4L2, macOS AVFoundation)
 
 ## Data Flow
 

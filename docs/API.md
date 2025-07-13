@@ -122,7 +122,7 @@ interface ChunkUploadResponse {
 
 ### start_virtual_camera
 
-Starts the virtual camera with the specified configuration.
+Starts the virtual camera with the specified configuration. All frames sent to the virtual camera will be automatically resized to match the configured resolution.
 
 ```typescript
 async function start_virtual_camera(
@@ -132,6 +132,17 @@ async function start_virtual_camera(
 
 **Parameters:**
 - `config` (optional): Virtual camera configuration. Defaults to 1920x1080@30fps.
+
+**Configuration Options:**
+- `width`: Virtual camera output width in pixels
+- `height`: Virtual camera output height in pixels  
+- `fps`: Target frame rate for the virtual camera
+- `camera_name`: Display name for the virtual camera device
+
+**Frame Processing:**
+- All input frames are automatically resized to match the configured resolution
+- High-quality bilinear interpolation ensures smooth scaling
+- Consistent output format across all supported platforms
 
 **Example:**
 ```typescript
@@ -178,7 +189,7 @@ if (status.is_active) {
 
 ### send_frame_to_virtual_camera
 
-Sends a frame to the virtual camera for display.
+Sends a frame to the virtual camera for display. Frames are automatically resized to match the configured virtual camera resolution using high-quality bilinear interpolation.
 
 ```typescript
 async function send_frame_to_virtual_camera(
@@ -187,7 +198,13 @@ async function send_frame_to_virtual_camera(
 ```
 
 **Parameters:**
-- `frame_data`: Base64-encoded JPEG frame data
+- `frame_data`: Base64-encoded JPEG frame data (will be automatically resized to match virtual camera configuration)
+
+**Frame Processing:**
+- **Automatic Resizing**: Frames are resized to match the configured virtual camera resolution
+- **High-Quality Scaling**: Uses bilinear interpolation for smooth scaling
+- **Format Handling**: Accepts JPEG input and converts to RGB for virtual camera output
+- **Cross-Platform**: Consistent behavior across Windows, Linux, and macOS
 
 **Example:**
 ```typescript

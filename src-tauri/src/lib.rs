@@ -209,8 +209,8 @@ async fn stream_upload_and_load_video(filename: String, file_data: Vec<u8>) -> R
     
     println!("File uploaded successfully to: {}", file_path);
     
-    // Load the video
-    let video_info = video_processor::load_video_file(file_path)
+    // Load the video with original filename for proper format detection
+    let video_info = video_processor::load_video_file_with_original_name(file_path, filename)
         .await
         .map_err(|e| {
             println!("Video loading failed: {}", e);

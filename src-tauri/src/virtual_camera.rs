@@ -151,6 +151,74 @@ impl VirtualCamera {
         self.status.lock().await.is_active
     }
 
+    /// Common frame resizing method for all platforms
+    fn resize_frame(rgb_data: &[u8], src_width: usize, src_height: usize, dst_width: usize, dst_height: usize) -> Vec<u8> {
+        if src_width == dst_width && src_height == dst_height {
+            return rgb_data.to_vec();
+        }
+
+        let mut resized_data = vec![0u8; dst_width * dst_height * 3];
+        
+        // Bilinear interpolation for better quality
+        for dst_y in 0..dst_height {
+            for dst_x in 0..dst_width {
+                // Calculate source coordinates
+                let src_x_f = (dst_x as f32 * src_width as f32) / dst_width as f32;
+                let src_y_f = (dst_y as f32 * src_height as f32) / dst_height as f32;
+                
+                // Get integer coordinates
+                let src_x = src_x_f as usize;
+                let src_y = src_y_f as usize;
+                
+                // Calculate fractional parts
+                let fx = src_x_f - src_x as f32;
+                let fy = src_y_f - src_y as f32;
+                
+                // Get the four surrounding pixels
+                let x1 = src_x.min(src_width - 1);
+                let y1 = src_y.min(src_height - 1);
+                let x2 = (src_x + 1).min(src_width - 1);
+                let y2 = (src_y + 1).min(src_height - 1);
+                
+                // Calculate destination index
+                let dst_idx = (dst_y * dst_width + dst_x) * 3;
+                
+                // Perform bilinear interpolation for each color channel
+                for c in 0..3 {
+                    let p1 = rgb_data[(y1 * src_width + x1) * 3 + c] as f32;
+                    let p2 = rgb_data[(y1 * src_width + x2) * 3 + c] as f32;
+                    let p3 = rgb_data[(y2 * src_width + x1) * 3 + c] as f32;
+                    let p4 = rgb_data[(y2 * src_width + x2) * 3 + c] as f32;
+                    
+                    // Interpolate
+                    let top = p1 * (1.0 - fx) + p2 * fx;
+                    let bottom = p3 * (1.0 - fx) + p4 * fx;
+                    let final_value = top * (1.0 - fy) + bottom * fy;
+                    
+                    resized_data[dst_idx + c] = final_value.round() as u8;
+                }
+            }
+        }
+        
+        resized_data
+    }
+
+    /// Convert JPEG to RGB and resize to target dimensions
+    fn jpeg_to_rgb_resized(jpeg_data: &[u8], target_width: u32, target_height: u32) -> Result<Vec<u8>> {
+        // Decode JPEG to image
+        let img = image::load_from_memory(jpeg_data)?;
+        let rgb_img = img.to_rgb8();
+        
+        let src_width = rgb_img.width() as usize;
+        let src_height = rgb_img.height() as usize;
+        let raw_data = rgb_img.into_raw();
+        
+        // Resize to target dimensions
+        let resized_data = Self::resize_frame(&raw_data, src_width, src_height, target_width as usize, target_height as usize);
+        
+        Ok(resized_data)
+    }
+
     #[cfg(target_os = "windows")]
     async fn start_platform_camera(&self, mut frame_receiver: mpsc::UnboundedReceiver<Vec<u8>>) -> Result<()> {
         // Windows DirectShow implementation
@@ -189,10 +257,10 @@ impl VirtualCamera {
                 
                 // Send frame to DirectShow
                 if let Some(ref frame_data) = latest_frame {
-                    // Convert JPEG to RGB if needed
-                    if let Ok((rgb_data, width, height)) = Self::jpeg_to_rgb(frame_data) {
+                    // Convert JPEG to RGB and resize to configured dimensions
+                    if let Ok(rgb_data) = Self::jpeg_to_rgb_resized(frame_data, config.width, config.height) {
                         // Send to Windows virtual camera
-                        if let Err(e) = windows_vcam::send_frame_to_virtual_camera(&rgb_data, width, height) {
+                        if let Err(e) = windows_vcam::send_frame_to_virtual_camera(&rgb_data, config.width, config.height) {
                             eprintln!("Failed to send frame to Windows virtual camera: {}", e);
                         }
                     }
@@ -223,7 +291,7 @@ impl VirtualCamera {
     #[cfg(target_os = "linux")]
     async fn start_platform_camera(&self, mut frame_receiver: mpsc::UnboundedReceiver<Vec<u8>>) -> Result<()> {
         // Linux v4l2loopback implementation using FFmpeg with frame rate control
-        let _config = self.config.clone();
+        let config = self.config.clone();
         let status = self.status.clone();
         
         tokio::spawn(async move {
@@ -242,17 +310,20 @@ impl VirtualCamera {
             
             println!("Using v4l2loopback device: {}", device_path);
             
-            // Start FFmpeg process to write to the v4l2loopback device
+            // Start FFmpeg process to write to the v4l2loopback device with configured dimensions
+            let video_size = format!("{}x{}", config.width, config.height);
+            let framerate = config.fps.to_string();
+            
             let mut ffmpeg_process = match tokio::process::Command::new("ffmpeg")
                 .args([
                     "-f", "rawvideo",
                     "-pixel_format", "rgb24",
-                    "-video_size", "640x480",
-                    "-framerate", "30",
+                    "-video_size", &video_size,
+                    "-framerate", &framerate,
                     "-i", "pipe:0",
                     "-f", "v4l2",
                     "-pix_fmt", "rgb24",
-                    "-vf", "fps=30",  // Force consistent 30 FPS output
+                    "-vf", &format!("fps={}", config.fps),  // Use configured FPS
                     &device_path,
                 ])
                 .stdin(Stdio::piped())
@@ -278,7 +349,7 @@ impl VirtualCamera {
             
             let mut frame_count = 0u64;
             let mut last_frame_rgb: Option<Vec<u8>> = None;
-            let target_frame_duration = tokio::time::Duration::from_millis(33); // 30 FPS = 33.33ms per frame
+            let target_frame_duration = tokio::time::Duration::from_millis(1000 / config.fps as u64);
             let mut frame_timer = tokio::time::interval(target_frame_duration);
             frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             
@@ -296,7 +367,8 @@ impl VirtualCamera {
                 }
             });
             
-            println!("Virtual camera frame processing started");
+            println!("Virtual camera frame processing started with resolution {}x{} at {} FPS", 
+                config.width, config.height, config.fps);
             
             loop {
                 // Wait for the next frame time
@@ -320,44 +392,31 @@ impl VirtualCamera {
                     None
                 };
                 
-                // Convert frame data to RGB if available
-                let (rgb_data, frame_width, frame_height) = if let Some(frame_data) = current_frame_data {
-                    match Self::jpeg_to_raw_rgb(&frame_data) {
-                        Ok((data, width, height)) => {
+                // Convert and resize frame data to configured dimensions
+                let rgb_data = if let Some(frame_data) = current_frame_data {
+                    match Self::jpeg_to_rgb_resized(&frame_data, config.width, config.height) {
+                        Ok(data) => {
                             // Cache this frame for frame repetition  
                             last_frame_rgb = Some(data.clone());
-                            (Some(data), width, height)
+                            Some(data)
                         }
                         Err(e) => {
-                            eprintln!("Failed to convert JPEG to RGB: {}", e);
-                            // Use last known good frame with default dimensions
-                            if let Some(ref cached_frame) = last_frame_rgb {
-                                (Some(cached_frame.clone()), 640, 480)
-                            } else {
-                                (None, 640, 480)
-                            }
+                            eprintln!("Failed to convert and resize JPEG: {}", e);
+                            // Use last known good frame
+                            last_frame_rgb.clone()
                         }
                     }
                 } else {
                     // No new frame available, repeat last frame
-                    if let Some(ref cached_frame) = last_frame_rgb {
-                        (Some(cached_frame.clone()), 640, 480)
-                    } else {
-                        (None, 640, 480)
-                    }
+                    last_frame_rgb.clone()
                 };
                 
                 // Send frame to FFmpeg (or black frame if no data available)
-                let final_rgb_data = if let Some(rgb_data) = rgb_data {
-                    // Scale to target resolution if needed
-                    if (frame_width, frame_height) != (640, 480) {
-                        Self::scale_rgb_data(&rgb_data, frame_width, frame_height, 640, 480)
-                    } else {
-                        rgb_data
-                    }
+                let final_rgb_data = if let Some(data) = rgb_data {
+                    data
                 } else {
-                    // Create a black frame as fallback
-                    vec![0u8; 640 * 480 * 3]
+                    // Create a black frame as fallback with configured dimensions
+                    vec![0u8; (config.width * config.height * 3) as usize]
                 };
                 
                 // Write frame to FFmpeg stdin
@@ -453,19 +512,6 @@ impl VirtualCamera {
         Ok(())
     }
 
-    #[cfg(windows)]
-    fn jpeg_to_rgb(jpeg_data: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
-        // Decode JPEG to image
-        let img = image::load_from_memory(jpeg_data)?;
-        let rgb_img = img.to_rgb8();
-        
-        let width = rgb_img.width();
-        let height = rgb_img.height();
-        
-        // Convert to raw RGB bytes
-        Ok((rgb_img.into_raw(), width, height))
-    }
-
     #[cfg(target_os = "linux")]
     fn find_loopback_device() -> Result<(String, usize)> {
         // Look for v4l2loopback devices
@@ -531,43 +577,6 @@ impl VirtualCamera {
         }
         
         false
-    }
-
-    #[cfg(target_os = "linux")]
-    fn jpeg_to_raw_rgb(jpeg_data: &[u8]) -> Result<(Vec<u8>, usize, usize)> {
-        // Decode JPEG to image
-        let img = image::load_from_memory(jpeg_data)?;
-        let rgb_img = img.to_rgb8();
-        
-        let width = rgb_img.width() as usize;
-        let height = rgb_img.height() as usize;
-        
-        // Convert to raw RGB bytes
-        Ok((rgb_img.into_raw(), width, height))
-    }
-
-    #[cfg(target_os = "linux")]
-    fn scale_rgb_data(rgb_data: &[u8], src_width: usize, src_height: usize, dst_width: usize, dst_height: usize) -> Vec<u8> {
-        let mut scaled_data = vec![0u8; dst_width * dst_height * 3];
-        
-        // Simple nearest neighbor scaling
-        for dst_y in 0..dst_height {
-            for dst_x in 0..dst_width {
-                let src_x = (dst_x * src_width) / dst_width;
-                let src_y = (dst_y * src_height) / dst_height;
-                
-                let src_idx = (src_y * src_width + src_x) * 3;
-                let dst_idx = (dst_y * dst_width + dst_x) * 3;
-                
-                if src_idx + 2 < rgb_data.len() && dst_idx + 2 < scaled_data.len() {
-                    scaled_data[dst_idx] = rgb_data[src_idx];     // R
-                    scaled_data[dst_idx + 1] = rgb_data[src_idx + 1]; // G
-                    scaled_data[dst_idx + 2] = rgb_data[src_idx + 2]; // B
-                }
-            }
-        }
-        
-        scaled_data
     }
 }
 
