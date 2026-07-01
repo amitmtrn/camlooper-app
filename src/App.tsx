@@ -759,12 +759,10 @@ function CamLooper() {
                     className="w-full h-full object-cover"
                   />
                 ) : (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="text-center space-y-4">
-                      <div className="w-24 h-24 bg-primary/20 rounded-full flex items-center justify-center mx-auto">
-                        <Radio className="h-12 w-12 text-primary" />
-                      </div>
-                      <p className="text-sm text-muted-foreground">Starting live camera…</p>
+                  <div className="absolute inset-0 flex items-center justify-center bg-black">
+                    <img src="/offline-placeholder.png" alt="Starting live camera" className="w-full h-full object-contain opacity-80" />
+                    <div className="absolute bottom-12">
+                      <p className="text-sm text-white/90 font-medium animate-pulse drop-shadow-lg">Starting live camera…</p>
                     </div>
                   </div>
                 )
@@ -790,13 +788,14 @@ function CamLooper() {
                 </div>
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="text-center space-y-4">
-                    <div className="w-24 h-24 bg-primary/20 rounded-full flex items-center justify-center mx-auto">
+                  <img src="/splash-screen.png" alt="CamLooper" className="absolute inset-0 w-full h-full object-cover opacity-20" />
+                  <div className="text-center space-y-4 relative z-10">
+                    <div className="w-24 h-24 bg-primary/20 backdrop-blur-sm rounded-full flex items-center justify-center mx-auto">
                       <Video className="h-12 w-12 text-primary" />
                     </div>
                     <div>
-                      <p className="text-lg font-medium">{videoMetadata.name}</p>
-                      <p className="text-sm text-muted-foreground">
+                      <p className="text-lg font-medium drop-shadow-md">{videoMetadata.name}</p>
+                      <p className="text-sm text-muted-foreground drop-shadow-md">
                         {videoMetadata.dimensions && videoMetadata.fps 
                           ? `${videoMetadata.dimensions} • ${videoMetadata.fps} • ${videoMetadata.duration}`
                           : "Click Choose Files to load a video"
