@@ -49,8 +49,7 @@
       }
     },
     "macOS": {
-      "entitlements": "scripts/Entitlements.plist",
-      "frameworks": ["SystemExtensions.framework"]
+      "entitlements": "scripts/Entitlements.plist"
     },
     "linux": {
       "deb": {
