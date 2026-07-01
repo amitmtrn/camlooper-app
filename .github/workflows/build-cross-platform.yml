@@ -21,6 +21,8 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write   # tauri-action needs this to create/upload the Release
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +56,10 @@ jobs:
     - name: Install dependencies (macOS)
       if: startsWith(matrix.platform, 'macos')
       run: |
-        brew install ffmpeg pkg-config
+        # ffmpeg-sys-next 7.x only supports FFmpeg <= 7; Homebrew's default `ffmpeg`
+        # is now 8.x, so install the keg-only ffmpeg@7 and expose it to pkg-config.
+        brew install ffmpeg@7 pkg-config
+        echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg@7)/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
 
     - name: Verify FFmpeg installation (Linux/macOS)
       if: matrix.platform != 'windows-latest'
