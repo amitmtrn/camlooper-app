@@ -1,0 +1,7 @@
+# Exclude all downloaded DLL files
+*.dll
+*.exe
+*.zip
+
+# Keep the folder structure with a README
+!README.md 

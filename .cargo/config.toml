@@ -1,0 +1,28 @@
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+
+[target.i686-pc-windows-gnu]
+linker = "i686-w64-mingw32-gcc"
+ar = "i686-w64-mingw32-ar"
+
+# Keep MSVC targets for reference (with xwin setup)
+[target.x86_64-pc-windows-msvc]
+linker = "lld"
+rustflags = ["-C", "linker=lld", "-C", "link-arg=-fuse-ld=lld"]
+
+[target.i686-pc-windows-msvc]
+linker = "lld"
+rustflags = ["-C", "linker=lld", "-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-pc-windows-msvc]
+linker = "lld"
+rustflags = ["-C", "linker=lld", "-C", "link-arg=-fuse-ld=lld"]
+
+[env]
+# Set the resource compiler for Windows builds
+RC_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-windres"
+RC_i686_pc_windows_gnu = "i686-w64-mingw32-windres"
+RC_x86_64_pc_windows_msvc = "llvm-rc"
+RC_i686_pc_windows_msvc = "llvm-rc"
+RC_aarch64_pc_windows_msvc = "llvm-rc" 
