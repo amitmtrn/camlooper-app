@@ -52,26 +52,67 @@ CamLooper is a powerful desktop application that transforms any video recording 
 
 ### Download & Install
 
+Grab the installer for your platform from the
+[releases page](https://github.com/amitmtrn/camlooper-app/releases).
+
+> ⚠️ **Unsigned builds:** the published installers are not yet code-signed. Windows
+> SmartScreen and macOS Gatekeeper will warn on first launch — this is expected. On
+> **macOS the virtual-camera System Extension will not load until the app is signed and
+> notarized** with an Apple Developer certificate (see [Building & Releasing](#-building--releasing));
+> until then the app runs but the virtual camera won't register on macOS.
+
 #### Windows
-1. Download the `.msi` installer from [releases](https://github.com/your-org/camlooper/releases)
-2. Run the installer as administrator
-3. Virtual camera drivers will be installed automatically
+1. Download the `.exe` (NSIS) or `.msi` installer.
+2. Run it as administrator (SmartScreen → *More info* → *Run anyway*).
+3. Virtual camera drivers are installed automatically.
 
 #### macOS
-1. Download the `.dmg` file from [releases](https://github.com/your-org/camlooper/releases)
-2. Drag CamLooper to Applications folder
-3. Grant necessary permissions when prompted
+1. Download the `.dmg` matching your chip — **Apple Silicon** (`aarch64`) or **Intel** (`x86_64`).
+2. Open the DMG and drag CamLooper to Applications.
+3. First launch: right-click → *Open* to bypass Gatekeeper, then grant camera permission.
 
 #### Linux
 ```bash
-# Download AppImage
-wget https://github.com/your-org/camlooper/releases/latest/download/CamLooper.AppImage
-chmod +x CamLooper.AppImage
+# Download the AppImage (portable, no install needed)
+wget https://github.com/amitmtrn/camlooper-app/releases/latest/download/camlooper_x86_64.AppImage
+chmod +x camlooper_*.AppImage
+./camlooper_*.AppImage
 
-# Install v4l2loopback for virtual camera support
+# Virtual camera support requires the v4l2loopback kernel module on the host
 sudo apt install v4l2loopback-dkms
 sudo modprobe v4l2loopback
 ```
+
+Prefer a package? The `.deb` and `.rpm` installers pull in `v4l2loopback-dkms` + `ffmpeg`
+automatically:
+```bash
+sudo apt install ./camlooper_*.deb     # Debian/Ubuntu
+sudo dnf install ./camlooper-*.rpm      # Fedora/RHEL
+```
+
+### 🏗 Building & Releasing
+
+Because of native dependencies (FFmpeg, the Windows DirectShow filter, the macOS System
+Extension), the app **cannot be cross-compiled** — each OS builds on its own machine.
+CI does this for you: pushing a `v*` tag runs
+[`.github/workflows/build-cross-platform.yml`](.github/workflows/build-cross-platform.yml),
+which builds Windows, macOS (Intel + Apple Silicon), and Linux on native runners via
+[`tauri-action`](https://github.com/tauri-apps/tauri-action) and attaches all installers
+to a **draft GitHub Release**.
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1     # -> draft Release with .exe/.msi, two .dmg, .AppImage/.deb/.rpm
+```
+
+**Code signing** (optional, unblocks warning-free installs + the macOS virtual camera) is
+wired in — add these repository *Secrets* and the workflow uses them automatically:
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+`APPLE_PASSWORD`, `APPLE_TEAM_ID` (macOS); `WINDOWS_CERTIFICATE`,
+`WINDOWS_CERTIFICATE_PASSWORD` (Windows).
+
+To build locally for **your current OS only**: `npm ci` then `npm run build:linux` /
+`npm run build:macos` (or `build:macos:intel`) / `npm run build:windows:msvc`.
 
 ## 🎯 Use Cases
 

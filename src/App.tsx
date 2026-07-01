@@ -28,6 +28,8 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { VideoRecorder } from "./components/VideoRecorder";
+import { AdBanner } from "./components/AdBanner";
+import { useAdPopup } from "./hooks/use-ad-popup";
 
 const queryClient = new QueryClient();
 
@@ -121,6 +123,7 @@ class SimpleFrameHolder {
 }
 
 function CamLooper() {
+  useAdPopup();
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVirtualCamActive, setIsVirtualCamActive] = useState(false);
   const [loopCount, setLoopCount] = useState([10]);
@@ -740,8 +743,9 @@ function CamLooper() {
     }, []);
 
   return (
-    <div className="min-h-screen bg-background p-6">
-      <div className="max-w-7xl mx-auto">
+    <div className="min-h-screen bg-background">
+      <AdBanner />
+      <div className="max-w-7xl mx-auto p-6">
         <div className="grid lg:grid-cols-3 gap-6">
           {/* Main Video Area */}
           <div className="lg:col-span-2 space-y-4">

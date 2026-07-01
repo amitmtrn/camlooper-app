@@ -1,8 +1,20 @@
 name: Build Cross-Platform
 
+# Builds native installers for every platform on its own runner (Tauri apps with
+# native deps like FFmpeg / DirectShow / System Extensions cannot be cross-compiled).
+#
+#   - push a tag  v*      -> builds all platforms + attaches installers to a draft Release
+#   - workflow_dispatch   -> builds all platforms (no Release) for smoke-testing
+#   - PRs to main/master  -> Linux-only build sanity check
+#
+# Installers produced:
+#   Windows  : .exe (NSIS) + .msi (WiX)
+#   macOS    : .dmg  (aarch64 Apple Silicon on macos-14, x86_64 Intel on macos-13)
+#   Linux    : .AppImage + .deb + .rpm
+
 on:
   push:
-    branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -14,23 +26,24 @@ jobs:
       matrix:
         include:
           - platform: 'windows-latest'
-            args: '--target x86_64-pc-windows-msvc'
             target: 'x86_64-pc-windows-msvc'
             name: 'windows-x64'
-            script: 'build:windows:msvc'
+          - platform: 'macos-14'
+            target: 'aarch64-apple-darwin'
+            name: 'macos-arm64'
+          - platform: 'macos-13'
+            target: 'x86_64-apple-darwin'
+            name: 'macos-x64'
           - platform: 'ubuntu-22.04'
-            args: '--target x86_64-unknown-linux-gnu'
             target: 'x86_64-unknown-linux-gnu'
             name: 'linux-x64'
-            script: 'build:linux'
-
     runs-on: ${{ matrix.platform }}
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies (ubuntu only)
+    - name: Install dependencies (Linux)
       if: matrix.platform == 'ubuntu-22.04'
       run: |
         sudo apt-get update
@@ -38,8 +51,13 @@ jobs:
           pkg-config libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev libavfilter-dev \
           libswscale-dev libswresample-dev ffmpeg libclang-dev
 
-    - name: Verify FFmpeg installation (ubuntu only)
-      if: matrix.platform == 'ubuntu-22.04'
+    - name: Install dependencies (macOS)
+      if: startsWith(matrix.platform, 'macos')
+      run: |
+        brew install ffmpeg pkg-config
+
+    - name: Verify FFmpeg installation (Linux/macOS)
+      if: matrix.platform != 'windows-latest'
       run: |
         pkg-config --modversion libavutil libavcodec libavformat
         ffmpeg -version
@@ -63,37 +81,34 @@ jobs:
     - name: Install frontend dependencies
       run: npm ci
 
-    - name: Build the app
-      run: npm run ${{ matrix.script }}
+    - name: Build app + installers and (on tag) publish to Release
+      uses: tauri-apps/tauri-action@v0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # ---- Code signing (currently unset; add these repo Secrets to sign) ----
+        # macOS notarization + signing (REQUIRED for the virtual-camera System Extension):
+        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # Windows signing (optional; add cert to remove SmartScreen warning):
+        WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+        WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      with:
+        # Only create/publish a Release when a v* tag was pushed; otherwise just build.
+        tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('CamLooper {0}', github.ref_name) || '' }}
+        releaseBody: 'See the assets below to download and install this version of CamLooper.'
+        releaseDraft: true
+        prerelease: false
+        args: --target ${{ matrix.target }}
 
-    - name: Upload artifacts
+    - name: Upload build artifacts (non-tag runs)
+      if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
       uses: actions/upload-artifact@v4
       with:
         name: camlooper-${{ matrix.name }}
-        path: |
-          src-tauri/target/${{ matrix.target }}/release/bundle/
+        path: src-tauri/target/${{ matrix.target }}/release/bundle/
         if-no-files-found: error
-
-  release:
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    needs: [build]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    
-    steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v1.0.${{ github.run_number }}
-        name: CamLooper v1.0.${{ github.run_number }}
-        draft: false
-        prerelease: false
-        files: |
-          camlooper-windows-x64/**
-          camlooper-windows-x86/**
-          camlooper-linux-x64/**
-        generate_release_notes: true 
