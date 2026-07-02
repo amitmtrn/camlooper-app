@@ -7,16 +7,17 @@
 
 use anyhow::Result;
 use std::ffi::CString;
-use std::os::raw::{c_int, c_void};
+use std::os::raw::{c_float, c_int, c_void};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use crate::softcam_manager;
 
 /// Handle to a softcam virtual camera instance
 pub type ScCamera = *mut c_void;
 
-/// Function pointer types for softcam functions
-type ScCreateCameraFn = unsafe extern "C" fn(width: c_int, height: c_int, fps: c_int) -> ScCamera;
-type ScSendFrameFn = unsafe extern "C" fn(cam: ScCamera, frame_data: *const u8) -> c_int;
+/// Function pointer types for softcam's sender API (see tshino/softcam softcam.h).
+/// Note the framerate is a C `float`, and `scSendFrame` returns `void`.
+type ScCreateCameraFn = unsafe extern "C" fn(width: c_int, height: c_int, framerate: c_float) -> ScCamera;
+type ScSendFrameFn = unsafe extern "C" fn(cam: ScCamera, frame_data: *const u8);
 type ScDeleteCameraFn = unsafe extern "C" fn(cam: ScCamera);
 
 /// Softcam function pointers loaded from DLL
@@ -106,12 +107,10 @@ impl WindowsVirtualCamera {
             }
 
             if let Some(ref functions) = self.functions {
-                let result = unsafe {
-                    (functions.send_frame)(camera_handle, frame_data.as_ptr())
-                };
-                
-                if result != 0 {
-                    return Err(anyhow::anyhow!("Failed to send frame to softcam: error code {}", result));
+                // scSendFrame returns void; softcam handles the case where no consumer
+                // is connected yet by simply buffering the latest frame.
+                unsafe {
+                    (functions.send_frame)(camera_handle, frame_data.as_ptr());
                 }
             } else {
                 return Err(anyhow::anyhow!("Softcam functions not loaded"));
@@ -123,8 +122,25 @@ impl WindowsVirtualCamera {
     /// Load the softcam DLL and function pointers
     async fn load_softcam_dll(&mut self) -> Result<()> {
         println!("Checking softcam availability...");
-        
-        // Try to get softcam DLL path from softcam manager first
+
+        // Prefer the softcam.dll bundled next to our executable — it is installed and
+        // registered by the app installer, so no download is needed.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let bundled = dir.join("softcam.dll");
+                if bundled.exists() {
+                    match self.try_load_dll_from_path(&bundled) {
+                        Ok(()) => {
+                            println!("Loaded bundled softcam DLL from: {:?}", bundled);
+                            return Ok(());
+                        }
+                        Err(e) => println!("Failed to load bundled softcam DLL: {}", e),
+                    }
+                }
+            }
+        }
+
+        // Fallback: try the softcam manager (legacy download path)
         match softcam_manager::get_softcam_dll_path().await {
             Ok(dll_path) => {
                 println!("Found softcam DLL at: {:?}", dll_path);
@@ -259,7 +275,7 @@ impl WindowsVirtualCamera {
                 (functions.create_camera)(
                     self.width as c_int,
                     self.height as c_int,
-                    self.fps as c_int,
+                    self.fps as c_float,
                 )
             };
             

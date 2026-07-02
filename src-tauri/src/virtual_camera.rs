@@ -17,10 +17,7 @@ use tokio::io::AsyncWriteExt;
 use image;
 
 #[cfg(target_os = "windows")]
-use crate::custom_virtual_camera::CustomVirtualCamera;
-
-// #[cfg(windows)]
-// use virtualcam_rs; // TODO: Re-enable when virtualcam-rs API is properly documented
+use crate::windows_virtual_camera::WindowsVirtualCamera;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualCameraConfig {
@@ -265,10 +262,11 @@ impl VirtualCamera {
         let status = self.status.clone();
         
         tokio::spawn(async move {
-            println!("Starting custom DirectShow virtual camera...");
-            
-            // Create and start the custom virtual camera
-            let mut vcam = match CustomVirtualCamera::new(
+            println!("Starting softcam DirectShow virtual camera...");
+
+            // Create and start the softcam-backed virtual camera. The softcam.dll is
+            // bundled with the app and registered by the installer.
+            let mut vcam = match WindowsVirtualCamera::new(
                 &config.camera_name,
                 config.width,
                 config.height,
@@ -276,14 +274,14 @@ impl VirtualCamera {
             ) {
                 Ok(vcam) => vcam,
                 Err(e) => {
-                    eprintln!("Failed to create custom virtual camera: {}", e);
+                    eprintln!("Failed to create softcam virtual camera: {}", e);
                     eprintln!("This will cause the virtual camera channel to close");
                     return;
                 }
             };
-            
+
             if let Err(e) = vcam.start().await {
-                eprintln!("Failed to start custom virtual camera: {}", e);
+                eprintln!("Failed to start softcam virtual camera: {}", e);
                 eprintln!("This will cause the virtual camera channel to close");
                 return;
             }
@@ -311,10 +309,14 @@ impl VirtualCamera {
                     if let Some(ref frame_data) = latest_frame {
                         // Convert JPEG to RGB and resize to configured dimensions
                         match Self::jpeg_to_rgb_resized(frame_data, config.width, config.height) {
-                            Ok(rgb_data) => {
-                                // Send RGB frame to virtual camera
-                                if let Err(e) = vcam.send_frame(&rgb_data) {
-                                    eprintln!("Failed to send frame to custom virtual camera: {}", e);
+                            Ok(mut pixels) => {
+                                // softcam expects BGR (top-down, 24bpp); our decoder
+                                // produces RGB, so swap the R and B channels in place.
+                                for px in pixels.chunks_exact_mut(3) {
+                                    px.swap(0, 2);
+                                }
+                                if let Err(e) = vcam.send_frame(&pixels) {
+                                    eprintln!("Failed to send frame to softcam virtual camera: {}", e);
                                     // Don't close the channel, just mark virtual camera as unavailable
                                     vcam_available = false;
                                 }
@@ -324,10 +326,10 @@ impl VirtualCamera {
                             }
                         }
                     } else {
-                        // Send black frame if no data available
+                        // Send black frame if no data available (BGR == RGB for black)
                         let black_frame = vec![0u8; (config.width * config.height * 3) as usize];
                         if let Err(e) = vcam.send_frame(&black_frame) {
-                            eprintln!("Failed to send black frame to custom virtual camera: {}", e);
+                            eprintln!("Failed to send black frame to softcam virtual camera: {}", e);
                             // Don't close the channel, just mark virtual camera as unavailable
                             vcam_available = false;
                         }
@@ -705,8 +707,8 @@ pub async fn send_frame_to_virtual_camera(frame_data: Vec<u8>) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 pub async fn list_video_devices() -> Result<Vec<String>> {
-    // Use the custom virtual camera implementation
-    crate::custom_virtual_camera::list_video_devices()
+    // Use the softcam-backed virtual camera implementation
+    crate::windows_virtual_camera::list_video_devices()
 }
 
 #[cfg(target_os = "linux")]

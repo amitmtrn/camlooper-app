@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "drivers/windows/softcam.dll": "softcam.dll",
+      "drivers/windows/softcam-LICENSE.txt": "softcam-LICENSE.txt"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  }
+}

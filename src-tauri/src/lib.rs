@@ -6,8 +6,6 @@ mod camera_capture;
 #[cfg(target_os = "windows")]
 mod softcam_manager;
 #[cfg(target_os = "windows")]
-mod custom_virtual_camera;
-#[cfg(target_os = "windows")]
 mod windows_virtual_camera;
 
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
@@ -393,35 +391,10 @@ pub fn run() {
                 video_processor::init_video_processor(app_handle).await;
             });
             
-            // Initialize softcam manager on Windows
-            #[cfg(target_os = "windows")]
-            {
-                let _app_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Initialize the softcam manager
-                    if let Err(e) = softcam_manager::init_softcam_manager().await {
-                        eprintln!("Failed to initialize softcam manager: {}", e);
-                        return;
-                    }
-                    
-                    // Setup softcam (download and register DLL) on startup
-                    println!("[Startup] Setting up softcam...");
-                    match softcam_manager::setup_softcam().await {
-                        Ok(_) => {
-                            println!("[Startup] Softcam setup completed successfully");
-                            // Log the status after setup
-                            match softcam_manager::get_softcam_status().await {
-                                Ok(status) => println!("[Startup] Softcam Status:\n{}", status),
-                                Err(e) => println!("[Startup] Failed to get softcam status: {}", e),
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[Startup] Failed to setup softcam: {}", e);
-                        }
-                    }
-                });
-            }
-            
+            // The softcam DirectShow driver is now bundled with the app and registered
+            // by the installer, so there is no startup download/registration to do. The
+            // manual `setup_softcam` command remains available as a fallback.
+
             Ok(())
         })
         .run(tauri::generate_context!())
