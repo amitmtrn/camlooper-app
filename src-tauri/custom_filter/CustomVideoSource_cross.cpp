@@ -5,6 +5,11 @@
 #include <iostream>
 #include <vector>
 #include <string>
+// Must come after <windows.h> and before the DEFINE_GUID lines so the custom GUIDs
+// below are actually allocated in this translation unit. Without it they are only
+// extern declarations and QueryInterface's IID_ICustomVideoSource reference fails
+// to link once the archive is properly linked into the final binary.
+#include <initguid.h>
 
 // Custom filter GUIDs
 DEFINE_GUID(CLSID_CustomVideoSource, 
