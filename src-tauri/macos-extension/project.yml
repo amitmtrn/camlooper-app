@@ -1,0 +1,28 @@
+# XcodeGen spec for the CamLooper Camera Extension.
+#   brew install xcodegen && xcodegen generate  ->  CameraExtension.xcodeproj
+# Then build with build.sh or Xcode. Set DEVELOPMENT_TEAM to your Team ID (or via env).
+name: CameraExtension
+options:
+  bundleIdPrefix: com.camlooper.app
+  deploymentTarget:
+    macOS: "13.0"
+targets:
+  CameraExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: CameraExtension
+    info:
+      path: CameraExtension/Info.plist
+    entitlements:
+      path: CameraExtension/CameraExtension.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.camlooper.app.CameraExtension
+        PRODUCT_NAME: CameraExtension
+        SWIFT_VERSION: "5.0"
+        ENABLE_HARDENED_RUNTIME: YES
+        # Replace with your Apple Developer Team ID (or pass via xcodebuild DEVELOPMENT_TEAM=...).
+        DEVELOPMENT_TEAM: TEAMID
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"

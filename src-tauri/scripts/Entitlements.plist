@@ -8,5 +8,9 @@
 	<!-- Allow loading of system extensions (Virtual Camera) -->
 	<key>com.apple.developer.system-extension.install</key>
 	<true/>
+	<!-- NOTE: when wiring the app<->extension XPC (Stage C2), add the shared App Group here:
+	     <key>com.apple.security.application-groups</key>
+	     <array><string>group.com.camlooper.shared</string></array>
+	     It is omitted for now so the current unsigned macOS build is unaffected. -->
 </dict>
 </plist>
