@@ -72,22 +72,23 @@ Grab the installer for your platform from the
 3. First launch: right-click → *Open* to bypass Gatekeeper, then grant camera permission.
 
 #### Linux
-```bash
-# Download the AppImage (portable, no install needed)
-wget https://github.com/amitmtrn/camlooper-app/releases/latest/download/camlooper_x86_64.AppImage
-chmod +x camlooper_*.AppImage
-./camlooper_*.AppImage
-
-# Virtual camera support requires the v4l2loopback kernel module on the host
-sudo apt install v4l2loopback-dkms
-sudo modprobe v4l2loopback
-```
-
-Prefer a package? The `.deb` and `.rpm` installers pull in `v4l2loopback-dkms` + `ffmpeg`
-automatically:
+**For the working virtual camera, use the `.deb`/`.rpm`** (not the AppImage). They pull in
+`v4l2loopback-dkms` + `ffmpeg`, install the module config, and **auto-load `v4l2loopback`**
+(on install and every boot) so the "CamLooper Virtual Camera" device is ready with no manual
+setup:
 ```bash
 sudo apt install ./camlooper_*.deb     # Debian/Ubuntu
 sudo dnf install ./camlooper-*.rpm      # Fedora/RHEL
+```
+
+The **AppImage** is portable but cannot install a kernel module, so the virtual camera only
+works if the host already has `v4l2loopback` loaded:
+```bash
+wget https://github.com/amitmtrn/camlooper-app/releases/latest/download/camlooper_x86_64.AppImage
+chmod +x camlooper_*.AppImage
+./camlooper_*.AppImage
+# one-time host setup for the AppImage:
+sudo apt install v4l2loopback-dkms && sudo modprobe v4l2loopback
 ```
 
 ### 🏗 Building & Releasing

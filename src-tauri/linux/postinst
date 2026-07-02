@@ -1,0 +1,12 @@
+#!/bin/sh
+# CamLooper post-install: load the v4l2loopback module now so the virtual camera
+# works without a reboot. The /etc/modprobe.d options file (installed alongside)
+# supplies exclusive_caps=1 and the card label. Best-effort: never fail the install
+# if the module can't load yet (e.g. dkms still building, or a reboot is needed) —
+# /etc/modules-load.d ensures it loads on the next boot regardless.
+set -e
+
+modprobe v4l2loopback 2>/dev/null || \
+  echo "camlooper: could not load v4l2loopback now; it will load on next boot." >&2
+
+exit 0

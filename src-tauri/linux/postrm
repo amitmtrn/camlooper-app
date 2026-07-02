@@ -1,0 +1,10 @@
+#!/bin/sh
+# CamLooper post-remove: best-effort unload of the v4l2loopback module so an
+# uninstall doesn't leave a dangling virtual camera device. Skipped silently if the
+# module is still in use by another application. The config files under
+# /etc/modules-load.d and /etc/modprobe.d are removed by the package manager.
+set -e
+
+modprobe -r v4l2loopback 2>/dev/null || true
+
+exit 0

@@ -53,10 +53,22 @@
     },
     "linux": {
       "deb": {
-        "depends": ["v4l2loopback-dkms", "ffmpeg"]
+        "depends": ["v4l2loopback-dkms", "ffmpeg"],
+        "files": {
+          "/etc/modules-load.d/camlooper-v4l2loopback.conf": "linux/modules-load.d/camlooper-v4l2loopback.conf",
+          "/etc/modprobe.d/camlooper-v4l2loopback.conf": "linux/modprobe.d/camlooper-v4l2loopback.conf"
+        },
+        "postInstallScript": "linux/postinst",
+        "postRemoveScript": "linux/postrm"
       },
       "rpm": {
-        "depends": ["v4l2loopback-dkms", "ffmpeg"]
+        "depends": ["v4l2loopback-dkms", "ffmpeg"],
+        "files": {
+          "/etc/modules-load.d/camlooper-v4l2loopback.conf": "linux/modules-load.d/camlooper-v4l2loopback.conf",
+          "/etc/modprobe.d/camlooper-v4l2loopback.conf": "linux/modprobe.d/camlooper-v4l2loopback.conf"
+        },
+        "postInstallScript": "linux/postinst",
+        "postRemoveScript": "linux/postrm"
       }
     }
   }
