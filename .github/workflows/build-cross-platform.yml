@@ -105,7 +105,7 @@ jobs:
         tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('CamLooper {0}', github.ref_name) || '' }}
         releaseBody: 'See the assets below to download and install this version of CamLooper.'
-        releaseDraft: true
+        releaseDraft: false
         prerelease: false
         args: --target ${{ matrix.target }}
 
