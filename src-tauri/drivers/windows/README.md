@@ -4,12 +4,11 @@ The Windows build bundles [softcam](https://github.com/tshino/softcam) (MIT lice
 a shared-memory DirectShow virtual camera. The app writes frames to it and consumer apps
 (Zoom/Teams/OBS) read from the registered filter.
 
-`softcam.dll` and `softcam-LICENSE.txt` are **not committed** — they are built from source
-in CI (see `.github/workflows/build-cross-platform.yml`, "Build softcam driver" step) and
-dropped into this folder before `tauri build`, then bundled via `tauri.windows.conf.json`
-`bundle.resources` and registered by the NSIS hook (`src-tauri/windows/hooks.nsh`).
+`softcam.dll` and `softcam-LICENSE.txt` are committed here (built from v1.8.1 with
+MSBuild x64 Release). Tauri bundles them via `tauri.windows.conf.json` `bundle.resources`
+and the NSIS hook (`src-tauri/windows/hooks.nsh`) registers the DLL at install time.
 
-To build locally on Windows:
+To rebuild from source on Windows:
 
 ```pwsh
 git clone --depth 1 --branch v1.8.1 https://github.com/tshino/softcam.git

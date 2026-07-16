@@ -6,7 +6,3 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 
-# softcam driver binaries — built from source in CI, not committed
-/drivers/windows/*.dll
-/drivers/windows/*.exe
-/drivers/windows/softcam-LICENSE.txt
