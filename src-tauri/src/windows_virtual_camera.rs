@@ -316,17 +316,74 @@ impl Drop for WindowsVirtualCamera {
     }
 }
 
-/// List available video devices on Windows
+/// List available video devices on Windows via DirectShow ICreateDevEnum.
+/// Enumerates CLSID_VideoInputDeviceCategory (physical UVC webcams, virtual
+/// cameras registered as DirectShow filters like softcam, etc.) and reads
+/// FriendlyName from each moniker's IPropertyBag.
 pub fn list_video_devices() -> Result<Vec<String>> {
-    // TODO: Implement DirectShow device enumeration
-    // This would use ICreateDevEnum to enumerate video capture devices
-    
+    use windows::Win32::Media::DirectShow::ICreateDevEnum;
+    use windows::Win32::Media::MediaFoundation::{
+        CLSID_SystemDeviceEnum, CLSID_VideoInputDeviceCategory,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, IBindCtx, IEnumMoniker, IErrorLog, IMoniker,
+        StructuredStorage::IPropertyBag, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::core::{w, BSTR, VARIANT};
+
     let mut devices = Vec::new();
-    
-    // Add virtual camera devices
-    devices.push("DirectShow Softcam".to_string());
-    devices.push("CamLooper Virtual Camera".to_string());
-    
+
+    unsafe {
+        // STA is fine; returns S_FALSE if this thread already initialized — ignore.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+        let dev_enum: ICreateDevEnum =
+            CoCreateInstance(&CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| anyhow::anyhow!("CoCreateInstance(SystemDeviceEnum) failed: {e}"))?;
+
+        // Out-param style: null enum on S_FALSE (no devices in category).
+        let mut enum_moniker: Option<IEnumMoniker> = None;
+        let _ = dev_enum.CreateClassEnumerator(
+            &CLSID_VideoInputDeviceCategory,
+            &mut enum_moniker,
+            0,
+        );
+        let Some(enum_moniker) = enum_moniker else {
+            return Ok(devices);
+        };
+
+        let mut slot: [Option<IMoniker>; 1] = [None];
+        loop {
+            let mut fetched: u32 = 0;
+            let hr = enum_moniker.Next(&mut slot, Some(&mut fetched));
+            if hr.is_err() || fetched == 0 {
+                break;
+            }
+            let Some(moniker) = slot[0].take() else { break };
+
+            let bag: IPropertyBag =
+                match moniker.BindToStorage::<Option<&IBindCtx>, Option<&IMoniker>, IPropertyBag>(
+                    None, None,
+                ) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+
+            let mut variant = VARIANT::default();
+            if bag
+                .Read(w!("FriendlyName"), &mut variant, None::<&IErrorLog>)
+                .is_ok()
+            {
+                if let Ok(bstr) = BSTR::try_from(&variant) {
+                    let name = bstr.to_string();
+                    if !name.is_empty() {
+                        devices.push(name);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(devices)
 }
 
