@@ -204,10 +204,12 @@ impl SoftcamManager {
     }
     
     async fn register_dll(&self, dll_path: &Path) -> Result<()> {
+        use std::os::windows::process::CommandExt;
         // Use regsvr32 to register the DLL
         let output = Command::new("regsvr32")
             .arg("/s") // Silent mode
             .arg(dll_path)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .output();
         
         match output {
@@ -252,11 +254,13 @@ impl SoftcamManager {
     }
     
     async fn unregister_dll(&self, dll_path: &Path) -> Result<()> {
+        use std::os::windows::process::CommandExt;
         // Use regsvr32 to unregister the DLL
         let output = Command::new("regsvr32")
             .arg("/u") // Unregister
             .arg("/s") // Silent mode
             .arg(dll_path)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .output();
         
         match output {

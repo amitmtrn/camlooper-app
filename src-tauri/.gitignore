@@ -6,3 +6,8 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 
+# Bundled ffmpeg (~128 MB Windows shared build from BtbN). Fetched by
+# scripts/fetch-windows-ffmpeg.sh before `tauri build --target *-windows-msvc`;
+# not committed to keep the repo small.
+/drivers/windows/ffmpeg/
+

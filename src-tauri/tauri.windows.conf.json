@@ -3,7 +3,16 @@
   "bundle": {
     "resources": {
       "drivers/windows/softcam.dll": "softcam.dll",
-      "drivers/windows/softcam-LICENSE.txt": "softcam-LICENSE.txt"
+      "drivers/windows/softcam-LICENSE.txt": "softcam-LICENSE.txt",
+      "drivers/windows/ffmpeg/ffmpeg.exe": "ffmpeg/ffmpeg.exe",
+      "drivers/windows/ffmpeg/avcodec-63.dll": "ffmpeg/avcodec-63.dll",
+      "drivers/windows/ffmpeg/avdevice-63.dll": "ffmpeg/avdevice-63.dll",
+      "drivers/windows/ffmpeg/avfilter-12.dll": "ffmpeg/avfilter-12.dll",
+      "drivers/windows/ffmpeg/avformat-63.dll": "ffmpeg/avformat-63.dll",
+      "drivers/windows/ffmpeg/avutil-61.dll": "ffmpeg/avutil-61.dll",
+      "drivers/windows/ffmpeg/swresample-7.dll": "ffmpeg/swresample-7.dll",
+      "drivers/windows/ffmpeg/swscale-10.dll": "ffmpeg/swscale-10.dll",
+      "drivers/windows/ffmpeg/LICENSE.txt": "ffmpeg/LICENSE.txt"
     },
     "windows": {
       "nsis": {

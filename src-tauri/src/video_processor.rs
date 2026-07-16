@@ -605,12 +605,14 @@ impl VideoProcessor {
                 "-".to_string()
             ];
             
-            let mut child = match tokio::process::Command::new("ffmpeg")
-                .args(&args)
+            let mut cmd = tokio::process::Command::new("ffmpeg");
+            cmd.args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn() {
+                .kill_on_drop(true);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
                     eprintln!("Failed to start ffmpeg for video processing: {}", e);
