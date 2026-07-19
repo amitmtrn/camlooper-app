@@ -357,10 +357,17 @@ impl VideoProcessor {
             return Ok(());
         }
 
-        #[cfg(not(windows))]
         let video_path = self.video_path.clone()
             .ok_or_else(|| anyhow!("No video file loaded"))?;
-        
+
+        // Resolve ffmpeg binary once — bundled resource on Windows, PATH on Linux.
+        let ffmpeg_path = if let Some(app) = self.app_handle.as_ref() {
+            crate::camera_capture::resolve_ffmpeg_path(app)
+                .map_err(|e| anyhow!("Failed to locate ffmpeg: {e}"))?
+        } else {
+            std::path::PathBuf::from("ffmpeg")
+        };
+
         self.is_streaming.store(true, Ordering::Relaxed);
         
         {
@@ -372,14 +379,12 @@ impl VideoProcessor {
             status.actual_fps = 0.0;
         }
 
-        #[cfg(not(windows))]
         {
-            // FFmpeg-based implementation for non-Windows platforms
             let is_streaming = self.is_streaming.clone();
             let stream_status = self.stream_status.clone();
             let loop_settings = self.loop_settings.clone();
             let performance_metrics = self.performance_metrics.clone();
-            
+
             let fps = self.video_info.as_ref().map(|info| info.fps).unwrap_or(30.0);
             let width = self.video_info.as_ref().map(|info| info.width).unwrap_or(1920);
             let height = self.video_info.as_ref().map(|info| info.height).unwrap_or(1080);
@@ -389,9 +394,9 @@ impl VideoProcessor {
                 q.clear();
             }
 
-            // Spawn the frame processing task
             tokio::task::spawn(async move {
                 if let Err(e) = Self::process_video_frames(
+                    ffmpeg_path,
                     video_path,
                     is_streaming,
                     stream_status,
@@ -399,120 +404,10 @@ impl VideoProcessor {
                     performance_metrics,
                     fps,
                     width,
-                    height
+                    height,
                 ).await {
                     eprintln!("Video streaming error: {}", e);
                 }
-            });
-        }
-
-        #[cfg(windows)]
-        {
-            // Windows-specific implementation with real video processing
-            let is_streaming = self.is_streaming.clone();
-            let stream_status = self.stream_status.clone();
-            let loop_settings = self.loop_settings.clone();
-            let app_handle = self.app_handle.clone();
-            let video_info = self.video_info.clone();
-            let video_path = self.video_path.clone();
-
-            // Create enhanced frames for Windows using real video data when possible
-            tokio::spawn(async move {
-                let mut frame_count = 0u64;
-                let mut current_loop = 0u32;
-                
-                // Get video info for duration and dimensions
-                let (duration, width, height, filename, fps) = if let Some(info) = video_info {
-                    let target_fps = info.fps.max(15.0).min(60.0); // Reasonable FPS range
-                    (info.duration, info.width, info.height, info.filename, target_fps)
-                } else {
-                    (10.0, 640, 480, "Unknown".to_string(), 30.0)
-                };
-                
-                let frame_duration = tokio::time::Duration::from_millis((1000.0 / fps) as u64);
-                let total_frames = (duration * fps) as u64;
-                let (max_loops, _auto_start) = *loop_settings.read().await;
-                
-                println!("Starting Windows video playback: {} ({}x{} at {:.1}fps, {} frames, {} loops)", 
-                    filename, width, height, fps, total_frames, max_loops);
-                
-                // Try to extract real video samples if possible
-                let video_samples = if let Some(ref path) = video_path {
-                    Self::extract_video_samples(path, total_frames).await.unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                
-                let has_real_samples = !video_samples.is_empty();
-                println!("Windows video: {} real samples extracted", video_samples.len());
-                
-                while is_streaming.load(Ordering::Relaxed) {
-                    // Check if we've reached the loop limit
-                    if max_loops > 0 && current_loop >= max_loops {
-                        break;
-                    }
-                    
-                    let loop_frame_count = frame_count % total_frames;
-                    let progress = loop_frame_count as f64 / total_frames as f64;
-                    
-                    // Create frame - use real sample if available, otherwise enhanced synthetic frame
-                    let frame = if has_real_samples && !video_samples.is_empty() {
-                        let sample_index = (loop_frame_count as usize) % video_samples.len();
-                        Self::create_frame_from_sample(&video_samples[sample_index], width, height, frame_count, fps, &filename)
-                    } else {
-                        Self::create_enhanced_frame(width, height, frame_count, progress, &filename, current_loop)
-                    };
-                    
-                    let batch = FrameBatch {
-                        frames: vec![frame],
-                        sequence_id: frame_count,
-                        total_frames: 1,
-                    };
-                    
-                    // Push to queue, block if too full
-                    loop {
-                        let mut q = FRAME_QUEUE.lock().await;
-                        if q.len() < 10 {
-                            q.push_back(batch);
-                            break;
-                        }
-                        drop(q);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                    }
-                    
-                    // Update stream status
-                    {
-                        let mut status = stream_status.write().await;
-                        status.current_time = (loop_frame_count as f64) / fps;
-                        status.actual_fps = fps;
-                        status.buffer_health = if has_real_samples { 1.0 } else { 0.8 }; // Real samples = better health
-                        status.current_loop = current_loop;
-                    }
-                    
-                    frame_count += 1;
-                    
-                    // Check if we completed a loop
-                    if loop_frame_count == 0 && frame_count > 0 {
-                        current_loop += 1;
-                        println!("Completed Windows video loop {} of {} ({})", 
-                            current_loop, 
-                            if max_loops == 0 { "∞".to_string() } else { max_loops.to_string() },
-                            if has_real_samples { "real data" } else { "synthetic" });
-                    }
-                    
-                    tokio::time::sleep(frame_duration).await;
-                }
-                
-                // Update final status
-                {
-                    let mut status = stream_status.write().await;
-                    status.is_playing = false;
-                    status.current_time = 0.0;
-                    status.buffer_health = 0.0;
-                    status.actual_fps = 0.0;
-                }
-                
-                println!("Windows video playback completed");
             });
         }
 
@@ -566,8 +461,8 @@ impl VideoProcessor {
         self.performance_metrics.read().await.clone()
     }
 
-    #[cfg(not(windows))]
     async fn process_video_frames(
+        ffmpeg_path: PathBuf,
         video_path: PathBuf,
         is_streaming: Arc<AtomicBool>,
         stream_status: Arc<RwLock<StreamStatus>>,
@@ -605,7 +500,7 @@ impl VideoProcessor {
                 "-".to_string()
             ];
             
-            let mut cmd = tokio::process::Command::new("ffmpeg");
+            let mut cmd = tokio::process::Command::new(&ffmpeg_path);
             cmd.args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -615,7 +510,7 @@ impl VideoProcessor {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    eprintln!("Failed to start ffmpeg for video processing: {}", e);
+                    eprintln!("Failed to start ffmpeg ({}) for video processing: {}", ffmpeg_path.display(), e);
                     break;
                 }
             };
@@ -769,7 +664,6 @@ impl VideoProcessor {
         Ok(())
     }
     
-    #[cfg(not(windows))]
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|window| window == needle)
     }

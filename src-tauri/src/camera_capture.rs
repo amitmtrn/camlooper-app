@@ -81,7 +81,7 @@ pub async fn stop_camera_recording() -> Result<String, String> {
 /// Resolve the ffmpeg binary path. On Windows the shared build is bundled as a
 /// tauri resource (see tauri.windows.conf.json + scripts/fetch-windows-ffmpeg.sh);
 /// on Linux we assume system ffmpeg is on PATH.
-fn resolve_ffmpeg_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+pub fn resolve_ffmpeg_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
         use tauri::Manager;
