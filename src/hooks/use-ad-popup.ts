@@ -25,7 +25,16 @@ export function useAdPopup() {
 
     const fire = async () => {
       try {
-        await openUrl(AD_POPUP_URL);
+        // Pass the active UI language (persisted by the i18n detector) so the
+        // ad page shows localized house-ad copy; it falls back on its own.
+        let url = AD_POPUP_URL;
+        try {
+          const lng = localStorage.getItem("camlooper-lang");
+          if (lng) url = `${AD_POPUP_URL}?lng=${encodeURIComponent(lng)}`;
+        } catch {
+          // ignore storage failures
+        }
+        await openUrl(url);
       } catch (err) {
         // Don't crash the app if the browser can't be opened.
         console.error("Failed to open ad popup:", err);

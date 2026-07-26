@@ -8,6 +8,8 @@ use std::sync::{Mutex, OnceLock};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+// Public API type kept for the IPC contract; not constructed internally yet.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamUploadRequest {
     pub filename: String,

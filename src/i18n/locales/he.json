@@ -1,0 +1,110 @@
+{
+  "app": {
+    "title": "CamLooper - היו נוכחים ושמרו על הפרטיות"
+  },
+  "topbar": {
+    "tagline": "הופיעו נוכחים בשיעור תוך שמירה על הפרטיות — הקליטו קליפ קצר ואז נגנו אותו בלולאה כמצלמה שלכם."
+  },
+  "language": {
+    "label": "שפה"
+  },
+  "stepper": {
+    "golive": "שידור חי",
+    "record": "הקלטה",
+    "loop": "לולאה"
+  },
+  "stage": {
+    "startingCamera": "מפעיל את המצלמה…",
+    "altLive": "מצלמה חיה",
+    "altLoop": "וידאו בלולאה",
+    "previewPlaceholder": "התצוגה המקדימה של המצלמה שלך תופיע כאן",
+    "badgeLive": "חי",
+    "badgeRec": "הקלטה {{time}}",
+    "badgeLoop": "לולאה {{current}}/{{total}}",
+    "badgeLoading": "טוען… {{progress}}%"
+  },
+  "step1": {
+    "title": "שלב 1 · שידור חי",
+    "desc": "זה בדיוק מה שהכיתה שלך תראה. בחרו את המצלמה ושבו כפי שתרצו להיראות.",
+    "cameraLabel": "מצלמה",
+    "cameraPlaceholder": "בחרו מצלמה",
+    "noCamera": "לא נמצאה מצלמה. חברו מצלמת רשת ופתחו מחדש את CamLooper.",
+    "startCamera": "הפעל מצלמה",
+    "next": "הבא: הקלטה",
+    "loopExisting": "כבר יש לך קליפ? נגנו סרטון קיים בלולאה"
+  },
+  "step2": {
+    "title": "שלב 2 · הקליטו את הלולאה שלכם",
+    "desc": "הקליטו 10–30 שניות של עצמכם במראה טבעי. תנועות קטנות — הנהון, מבט — הופכות את הלולאה למשכנעת.",
+    "start": "התחל הקלטה",
+    "stop": "עצור הקלטה · {{time}}",
+    "back": "← חזרה להגדרת המצלמה"
+  },
+  "review": {
+    "title": "נראה טוב?",
+    "desc": "הנה הקליפ שלך. נגנו אותו בלולאה כמצלמת הרשת שלכם, או הקליטו מחדש.",
+    "retake": "הקלט מחדש",
+    "use": "השתמש בקליפ הזה"
+  },
+  "loop": {
+    "title": "אתם מכוסים",
+    "covered": "הקליפ שלך מתנגן כעת בלולאה כמצלמת הרשת שלך. ב־<apps>Zoom, Teams או Meet</apps>, בחרו את <device>„CamLooper Virtual Camera”</device> כמצלמה שלכם — ואז תוכלו להתרחק.",
+    "liveOn": "אתם בשידור חי",
+    "liveOff": "עברו לשידור חי",
+    "liveOnDesc": "המצלמה האמיתית שלך פועלת. כבו אותה כדי לחזור ללולאה.",
+    "liveOffDesc": "השהו את הלולאה והציגו את המצלמה האמיתית שלכם לרגע.",
+    "recordNew": "הקליטו לולאה חדשה",
+    "stop": "עצור"
+  },
+  "advanced": {
+    "toggle": "מתקדם",
+    "virtualCamera": "מצלמה וירטואלית",
+    "active": "פעילה",
+    "inactive": "לא פעילה",
+    "enable": "הפעל מצלמה וירטואלית",
+    "statusReady": "מוכנה לשימוש באפליקציות",
+    "statusDisabled": "מושבתת",
+    "statusLine": "מצב: {{status}}",
+    "resolutionLine": "רזולוציה: {{value}}",
+    "fpsLine": "FPS: {{value}}",
+    "framesLine": "פריימים: {{value}}",
+    "loopSettings": "הגדרות לולאה",
+    "numberOfLoops": "מספר הלולאות",
+    "forever": "לתמיד",
+    "loopTimes": "{{count}}×",
+    "once": "פעם אחת",
+    "autoplay": "נגן קליפ אוטומטית לאחר הטעינה",
+    "videoInfo": "פרטי הווידאו",
+    "videoName": "שם:",
+    "videoDuration": "משך:",
+    "videoResolution": "רזולוציה:",
+    "videoFps": "FPS:",
+    "videoFormat": "פורמט:",
+    "perfMetrics": "מדדי ביצועים",
+    "framesProcessed": "פריימים שעובדו:",
+    "framesDropped": "פריימים שנשמטו:",
+    "encodeTime": "זמן קידוד:",
+    "currentQuality": "איכות נוכחית:",
+    "statusLabel": "מצב:",
+    "playing": "מנגן",
+    "stopped": "עצר",
+    "debugLogs": "יומני ניפוי",
+    "export": "ייצוא",
+    "clear": "נקה",
+    "hide": "הסתר",
+    "show": "הצג",
+    "logsPlaceholder": "יומני הניפוי יופיעו כאן...",
+    "logEntries_one": "רשומה אחת",
+    "logEntries_two": "שתי רשומות",
+    "logEntries_many": "{{count}} רשומות",
+    "logEntries_other": "{{count}} רשומות"
+  },
+  "errors": {
+    "unsupportedFormat": "פורמט וידאו לא נתמך. בחרו קובץ MP4, MOV, WebM, MKV או AVI.",
+    "uploadFailed": "העלאת הווידאו נכשלה. נסו שוב."
+  },
+  "ad": {
+    "title": "פרסומת",
+    "dismiss": "סגור פרסומת"
+  }
+}

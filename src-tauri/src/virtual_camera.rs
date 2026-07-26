@@ -187,7 +187,8 @@ impl VirtualCamera {
         self.status.lock().await.is_active
     }
 
-    /// Common frame resizing method for all platforms
+    /// Common frame resizing method (currently only used by the Windows softcam path).
+    #[allow(dead_code)]
     fn resize_frame(rgb_data: &[u8], src_width: usize, src_height: usize, dst_width: usize, dst_height: usize) -> Vec<u8> {
         if src_width == dst_width && src_height == dst_height {
             return rgb_data.to_vec();
@@ -239,7 +240,8 @@ impl VirtualCamera {
         resized_data
     }
 
-    /// Convert JPEG to RGB and resize to target dimensions
+    /// Convert JPEG to RGB and resize to target dimensions (Windows softcam path).
+    #[allow(dead_code)]
     fn jpeg_to_rgb_resized(jpeg_data: &[u8], target_width: u32, target_height: u32) -> Result<Vec<u8>> {
         // Decode JPEG to image
         let img = image::load_from_memory(jpeg_data)?;
@@ -389,7 +391,7 @@ impl VirtualCamera {
                     "-f", "v4l2",
                     "-pix_fmt", "rgb24", // Must match v4l2loopback's current device lock!
 
-                    "-vf", &format!("scale={}:{},fps={},vflip", config.width, config.height, config.fps),
+                    "-vf", &format!("scale={}:{},fps={}", config.width, config.height, config.fps),
                     &device_path,
                 ])
                 .stdin(Stdio::piped())

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 use std::collections::VecDeque;

@@ -1,0 +1,108 @@
+{
+  "app": {
+    "title": "CamLooper - Stay Present, Keep Your Privacy"
+  },
+  "topbar": {
+    "tagline": "Stay present in class while keeping your privacy — record a short clip, then loop it as your camera."
+  },
+  "language": {
+    "label": "Language"
+  },
+  "stepper": {
+    "golive": "Go live",
+    "record": "Record",
+    "loop": "Loop"
+  },
+  "stage": {
+    "startingCamera": "Starting camera…",
+    "altLive": "Live camera",
+    "altLoop": "Looping video",
+    "previewPlaceholder": "Your camera preview will appear here",
+    "badgeLive": "LIVE",
+    "badgeRec": "REC {{time}}",
+    "badgeLoop": "Loop {{current}}/{{total}}",
+    "badgeLoading": "Loading… {{progress}}%"
+  },
+  "step1": {
+    "title": "Step 1 · Go live",
+    "desc": "This is exactly what your class will see. Pick your camera and sit how you want to appear.",
+    "cameraLabel": "Camera",
+    "cameraPlaceholder": "Select a camera",
+    "noCamera": "No camera found. Plug in a webcam and reopen CamLooper.",
+    "startCamera": "Start camera",
+    "next": "Next: Record",
+    "loopExisting": "Already have a clip? Loop an existing video instead"
+  },
+  "step2": {
+    "title": "Step 2 · Record your loop",
+    "desc": "Record 10–30 seconds of yourself looking natural. A few small movements — a nod, a glance — make the loop believable.",
+    "start": "Start recording",
+    "stop": "Stop recording · {{time}}",
+    "back": "← Back to camera setup"
+  },
+  "review": {
+    "title": "Looks good?",
+    "desc": "Here's your clip. Loop it as your webcam, or record again.",
+    "retake": "Retake",
+    "use": "Use this clip"
+  },
+  "loop": {
+    "title": "You're covered",
+    "covered": "Your clip is now looping as your webcam. In <apps>Zoom, Teams or Meet</apps>, choose <device>“CamLooper Virtual Camera”</device> as your camera — then you can step away.",
+    "liveOn": "You're live",
+    "liveOff": "Jump in live",
+    "liveOnDesc": "Your real camera is on. Turn off to go back to the loop.",
+    "liveOffDesc": "Pause the loop and show your real camera for a moment.",
+    "recordNew": "Record a new loop",
+    "stop": "Stop"
+  },
+  "advanced": {
+    "toggle": "Advanced",
+    "virtualCamera": "Virtual Camera",
+    "active": "Active",
+    "inactive": "Inactive",
+    "enable": "Enable virtual camera",
+    "statusReady": "Ready for apps to use",
+    "statusDisabled": "Disabled",
+    "statusLine": "Status: {{status}}",
+    "resolutionLine": "Resolution: {{value}}",
+    "fpsLine": "FPS: {{value}}",
+    "framesLine": "Frames: {{value}}",
+    "loopSettings": "Loop settings",
+    "numberOfLoops": "Number of loops",
+    "forever": "Forever",
+    "loopTimes": "{{count}}×",
+    "once": "Once",
+    "autoplay": "Auto-play a clip after loading",
+    "videoInfo": "Video information",
+    "videoName": "Name:",
+    "videoDuration": "Duration:",
+    "videoResolution": "Resolution:",
+    "videoFps": "FPS:",
+    "videoFormat": "Format:",
+    "perfMetrics": "Performance metrics",
+    "framesProcessed": "Frames Processed:",
+    "framesDropped": "Frames Dropped:",
+    "encodeTime": "Encode Time:",
+    "currentQuality": "Current Quality:",
+    "statusLabel": "Status:",
+    "playing": "Playing",
+    "stopped": "Stopped",
+    "debugLogs": "Debug logs",
+    "export": "Export",
+    "clear": "Clear",
+    "hide": "Hide",
+    "show": "Show",
+    "logsPlaceholder": "Debug logs will appear here...",
+    "logEntries_one": "{{count}} entry",
+    "logEntries_other": "{{count}} entries"
+  },
+  "errors": {
+    "unsupportedFormat": "Unsupported video format. Please choose an MP4, MOV, WebM, MKV or AVI file.",
+    "uploadFailed": "Failed to upload video. Please try again."
+  },
+  "ad": {
+    "title": "Advertisement",
+    "dismiss": "Dismiss advertisement"
+  }
+}

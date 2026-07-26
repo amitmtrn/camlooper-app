@@ -1,0 +1,112 @@
+{
+  "app": {
+    "title": "CamLooper - كن حاضرًا مع الحفاظ على خصوصيتك"
+  },
+  "topbar": {
+    "tagline": "اظهر حاضرًا في الحصة مع الحفاظ على خصوصيتك — سجّل مقطعًا قصيرًا ثم شغّله في حلقة مكررة ككاميرتك."
+  },
+  "language": {
+    "label": "اللغة"
+  },
+  "stepper": {
+    "golive": "بث مباشر",
+    "record": "تسجيل",
+    "loop": "تكرار"
+  },
+  "stage": {
+    "startingCamera": "جارٍ تشغيل الكاميرا…",
+    "altLive": "كاميرا مباشرة",
+    "altLoop": "فيديو مكرر",
+    "previewPlaceholder": "ستظهر معاينة الكاميرا هنا",
+    "badgeLive": "مباشر",
+    "badgeRec": "تسجيل {{time}}",
+    "badgeLoop": "تكرار {{current}}/{{total}}",
+    "badgeLoading": "جارٍ التحميل… {{progress}}%"
+  },
+  "step1": {
+    "title": "الخطوة 1 · بث مباشر",
+    "desc": "هذا بالضبط ما سيراه صفّك. اختر كاميرتك واجلس بالطريقة التي تريد أن تظهر بها.",
+    "cameraLabel": "الكاميرا",
+    "cameraPlaceholder": "اختر كاميرا",
+    "noCamera": "لم يتم العثور على كاميرا. وصّل كاميرا ويب وأعد فتح CamLooper.",
+    "startCamera": "تشغيل الكاميرا",
+    "next": "التالي: التسجيل",
+    "loopExisting": "هل لديك مقطع بالفعل؟ كرّر فيديو موجودًا بدلاً من ذلك"
+  },
+  "step2": {
+    "title": "الخطوة 2 · سجّل حلقتك",
+    "desc": "سجّل من 10 إلى 30 ثانية لنفسك بمظهر طبيعي. حركات صغيرة — إيماءة، نظرة — تجعل الحلقة مقنعة.",
+    "start": "بدء التسجيل",
+    "stop": "إيقاف التسجيل · {{time}}",
+    "back": "← العودة إلى إعداد الكاميرا"
+  },
+  "review": {
+    "title": "هل يبدو جيدًا؟",
+    "desc": "هذا هو مقطعك. كرّره ككاميرا الويب الخاصة بك، أو سجّل من جديد.",
+    "retake": "إعادة التسجيل",
+    "use": "استخدام هذا المقطع"
+  },
+  "loop": {
+    "title": "أنت مغطّى الآن",
+    "covered": "يتكرر مقطعك الآن ككاميرا الويب الخاصة بك. في <apps>Zoom أو Teams أو Meet</apps>، اختر <device>«CamLooper Virtual Camera»</device> ككاميرتك — وعندها يمكنك الابتعاد.",
+    "liveOn": "أنت الآن مباشر",
+    "liveOff": "الظهور مباشرة",
+    "liveOnDesc": "كاميرتك الحقيقية مشغّلة. أوقفها للعودة إلى الحلقة.",
+    "liveOffDesc": "أوقف الحلقة مؤقتًا وأظهر كاميرتك الحقيقية للحظة.",
+    "recordNew": "تسجيل حلقة جديدة",
+    "stop": "إيقاف"
+  },
+  "advanced": {
+    "toggle": "إعدادات متقدمة",
+    "virtualCamera": "الكاميرا الافتراضية",
+    "active": "نشطة",
+    "inactive": "غير نشطة",
+    "enable": "تفعيل الكاميرا الافتراضية",
+    "statusReady": "جاهزة للاستخدام في التطبيقات",
+    "statusDisabled": "معطّلة",
+    "statusLine": "الحالة: {{status}}",
+    "resolutionLine": "الدقة: {{value}}",
+    "fpsLine": "إطار/ث: {{value}}",
+    "framesLine": "الإطارات: {{value}}",
+    "loopSettings": "إعدادات التكرار",
+    "numberOfLoops": "عدد مرات التكرار",
+    "forever": "إلى الأبد",
+    "loopTimes": "{{count}}×",
+    "once": "مرة واحدة",
+    "autoplay": "تشغيل المقطع تلقائيًا بعد تحميله",
+    "videoInfo": "معلومات الفيديو",
+    "videoName": "الاسم:",
+    "videoDuration": "المدة:",
+    "videoResolution": "الدقة:",
+    "videoFps": "إطار/ث:",
+    "videoFormat": "الصيغة:",
+    "perfMetrics": "مقاييس الأداء",
+    "framesProcessed": "الإطارات المعالجة:",
+    "framesDropped": "الإطارات المفقودة:",
+    "encodeTime": "زمن الترميز:",
+    "currentQuality": "الجودة الحالية:",
+    "statusLabel": "الحالة:",
+    "playing": "قيد التشغيل",
+    "stopped": "متوقف",
+    "debugLogs": "سجلات التصحيح",
+    "export": "تصدير",
+    "clear": "مسح",
+    "hide": "إخفاء",
+    "show": "إظهار",
+    "logsPlaceholder": "ستظهر سجلات التصحيح هنا...",
+    "logEntries_one": "إدخال واحد",
+    "logEntries_other": "{{count}} إدخالات",
+    "logEntries_zero": "لا إدخالات",
+    "logEntries_two": "إدخالان",
+    "logEntries_few": "{{count}} إدخالات",
+    "logEntries_many": "{{count}} إدخالاً"
+  },
+  "errors": {
+    "unsupportedFormat": "صيغة فيديو غير مدعومة. يرجى اختيار ملف MP4 أو MOV أو WebM أو MKV أو AVI.",
+    "uploadFailed": "فشل رفع الفيديو. يرجى المحاولة مرة أخرى."
+  },
+  "ad": {
+    "title": "إعلان",
+    "dismiss": "إغلاق الإعلان"
+  }
+}

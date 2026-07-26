@@ -2,11 +2,10 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use base64::prelude::*;
-use std::path::PathBuf;
 use uuid::Uuid;
 
 use once_cell::sync::Lazy;
@@ -39,7 +38,7 @@ pub async fn stop_camera_preview() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn start_camera_recording(app: AppHandle, device_id: Option<String>) -> Result<(), String> {
-    let mut state = CAPTURE_STATE.lock().await;
+    let state = CAPTURE_STATE.lock().await;
     if state.is_recording {
         return Err("Already recording".into());
     }
@@ -183,8 +182,6 @@ async fn start_ffmpeg_process(app: AppHandle, record: bool, device_id: Option<St
         "-f".to_string(), "image2pipe".to_string(),
         "-".to_string()
     ]);
-
-    let app_clone = app.clone();
 
     println!("Spawning ffmpeg ({}) with args: {:?}", ffmpeg_path.display(), args);
     let mut cmd = tokio::process::Command::new(&ffmpeg_path);

@@ -1,0 +1,108 @@
+{
+  "app": {
+    "title": "CamLooper - Apareça na câmera sem abrir mão da sua privacidade"
+  },
+  "topbar": {
+    "tagline": "Apareça na aula sem abrir mão da sua privacidade: grave um clipe curto e reproduza-o em loop como sua câmera."
+  },
+  "language": {
+    "label": "Idioma"
+  },
+  "stepper": {
+    "golive": "Ao vivo",
+    "record": "Gravar",
+    "loop": "Loop"
+  },
+  "stage": {
+    "startingCamera": "Iniciando a câmera…",
+    "altLive": "Câmera ao vivo",
+    "altLoop": "Vídeo em loop",
+    "previewPlaceholder": "A prévia da sua câmera aparecerá aqui",
+    "badgeLive": "AO VIVO",
+    "badgeRec": "REC {{time}}",
+    "badgeLoop": "Loop {{current}}/{{total}}",
+    "badgeLoading": "Carregando… {{progress}}%"
+  },
+  "step1": {
+    "title": "Passo 1 · Ao vivo",
+    "desc": "É exatamente isto que a sua turma verá. Escolha a câmera e posicione-se como quer aparecer.",
+    "cameraLabel": "Câmera",
+    "cameraPlaceholder": "Selecione uma câmera",
+    "noCamera": "Nenhuma câmera encontrada. Conecte uma webcam e reabra o CamLooper.",
+    "startCamera": "Iniciar câmera",
+    "next": "Avançar: Gravar",
+    "loopExisting": "Já tem um clipe? Reproduza um vídeo existente em loop"
+  },
+  "step2": {
+    "title": "Passo 2 · Grave seu loop",
+    "desc": "Grave de 10 a 30 segundos de você com aparência natural. Alguns movimentos pequenos — um aceno, um olhar — deixam o loop convincente.",
+    "start": "Começar a gravar",
+    "stop": "Parar gravação · {{time}}",
+    "back": "← Voltar à configuração da câmera"
+  },
+  "review": {
+    "title": "Ficou bom?",
+    "desc": "Aqui está o seu clipe. Reproduza-o em loop como sua webcam ou grave de novo.",
+    "retake": "Regravar",
+    "use": "Usar este clipe"
+  },
+  "loop": {
+    "title": "Você está protegido",
+    "covered": "Seu clipe agora está em loop como sua webcam. No <apps>Zoom, Teams ou Meet</apps>, escolha <device>“CamLooper Virtual Camera”</device> como sua câmera — e então você pode se ausentar.",
+    "liveOn": "Você está ao vivo",
+    "liveOff": "Aparecer ao vivo",
+    "liveOnDesc": "Sua câmera real está ligada. Desligue para voltar ao loop.",
+    "liveOffDesc": "Pause o loop e mostre sua câmera real por um momento.",
+    "recordNew": "Gravar um novo loop",
+    "stop": "Parar"
+  },
+  "advanced": {
+    "toggle": "Avançado",
+    "virtualCamera": "Câmera virtual",
+    "active": "Ativa",
+    "inactive": "Inativa",
+    "enable": "Ativar câmera virtual",
+    "statusReady": "Pronta para uso nos aplicativos",
+    "statusDisabled": "Desativada",
+    "statusLine": "Status: {{status}}",
+    "resolutionLine": "Resolução: {{value}}",
+    "fpsLine": "FPS: {{value}}",
+    "framesLine": "Quadros: {{value}}",
+    "loopSettings": "Configurações do loop",
+    "numberOfLoops": "Número de repetições",
+    "forever": "Para sempre",
+    "loopTimes": "{{count}}×",
+    "once": "Uma vez",
+    "autoplay": "Reproduzir um clipe automaticamente ao carregar",
+    "videoInfo": "Informações do vídeo",
+    "videoName": "Nome:",
+    "videoDuration": "Duração:",
+    "videoResolution": "Resolução:",
+    "videoFps": "FPS:",
+    "videoFormat": "Formato:",
+    "perfMetrics": "Métricas de desempenho",
+    "framesProcessed": "Quadros processados:",
+    "framesDropped": "Quadros descartados:",
+    "encodeTime": "Tempo de codificação:",
+    "currentQuality": "Qualidade atual:",
+    "statusLabel": "Status:",
+    "playing": "Reproduzindo",
+    "stopped": "Parado",
+    "debugLogs": "Registros de depuração",
+    "export": "Exportar",
+    "clear": "Limpar",
+    "hide": "Ocultar",
+    "show": "Mostrar",
+    "logsPlaceholder": "Os registros de depuração aparecerão aqui...",
+    "logEntries_one": "{{count}} entrada",
+    "logEntries_other": "{{count}} entradas"
+  },
+  "errors": {
+    "unsupportedFormat": "Formato de vídeo não compatível. Escolha um arquivo MP4, MOV, WebM, MKV ou AVI.",
+    "uploadFailed": "Falha ao enviar o vídeo. Tente novamente."
+  },
+  "ad": {
+    "title": "Anúncio",
+    "dismiss": "Fechar anúncio"
+  }
+}

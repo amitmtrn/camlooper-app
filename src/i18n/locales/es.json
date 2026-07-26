@@ -1,0 +1,108 @@
+{
+  "app": {
+    "title": "CamLooper - Preséntate sin renunciar a tu privacidad"
+  },
+  "topbar": {
+    "tagline": "Aparece en clase sin renunciar a tu privacidad: graba un clip corto y reprodúcelo en bucle como tu cámara."
+  },
+  "language": {
+    "label": "Idioma"
+  },
+  "stepper": {
+    "golive": "En directo",
+    "record": "Grabar",
+    "loop": "Bucle"
+  },
+  "stage": {
+    "startingCamera": "Iniciando la cámara…",
+    "altLive": "Cámara en directo",
+    "altLoop": "Vídeo en bucle",
+    "previewPlaceholder": "Aquí aparecerá la vista previa de tu cámara",
+    "badgeLive": "EN DIRECTO",
+    "badgeRec": "REC {{time}}",
+    "badgeLoop": "Bucle {{current}}/{{total}}",
+    "badgeLoading": "Cargando… {{progress}}%"
+  },
+  "step1": {
+    "title": "Paso 1 · En directo",
+    "desc": "Esto es exactamente lo que verá tu clase. Elige tu cámara y colócate como quieras aparecer.",
+    "cameraLabel": "Cámara",
+    "cameraPlaceholder": "Selecciona una cámara",
+    "noCamera": "No se encontró ninguna cámara. Conecta una webcam y vuelve a abrir CamLooper.",
+    "startCamera": "Iniciar cámara",
+    "next": "Siguiente: Grabar",
+    "loopExisting": "¿Ya tienes un clip? Reproduce en bucle un vídeo existente"
+  },
+  "step2": {
+    "title": "Paso 2 · Graba tu bucle",
+    "desc": "Graba entre 10 y 30 segundos de ti con aspecto natural. Unos pequeños movimientos —un gesto, una mirada— hacen que el bucle resulte creíble.",
+    "start": "Empezar a grabar",
+    "stop": "Detener grabación · {{time}}",
+    "back": "← Volver a la configuración de la cámara"
+  },
+  "review": {
+    "title": "¿Se ve bien?",
+    "desc": "Aquí tienes tu clip. Reprodúcelo en bucle como tu webcam o vuelve a grabar.",
+    "retake": "Repetir",
+    "use": "Usar este clip"
+  },
+  "loop": {
+    "title": "Estás cubierto",
+    "covered": "Tu clip ahora se reproduce en bucle como tu webcam. En <apps>Zoom, Teams o Meet</apps>, elige <device>«CamLooper Virtual Camera»</device> como tu cámara y ya puedes ausentarte.",
+    "liveOn": "Estás en directo",
+    "liveOff": "Aparecer en directo",
+    "liveOnDesc": "Tu cámara real está encendida. Desactívala para volver al bucle.",
+    "liveOffDesc": "Pausa el bucle y muestra tu cámara real por un momento.",
+    "recordNew": "Grabar un nuevo bucle",
+    "stop": "Detener"
+  },
+  "advanced": {
+    "toggle": "Avanzado",
+    "virtualCamera": "Cámara virtual",
+    "active": "Activa",
+    "inactive": "Inactiva",
+    "enable": "Activar cámara virtual",
+    "statusReady": "Lista para usar en las aplicaciones",
+    "statusDisabled": "Desactivada",
+    "statusLine": "Estado: {{status}}",
+    "resolutionLine": "Resolución: {{value}}",
+    "fpsLine": "FPS: {{value}}",
+    "framesLine": "Fotogramas: {{value}}",
+    "loopSettings": "Ajustes del bucle",
+    "numberOfLoops": "Número de repeticiones",
+    "forever": "Para siempre",
+    "loopTimes": "{{count}}×",
+    "once": "Una vez",
+    "autoplay": "Reproducir automáticamente un clip al cargarlo",
+    "videoInfo": "Información del vídeo",
+    "videoName": "Nombre:",
+    "videoDuration": "Duración:",
+    "videoResolution": "Resolución:",
+    "videoFps": "FPS:",
+    "videoFormat": "Formato:",
+    "perfMetrics": "Métricas de rendimiento",
+    "framesProcessed": "Fotogramas procesados:",
+    "framesDropped": "Fotogramas perdidos:",
+    "encodeTime": "Tiempo de codificación:",
+    "currentQuality": "Calidad actual:",
+    "statusLabel": "Estado:",
+    "playing": "Reproduciendo",
+    "stopped": "Detenido",
+    "debugLogs": "Registros de depuración",
+    "export": "Exportar",
+    "clear": "Borrar",
+    "hide": "Ocultar",
+    "show": "Mostrar",
+    "logsPlaceholder": "Los registros de depuración aparecerán aquí...",
+    "logEntries_one": "{{count}} entrada",
+    "logEntries_other": "{{count}} entradas"
+  },
+  "errors": {
+    "unsupportedFormat": "Formato de vídeo no compatible. Elige un archivo MP4, MOV, WebM, MKV o AVI.",
+    "uploadFailed": "No se pudo subir el vídeo. Inténtalo de nuevo."
+  },
+  "ad": {
+    "title": "Anuncio",
+    "dismiss": "Cerrar anuncio"
+  }
+}
