@@ -19,6 +19,19 @@ use image;
 #[cfg(target_os = "windows")]
 use crate::windows_virtual_camera::WindowsVirtualCamera;
 
+/// Human-readable label we set on our v4l2loopback device (via the modprobe.d
+/// `card_label=` option). Used both to create the device with the right name and to pick
+/// it out from any other loopback devices (OBS, Discord) at runtime.
+#[cfg(target_os = "linux")]
+const CARD_LABEL: &str = "CamLooper Virtual Camera";
+
+/// Path to the modprobe options file the deb/rpm installs. When present, a plain
+/// `modprobe v4l2loopback` already applies `exclusive_caps=1` + the card label, so we don't
+/// pass them explicitly. On AppImage (file absent) we pass them on the command line so
+/// browsers/Zoom still list the device.
+#[cfg(target_os = "linux")]
+const MODPROBE_CONF: &str = "/etc/modprobe.d/camlooper-v4l2loopback.conf";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualCameraConfig {
     pub width: u32,
@@ -262,32 +275,27 @@ impl VirtualCamera {
         // Windows implementation using the custom DirectShow virtual camera
         let config = self.config.clone();
         let status = self.status.clone();
-        
+
+        println!("Starting softcam DirectShow virtual camera...");
+
+        // Create and start the softcam-backed virtual camera synchronously so a failure is
+        // reported to the caller (and surfaced in the UI) instead of being swallowed inside
+        // the background frame loop. softcam.dll is bundled with the app; it is registered at
+        // install time (perMachine build) or on first use via `ensure_softcam_registered`
+        // (per-user Store build).
+        let mut vcam = WindowsVirtualCamera::new(
+            &config.camera_name,
+            config.width,
+            config.height,
+            config.fps,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create softcam virtual camera: {}", e))?;
+
+        vcam.start()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to start softcam virtual camera: {}", e))?;
+
         tokio::spawn(async move {
-            println!("Starting softcam DirectShow virtual camera...");
-
-            // Create and start the softcam-backed virtual camera. The softcam.dll is
-            // bundled with the app and registered by the installer.
-            let mut vcam = match WindowsVirtualCamera::new(
-                &config.camera_name,
-                config.width,
-                config.height,
-                config.fps,
-            ) {
-                Ok(vcam) => vcam,
-                Err(e) => {
-                    eprintln!("Failed to create softcam virtual camera: {}", e);
-                    eprintln!("This will cause the virtual camera channel to close");
-                    return;
-                }
-            };
-
-            if let Err(e) = vcam.start().await {
-                eprintln!("Failed to start softcam virtual camera: {}", e);
-                eprintln!("This will cause the virtual camera channel to close");
-                return;
-            }
-            
             let mut frame_count = 0u64;
             let target_frame_duration = tokio::time::Duration::from_millis(1000 / config.fps as u64);
             let mut frame_timer = tokio::time::interval(target_frame_duration);
@@ -365,21 +373,22 @@ impl VirtualCamera {
         let config = self.config.clone();
         let status = self.status.clone();
         
+        // Resolve the device BEFORE spawning so a missing/unloaded module surfaces as an
+        // error to the caller (and thus the UI) instead of failing silently inside the task.
+        // The frontend calls `ensure_v4l2loopback` first, so the module is normally loaded by
+        // now; this is the belt-and-suspenders path.
+        let (device_path, _device_index) = Self::find_loopback_device().map_err(|e| {
+            anyhow::anyhow!(
+                "No CamLooper virtual camera device found ({}). The v4l2loopback kernel module \
+                 may not be loaded — try starting the camera again to load it, or run \
+                 `sudo modprobe v4l2loopback`.",
+                e
+            )
+        })?;
+
         tokio::spawn(async move {
-            println!("Starting Linux v4l2loopback virtual camera...");
-            
-            // Try to find an available v4l2loopback device
-            let (device_path, _device_index) = match Self::find_loopback_device() {
-                Ok((path, index)) => (path, index),
-                Err(e) => {
-                    eprintln!("Failed to find v4l2loopback device: {}", e);
-                    eprintln!("Make sure v4l2loopback is installed and loaded:");
-                    eprintln!("  sudo modprobe v4l2loopback");
-                    return;
-                }
-            };
-            
-            println!("Using v4l2loopback device: {}", device_path);
+            // Device was resolved before the spawn (see above).
+            println!("Starting Linux v4l2loopback virtual camera on {}", device_path);
             
             // Start FFmpeg process to write to the v4l2loopback device
             let mut ffmpeg_process = match tokio::process::Command::new("ffmpeg")
@@ -585,7 +594,9 @@ impl VirtualCamera {
 
     #[cfg(target_os = "linux")]
     fn find_loopback_device() -> Result<(String, usize)> {
-        // Look for v4l2loopback devices
+        // Prefer the device we labelled "CamLooper Virtual Camera"; if we only find some
+        // other app's loopback (OBS, Discord), keep it as a fallback.
+        let mut fallback: Option<(String, usize)> = None;
         for i in 0..20 {
             let device_path = format!("/dev/video{}", i);
             if std::path::Path::new(&device_path).exists() {
@@ -597,12 +608,14 @@ impl VirtualCamera {
                             println!("Checking device {}: driver='{}', card='{}', bus='{}'", 
                                 device_path, caps.driver, caps.card, caps.bus);
                             
-                            // Check if it's a v4l2loopback device
-                            if Self::is_v4l2loopback_device(&caps) {
-                                println!("Found v4l2loopback device: {}", device_path);
+                            // Prefer our own labelled device; otherwise remember the first
+                            // loopback-like device as a fallback.
+                            if caps.card.trim() == CARD_LABEL {
+                                println!("Found CamLooper virtual camera device: {}", device_path);
                                 return Ok((device_path, i));
-                            } else {
-                                println!("Device {} is not a v4l2loopback device", device_path);
+                            }
+                            if fallback.is_none() && Self::is_v4l2loopback_device(&caps) {
+                                fallback = Some((device_path.clone(), i));
                             }
                         }
                     }
@@ -613,7 +626,7 @@ impl VirtualCamera {
                 }
             }
         }
-        Err(anyhow::anyhow!("No v4l2loopback device found"))
+        fallback.ok_or_else(|| anyhow::anyhow!("No v4l2loopback device found"))
     }
 
     #[cfg(target_os = "linux")]
@@ -649,6 +662,236 @@ impl VirtualCamera {
         
         false
     }
+}
+
+/// Result of making sure the v4l2loopback module is loaded and a usable device exists.
+/// Serialized (camelCase) to the frontend — mirrors the Windows `RegisterOutcome` pattern —
+/// so the UI can either proceed or surface an actionable message. Unit-only so it reaches the
+/// frontend as a plain string; detailed failure reasons are logged server-side.
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VcamSetupOutcome {
+    /// A CamLooper virtual-camera device is already present — nothing to do, no prompt.
+    Ready,
+    /// The module wasn't loaded; we loaded it just now (one polkit prompt accepted).
+    JustLoaded,
+    /// The user dismissed the polkit authentication dialog.
+    Declined,
+    /// The v4l2loopback module isn't built for the running kernel (missing kernel headers /
+    /// DKMS never built it, or it isn't installed at all).
+    NotInstalled,
+    /// The module exists but the kernel refused to load it because of Secure Boot (unsigned
+    /// DKMS module — needs MOK enrollment; not auto-fixable).
+    SecureBootBlocked,
+    /// No pkexec / polkit agent available to escalate privileges.
+    NoPkexec,
+    /// A device node exists but isn't accessible (user not in the `video` group).
+    PermissionDenied,
+    /// Any other failure — details are logged to stderr.
+    Failed,
+}
+
+/// Guards against re-prompting: once we've successfully ensured the device this session,
+/// later calls report state without another polkit prompt.
+#[cfg(target_os = "linux")]
+static VCAM_ENSURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True if the v4l2loopback module is currently loaded into the kernel.
+#[cfg(target_os = "linux")]
+fn is_module_loaded() -> bool {
+    std::path::Path::new("/sys/module/v4l2loopback").exists()
+}
+
+/// Whether a v4l2loopback `.ko` is built for the running kernel: `Some(true)`/`Some(false)`
+/// if we could run `modinfo`, or `None` if `modinfo` couldn't be found/executed (in which
+/// case the caller should attempt the load rather than assume absence). Tries absolute paths
+/// first because a desktop-launched app may not have `/usr/sbin` on PATH.
+#[cfg(target_os = "linux")]
+async fn module_ko_exists() -> Option<bool> {
+    for bin in ["/usr/sbin/modinfo", "/sbin/modinfo", "modinfo"] {
+        match tokio::process::Command::new(bin)
+            .arg("-n")
+            .arg("v4l2loopback")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+        {
+            Ok(status) => return Some(status.success()),
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// True if any `/dev/videoN` node exists but can't be opened for read/write because of
+/// permissions — i.e. the current user is not in the `video` group.
+#[cfg(target_os = "linux")]
+fn any_video_node_permission_denied() -> bool {
+    for i in 0..20 {
+        let path = format!("/dev/video{}", i);
+        if std::path::Path::new(&path).exists() {
+            if let Err(e) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Best-effort Secure Boot detection via `mokutil --sb-state`.
+#[cfg(target_os = "linux")]
+async fn is_secure_boot_enabled() -> bool {
+    for bin in ["/usr/bin/mokutil", "/bin/mokutil", "mokutil"] {
+        if let Ok(output) = tokio::process::Command::new(bin)
+            .arg("--sb-state")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .await
+        {
+            return String::from_utf8_lossy(&output.stdout)
+                .to_lowercase()
+                .contains("enabled");
+        }
+    }
+    false
+}
+
+/// Module loaded but no usable device: distinguish a permissions problem from anything else.
+#[cfg(target_os = "linux")]
+async fn classify_no_device() -> VcamSetupOutcome {
+    if any_video_node_permission_denied() {
+        VcamSetupOutcome::PermissionDenied
+    } else {
+        eprintln!("camlooper: v4l2loopback is loaded but no usable device was found");
+        VcamSetupOutcome::Failed
+    }
+}
+
+/// Load the v4l2loopback module on demand, escalating with pkexec (one polkit prompt). Falls
+/// back to a plain `modprobe` (works only if already privileged) when pkexec is absent.
+#[cfg(target_os = "linux")]
+async fn load_loopback_module() -> VcamSetupOutcome {
+    let pkexec = ["/usr/bin/pkexec", "/bin/pkexec"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists());
+
+    // deb/rpm ship the modprobe.d options file; AppImage doesn't, so pass options explicitly.
+    let pass_options = !std::path::Path::new(MODPROBE_CONF).exists();
+
+    let mut cmd = match pkexec {
+        Some(p) => {
+            let mut c = tokio::process::Command::new(p);
+            c.arg("modprobe").arg("v4l2loopback");
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new("modprobe");
+            c.arg("v4l2loopback");
+            c
+        }
+    };
+    if pass_options {
+        cmd.arg("exclusive_caps=1");
+        cmd.arg(format!("card_label={}", CARD_LABEL));
+    }
+
+    let output = match cmd.stdin(Stdio::null()).output().await {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("camlooper: failed to run modprobe: {}", e);
+            return VcamSetupOutcome::NoPkexec;
+        }
+    };
+
+    if output.status.success() {
+        // udev needs a moment to create /dev/videoN and apply permissions.
+        for _ in 0..15 {
+            if VirtualCamera::find_loopback_device().is_ok() {
+                return VcamSetupOutcome::JustLoaded;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        return classify_no_device().await;
+    }
+
+    let code = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+
+    // pkexec's own exit codes: 126 = dialog dismissed, 127 = auth couldn't proceed / no agent.
+    if pkexec.is_some() && code == 126 {
+        return VcamSetupOutcome::Declined;
+    }
+    if pkexec.is_some() && code == 127 {
+        return VcamSetupOutcome::NoPkexec;
+    }
+    if stderr.contains("not found") || stderr.contains("not currently installed") {
+        return VcamSetupOutcome::NotInstalled;
+    }
+    if stderr.contains("key was rejected")
+        || stderr.contains("required key not available")
+        || is_secure_boot_enabled().await
+    {
+        return VcamSetupOutcome::SecureBootBlocked;
+    }
+    eprintln!(
+        "camlooper: modprobe v4l2loopback failed (exit {}): {}",
+        code,
+        stderr.trim()
+    );
+    VcamSetupOutcome::Failed
+}
+
+/// Make sure a usable CamLooper virtual-camera device exists, loading the module on demand.
+/// Called from the frontend before enabling the camera. At most one polkit prompt per run.
+#[cfg(target_os = "linux")]
+pub async fn ensure_loopback_ready() -> VcamSetupOutcome {
+    use std::sync::atomic::Ordering;
+
+    // Fast path: a usable device already exists (no prompt).
+    if VirtualCamera::find_loopback_device().is_ok() {
+        return VcamSetupOutcome::Ready;
+    }
+
+    // Already ensured earlier this session: report state without prompting again.
+    if VCAM_ENSURED.load(Ordering::Relaxed) {
+        return if is_module_loaded() {
+            classify_no_device().await
+        } else {
+            VcamSetupOutcome::Failed
+        };
+    }
+
+    // Module loaded but no usable device (e.g. devices=0 or a permissions issue).
+    if is_module_loaded() {
+        return classify_no_device().await;
+    }
+
+    // Not loaded. If we can tell the .ko isn't built for this kernel, say so without a prompt.
+    if module_ko_exists().await == Some(false) {
+        return VcamSetupOutcome::NotInstalled;
+    }
+
+    let outcome = load_loopback_module().await;
+    if matches!(
+        outcome,
+        VcamSetupOutcome::Ready | VcamSetupOutcome::JustLoaded
+    ) {
+        VCAM_ENSURED.store(true, Ordering::Relaxed);
+    }
+    outcome
+}
+
+/// Non-Linux, non-Windows (macOS): the virtual camera is provided by a different mechanism,
+/// so there's no kernel module to load — always report ready.
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+pub async fn ensure_loopback_ready() -> VcamSetupOutcome {
+    VcamSetupOutcome::Ready
 }
 
 // Global virtual camera instance

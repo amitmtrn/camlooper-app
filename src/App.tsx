@@ -1,5 +1,5 @@
 import { Toaster } from "@/components/ui/toaster";
-import { Toaster as Sonner } from "@/components/ui/sonner";
+import { Toaster as Sonner, toast } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -589,19 +589,105 @@ function CamLooper() {
   const startVirtualCamera = async () => {
     setIsVirtualCamLoading(true);
     try {
+      // On Windows, ensure the softcam DirectShow driver is registered before starting.
+      // This is a no-op (no prompt) once registered; on the per-user Microsoft Store build
+      // it triggers a single UAC prompt on first use, while the perMachine (direct-download)
+      // build already registered it at install time.
+      if (navigator.userAgent.includes('Windows')) {
+        const outcome = await invoke<string>('ensure_softcam_registered');
+        if (outcome === 'declined') {
+          toast.warning(t('vcam.driver.declinedTitle', 'Virtual camera driver not enabled'), {
+            description: t('vcam.driver.declinedDesc', 'Windows needs administrator approval once to install the CamLooper virtual camera. It won’t appear in Zoom, Meet or OBS until you allow it.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'failed') {
+          toast.error(t('vcam.driver.failedTitle', 'Could not install the virtual camera driver'), {
+            description: t('vcam.driver.failedDesc', 'Registration failed. Try reinstalling CamLooper, or run it once as administrator.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'justRegistered') {
+          toast.success(t('vcam.driver.registeredTitle', 'CamLooper virtual camera installed'), {
+            description: t('vcam.driver.registeredDesc', 'You may need to restart Zoom, Meet or OBS for “DirectShow Softcam” to appear in the camera list.'),
+          });
+        }
+      }
+
+      // On Linux, make sure the v4l2loopback kernel module is loaded before starting. This
+      // self-heals every install method (apt, dpkg, AppImage): if the module isn't loaded,
+      // the app loads it on demand via a one-time polkit prompt. A no-op (no prompt) once a
+      // device already exists.
+      if (navigator.userAgent.includes('Linux')) {
+        const outcome = await invoke<string>('ensure_v4l2loopback');
+        if (outcome === 'declined') {
+          toast.warning(t('vcam.linux.declinedTitle', 'Virtual camera driver not enabled'), {
+            description: t('vcam.linux.declinedDesc', 'CamLooper needs permission once to load its virtual camera driver. It won’t appear in Zoom, Meet or OBS until you allow it.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'notInstalled') {
+          toast.error(t('vcam.linux.notInstalledTitle', 'Virtual camera driver missing'), {
+            description: t('vcam.linux.notInstalledDesc', 'The v4l2loopback driver isn’t built for your kernel. In a terminal run: sudo apt install linux-headers-$(uname -r) v4l2loopback-dkms && sudo dkms autoinstall — then restart CamLooper.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'secureBootBlocked') {
+          toast.error(t('vcam.linux.secureBootTitle', 'Secure Boot is blocking the driver'), {
+            description: t('vcam.linux.secureBootDesc', 'Secure Boot won’t let the unsigned v4l2loopback module load. Enroll the DKMS key (sudo mokutil --import …) or disable Secure Boot in your BIOS, then restart CamLooper.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'noPkexec') {
+          toast.error(t('vcam.linux.noPkexecTitle', 'Couldn’t load the virtual camera driver'), {
+            description: t('vcam.linux.noPkexecDesc', 'CamLooper couldn’t ask for permission to load the driver. Run this once in a terminal: sudo modprobe v4l2loopback — then start the camera again.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'permissionDenied') {
+          toast.error(t('vcam.linux.permissionTitle', 'No access to the camera device'), {
+            description: t('vcam.linux.permissionDesc', 'Add yourself to the “video” group: sudo usermod -aG video $USER — then log out and back in.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'failed') {
+          toast.error(t('vcam.linux.failedTitle', 'Could not enable the virtual camera'), {
+            description: t('vcam.linux.failedDesc', 'Loading the v4l2loopback driver failed. Try running sudo modprobe v4l2loopback in a terminal, or reinstall CamLooper.'),
+          });
+          setIsVirtualCamActive(false);
+          return;
+        }
+        if (outcome === 'justLoaded') {
+          toast.success(t('vcam.linux.loadedTitle', 'CamLooper virtual camera ready'), {
+            description: t('vcam.linux.loadedDesc', 'You may need to restart Zoom, Meet or OBS for “CamLooper Virtual Camera” to appear in the camera list.'),
+          });
+        }
+        // 'ready' → fall through and start the camera.
+      }
+
       const config: VirtualCameraConfig = {
         width: 1920,
         height: 1080,
         fps: 30,
         camera_name: "CamLooper Virtual Camera"
       };
-      
+
       const status = await invoke<VirtualCameraStatus>('start_virtual_camera', { config });
       setVirtualCameraStatus(status);
       setIsVirtualCamActive(status.is_active);
       console.log('Virtual camera started successfully');
     } catch (error) {
       console.error('Failed to start virtual camera:', error);
+      toast.error(t('vcam.startFailedTitle', 'Could not start the virtual camera'), {
+        description: String(error),
+      });
       setIsVirtualCamActive(false);
     } finally {
       setIsVirtualCamLoading(false);

@@ -1,12 +1,33 @@
 #!/bin/sh
-# CamLooper post-install: load the v4l2loopback module now so the virtual camera
-# works without a reboot. The /etc/modprobe.d options file (installed alongside)
-# supplies exclusive_caps=1 and the card label. Best-effort: never fail the install
-# if the module can't load yet (e.g. dkms still building, or a reboot is needed) —
-# /etc/modules-load.d ensures it loads on the next boot regardless.
+# CamLooper post-install: load the v4l2loopback module now so the virtual camera works
+# without a reboot. The /etc/modprobe.d options file (installed alongside) supplies
+# exclusive_caps=1 and the card label. Best-effort: never fail the install if the module
+# can't load yet — /etc/modules-load.d loads it on the next boot, and the app itself will
+# load it on demand (one polkit prompt) the first time the camera is started.
 set -e
 
-modprobe v4l2loopback 2>/dev/null || \
-  echo "camlooper: could not load v4l2loopback now; it will load on next boot." >&2
+if modprobe v4l2loopback 2>/dev/null; then
+  exit 0
+fi
+
+# modprobe failed — figure out why and print an actionable hint. None of this is fatal.
+echo "camlooper: could not load the v4l2loopback module yet." >&2
+
+if ! modinfo v4l2loopback >/dev/null 2>&1; then
+  # No .ko built for the running kernel: usually the DKMS build needs kernel headers.
+  echo "camlooper: the v4l2loopback driver isn't built for kernel $(uname -r)." >&2
+  if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+    echo "camlooper: install the kernel headers and rebuild it, then reboot or reopen CamLooper:" >&2
+    echo "camlooper:   sudo apt install linux-headers-$(uname -r) && sudo dkms autoinstall" >&2
+  else
+    echo "camlooper: try rebuilding it: sudo dkms autoinstall" >&2
+  fi
+elif command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+  # The module exists but Secure Boot blocks unsigned DKMS modules.
+  echo "camlooper: Secure Boot is enabled and is blocking the unsigned v4l2loopback module." >&2
+  echo "camlooper: enroll the DKMS signing key (sudo mokutil --import ...) or disable Secure Boot." >&2
+else
+  echo "camlooper: it will load on the next boot, or when you start the camera in CamLooper." >&2
+fi
 
 exit 0

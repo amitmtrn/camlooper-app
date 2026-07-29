@@ -104,5 +104,32 @@
   "ad": {
     "title": "Advertisement",
     "dismiss": "Dismiss advertisement"
+  },
+  "vcam": {
+    "startFailedTitle": "Could not start the virtual camera",
+    "driver": {
+      "declinedTitle": "Virtual camera driver not enabled",
+      "declinedDesc": "Windows needs administrator approval once to install the CamLooper virtual camera. It won’t appear in Zoom, Meet or OBS until you allow it.",
+      "failedTitle": "Could not install the virtual camera driver",
+      "failedDesc": "Registration failed. Try reinstalling CamLooper, or run it once as administrator.",
+      "registeredTitle": "CamLooper virtual camera installed",
+      "registeredDesc": "You may need to restart Zoom, Meet or OBS for “DirectShow Softcam” to appear in the camera list."
+    },
+    "linux": {
+      "declinedTitle": "Virtual camera driver not enabled",
+      "declinedDesc": "CamLooper needs permission once to load its virtual camera driver. It won’t appear in Zoom, Meet or OBS until you allow it.",
+      "notInstalledTitle": "Virtual camera driver missing",
+      "notInstalledDesc": "The v4l2loopback driver isn’t built for your kernel. In a terminal run: sudo apt install linux-headers-$(uname -r) v4l2loopback-dkms && sudo dkms autoinstall — then restart CamLooper.",
+      "secureBootTitle": "Secure Boot is blocking the driver",
+      "secureBootDesc": "Secure Boot won’t let the unsigned v4l2loopback module load. Enroll the DKMS key (sudo mokutil --import …) or disable Secure Boot in your BIOS, then restart CamLooper.",
+      "noPkexecTitle": "Couldn’t load the virtual camera driver",
+      "noPkexecDesc": "CamLooper couldn’t ask for permission to load the driver. Run this once in a terminal: sudo modprobe v4l2loopback — then start the camera again.",
+      "permissionTitle": "No access to the camera device",
+      "permissionDesc": "Add yourself to the “video” group: sudo usermod -aG video $USER — then log out and back in.",
+      "failedTitle": "Could not enable the virtual camera",
+      "failedDesc": "Loading the v4l2loopback driver failed. Try running sudo modprobe v4l2loopback in a terminal, or reinstall CamLooper.",
+      "loadedTitle": "CamLooper virtual camera ready",
+      "loadedDesc": "You may need to restart Zoom, Meet or OBS for “CamLooper Virtual Camera” to appear in the camera list."
+    }
   }
 }

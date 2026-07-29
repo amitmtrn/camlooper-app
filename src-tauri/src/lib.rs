@@ -6,6 +6,8 @@ mod camera_capture;
 #[cfg(target_os = "windows")]
 mod softcam_manager;
 #[cfg(target_os = "windows")]
+mod softcam_register;
+#[cfg(target_os = "windows")]
 mod windows_virtual_camera;
 
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
@@ -61,6 +63,18 @@ async fn list_video_devices() -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Ensure the v4l2loopback module is loaded and a CamLooper virtual-camera device exists,
+/// escalating (one polkit prompt) only if it isn't already loaded. Called from the frontend
+/// before enabling the camera so the module "just works" regardless of how CamLooper was
+/// installed (apt repo, dpkg, AppImage). Mirrors the Windows `ensure_softcam_registered`.
+/// Compiled for all non-Windows targets (the shared handler list includes macOS); non-Linux
+/// Unix returns `Ready` since there's no kernel module to load there.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn ensure_v4l2loopback() -> virtual_camera::VcamSetupOutcome {
+    virtual_camera::ensure_loopback_ready().await
+}
+
 // Windows Softcam Management Commands
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -74,6 +88,18 @@ async fn setup_softcam() -> Result<(), String> {
 #[tauri::command]
 async fn is_softcam_available() -> bool {
     softcam_manager::is_softcam_available().await
+}
+
+/// Ensure the softcam DirectShow driver is registered, elevating (one UAC prompt) only if
+/// it isn't already. Called from the frontend before enabling the virtual camera so the
+/// per-user Store build can register on first use; a no-op on the perMachine build where
+/// the installer already registered it.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn ensure_softcam_registered() -> softcam_register::RegisterOutcome {
+    tokio::task::spawn_blocking(softcam_register::ensure_registered)
+        .await
+        .unwrap_or(softcam_register::RegisterOutcome::Failed)
 }
 
 #[cfg(target_os = "windows")]
@@ -308,6 +334,7 @@ pub fn run() {
                     // Windows Softcam Management
                     setup_softcam,
                     is_softcam_available,
+                    ensure_softcam_registered,
                     get_softcam_status,
                     // New Streaming Upload Commands
                     start_stream_upload,
@@ -351,6 +378,8 @@ pub fn run() {
                     get_virtual_camera_status,
                     send_frame_to_virtual_camera,
                     list_video_devices,
+                    // Linux v4l2loopback module management
+                    ensure_v4l2loopback,
                     // New Streaming Upload Commands
                     start_stream_upload,
                     upload_chunk_stream,

@@ -144,3 +144,31 @@ jobs:
           src-tauri/target/${{ matrix.target }}/release/bundle/*/*.exe
           src-tauri/target/${{ matrix.target }}/release/bundle/*/*.msi
         if-no-files-found: error
+
+    # Microsoft Store variant: a per-user (currentUser) NSIS installer that installs
+    # silently without elevation so it passes Store cert policies 10.2.9.2 / 10.3.4. It
+    # defers softcam driver registration to first use inside the app (see
+    # src/softcam_register.rs). This runs AFTER the direct (perMachine) build above has
+    # been published/uploaded — it regenerates only the NSIS bundle (no Rust recompile)
+    # and overwrites the local *-setup.exe, so it must come last. The result goes to
+    # Partner Center manually; it is NOT attached to the public GitHub Release.
+    - name: Build Microsoft Store installer (Windows, per-user)
+      if: matrix.platform == 'windows-latest'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        npx tauri build --target ${{ matrix.target }} -c src-tauri/tauri.store.conf.json
+        $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+        $dir = "src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
+        $src = Join-Path $dir "camlooper_${v}_x64-setup.exe"
+        $dst = Join-Path $dir "camlooper_${v}_x64-store-setup.exe"
+        Copy-Item $src $dst -Force
+        Write-Host "Microsoft Store installer: $dst"
+
+    - name: Upload Microsoft Store installer (Windows)
+      if: matrix.platform == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: camlooper-windows-store
+        path: src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-store-setup.exe
+        if-no-files-found: error
