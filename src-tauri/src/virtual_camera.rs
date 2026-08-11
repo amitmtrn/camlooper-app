@@ -86,14 +86,6 @@ impl VirtualCamera {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        #[cfg(target_os = "windows")]
-        {
-            // Log softcam status before starting
-            match crate::softcam_manager::get_softcam_status().await {
-                Ok(status) => println!("[Softcam Status Before Start]:\n{}", status),
-                Err(e) => println!("[Softcam Status Before Start]: Error: {}", e),
-            }
-        }
         {
             let is_running = self.is_running.lock().await;
             if *is_running {
@@ -121,26 +113,10 @@ impl VirtualCamera {
         }
         
         println!("Virtual camera started: {}", self.config.camera_name);
-        #[cfg(target_os = "windows")]
-        {
-            // Log softcam status after starting
-            match crate::softcam_manager::get_softcam_status().await {
-                Ok(status) => println!("[Softcam Status After Start]:\n{}", status),
-                Err(e) => println!("[Softcam Status After Start]: Error: {}", e),
-            }
-        }
         Ok(())
     }
 
     pub async fn stop(&mut self) -> Result<()> {
-        #[cfg(target_os = "windows")]
-        {
-            // Log softcam status before stopping
-            match crate::softcam_manager::get_softcam_status().await {
-                Ok(status) => println!("[Softcam Status Before Stop]:\n{}", status),
-                Err(e) => println!("[Softcam Status Before Stop]: Error: {}", e),
-            }
-        }
         {
             let is_running = self.is_running.lock().await;
             if !*is_running {
@@ -166,14 +142,6 @@ impl VirtualCamera {
         }
         
         println!("Virtual camera stopped: {}", self.config.camera_name);
-        #[cfg(target_os = "windows")]
-        {
-            // Log softcam status after stopping
-            match crate::softcam_manager::get_softcam_status().await {
-                Ok(status) => println!("[Softcam Status After Stop]:\n{}", status),
-                Err(e) => println!("[Softcam Status After Stop]: Error: {}", e),
-            }
-        }
         Ok(())
     }
 

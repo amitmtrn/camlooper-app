@@ -9,7 +9,6 @@ use anyhow::Result;
 use std::ffi::CString;
 use std::os::raw::{c_float, c_int, c_void};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use crate::softcam_manager;
 
 /// Handle to a softcam virtual camera instance
 pub type ScCamera = *mut c_void;
@@ -140,68 +139,14 @@ impl WindowsVirtualCamera {
             }
         }
 
-        // Fallback: try the softcam manager (legacy download path)
-        match softcam_manager::get_softcam_dll_path().await {
-            Ok(dll_path) => {
-                println!("Found softcam DLL at: {:?}", dll_path);
-                if let Err(e) = self.try_load_dll_from_path(&dll_path) {
-                    println!("Failed to load DLL from manager path: {}", e);
-                    println!("Attempting automatic softcam setup...");
-                    // Fall back to trying to setup softcam automatically
-                    self.try_auto_setup_softcam().await?;
-                } else {
-                    println!("Successfully loaded softcam DLL from manager path");
-                }
-            }
-            Err(e) => {
-                println!("Softcam DLL not found in manager: {}", e);
-                println!("Attempting automatic softcam setup...");
-                // Softcam not available, try to set it up automatically
-                self.try_auto_setup_softcam().await?;
-            }
-        }
-        
-        Ok(())
+        // No bundled softcam.dll next to the executable. The installer registers
+        // softcam at install time (and the app re-registers on first use via
+        // ensure_softcam_registered), so a missing DLL here means a broken install.
+        Err(anyhow::anyhow!(
+            "Bundled softcam.dll not found next to the executable; please reinstall CamLooper"
+        ))
     }
-    
-    async fn try_auto_setup_softcam(&mut self) -> Result<()> {
-        println!("Attempting to setup softcam automatically...");
-        
-        // Check if already available
-        if !softcam_manager::is_softcam_available().await {
-            println!("Softcam not available, downloading and setting up...");
-            
-            // Try to setup softcam
-            match softcam_manager::setup_softcam().await {
-                Ok(_) => {
-                    println!("Softcam setup completed successfully");
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to setup softcam automatically: {}\n\
-                        \n\
-                        Please install softcam manually:\n\
-                        1. Download from: https://github.com/tshino/softcam/releases\n\
-                        2. Extract the files\n\
-                        3. Run as Administrator: regsvr32 softcam.dll\n\
-                        4. Restart your application",
-                        e
-                    ));
-                }
-            }
-        }
-        
-        // Now try to load the DLL
-        match softcam_manager::get_softcam_dll_path().await {
-            Ok(dll_path) => {
-                self.try_load_dll_from_path(&dll_path)
-            }
-            Err(e) => {
-                Err(anyhow::anyhow!("Failed to get softcam DLL path after setup: {}", e))
-            }
-        }
-    }
-    
+
     fn try_load_dll_from_path(&mut self, dll_path: &std::path::Path) -> Result<()> {
         let path_str = dll_path.to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid DLL path: {:?}", dll_path))?;
@@ -387,80 +332,6 @@ pub fn list_video_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
-/// Install the softcam virtual camera driver/filter
-pub fn install_softcam_driver() -> Result<()> {
-    println!("To install softcam virtual camera driver:");
-    println!("1. Download softcam from: https://github.com/tshino/softcam/releases");
-    println!("2. Extract the downloaded files");
-    println!("3. Run as Administrator: regsvr32 softcam.dll");
-    println!("4. Restart your application");
-    println!("5. Check if virtual camera appears in camera applications");
-    
-    Ok(())
-}
-
-/// Uninstall the softcam virtual camera driver/filter
-pub fn uninstall_softcam_driver() -> Result<()> {
-    println!("To uninstall softcam virtual camera driver:");
-    println!("1. Run as Administrator: regsvr32 /u softcam.dll");
-    println!("2. Remove softcam files");
-    
-    Ok(())
-}
-
-/// Check if softcam is available on the system
-pub fn is_softcam_available() -> bool {
-    // Try to get the softcam manager to check if DLL is available
-    let rt = tokio::runtime::Runtime::new();
-    match rt {
-        Ok(runtime) => {
-            runtime.block_on(async {
-                softcam_manager::is_softcam_available().await
-            })
-        }
-        Err(_) => {
-            // Fallback to manual check if runtime creation fails
-            is_softcam_available_sync()
-        }
-    }
-}
-
-/// Synchronous version of softcam availability check (fallback)
-fn is_softcam_available_sync() -> bool {
-    // Try to load the DLL to check availability
-    let dll_paths = [
-        "softcam.dll",
-        "./softcam.dll",
-        "C:\\Program Files\\softcam\\softcam.dll",
-        "C:\\Program Files (x86)\\softcam\\softcam.dll",
-    ];
-
-    for path in &dll_paths {
-        if let Ok(path_cstr) = CString::new(*path) {
-            unsafe {
-                if let Ok(handle) = LoadLibraryA(windows::core::PCSTR(path_cstr.as_ptr() as *const u8)) {
-                    if !handle.is_invalid() {
-                        // Note: FreeLibrary is not available in the current windows crate version
-                        // We'll just return true if we can load the library
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Get information about the current softcam installation
-pub fn get_softcam_info() -> Result<String> {
-    if is_softcam_available() {
-        Ok("Softcam is available and ready to use".to_string())
-    } else {
-        Ok("Softcam is not installed or not registered. Run install_softcam_driver() for instructions.".to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,14 +355,5 @@ mod tests {
         
         let devices = devices.unwrap();
         assert!(!devices.is_empty());
-    }
-
-    #[test]
-    fn test_softcam_availability() {
-        // This test will pass/fail depending on whether softcam is installed
-        let available = is_softcam_available();
-        let info = get_softcam_info().unwrap();
-        println!("Softcam available: {}", available);
-        println!("Softcam info: {}", info);
     }
 } 

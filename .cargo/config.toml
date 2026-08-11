@@ -6,18 +6,10 @@ ar = "x86_64-w64-mingw32-ar"
 linker = "i686-w64-mingw32-gcc"
 ar = "i686-w64-mingw32-ar"
 
-# Keep MSVC targets for reference (with xwin setup)
-[target.x86_64-pc-windows-msvc]
-linker = "lld"
-rustflags = ["-C", "linker=lld", "-C", "link-arg=-fuse-ld=lld"]
-
-[target.i686-pc-windows-msvc]
-linker = "lld"
-rustflags = ["-C", "linker=lld", "-C", "link-arg=-fuse-ld=lld"]
-
-[target.aarch64-pc-windows-msvc]
-linker = "lld"
-rustflags = ["-C", "linker=lld", "-C", "link-arg=-fuse-ld=lld"]
+# MSVC targets are built via cargo-xwin (`tauri build --runner cargo-xwin --target
+# x86_64-pc-windows-msvc`), which injects lld-link + the Windows CRT/SDK lib paths itself.
+# Do NOT set linker/rustflags for the msvc targets here — a static `linker = "lld"` conflicts
+# with cargo-xwin and breaks the link.
 
 [env]
 # Set the resource compiler for Windows builds
