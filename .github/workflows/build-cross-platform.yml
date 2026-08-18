@@ -3,9 +3,9 @@ name: Build Cross-Platform
 # Builds native installers for every platform on its own runner (Tauri apps with
 # native deps like FFmpeg / DirectShow / System Extensions cannot be cross-compiled).
 #
-#   - push a tag  v*      -> builds all platforms + attaches installers to a draft Release
+#   - push a tag  v*      -> builds all platforms + attaches installers to a Release
 #   - workflow_dispatch   -> builds all platforms (no Release) for smoke-testing
-#   - PRs to main/master  -> Linux-only build sanity check
+#   - PRs to main/master  -> fast lint/typecheck/frontend check + a Linux-only native build
 #
 # Installers produced:
 #   Windows  : .exe (NSIS) + .msi (WiX)
@@ -19,10 +19,30 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  # Cheap gate (~2 min) so PRs get feedback without waiting on native builds.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    - run: npm ci
+    - run: npm run typecheck
+    - run: npm run lint
+    - run: npm run build
+
   build:
+    needs: check
     permissions:
-      contents: write   # tauri-action needs this to create/upload the Release
+      # tauri-action needs write access to create/upload the Release on tag runs.
+      # Fork PRs get a read-only token regardless, so this is a no-op there.
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +61,11 @@ jobs:
           - platform: 'ubuntu-22.04'
             target: 'x86_64-unknown-linux-gnu'
             name: 'linux-x64'
+        # On PRs only the Linux leg runs; Windows/macOS are reserved for tags and
+        # manual dispatch so a drive-by PR doesn't burn ~2h of runner time.
+        exclude:
+          - platform: ${{ github.event_name == 'pull_request' && 'windows-latest' || '' }}
+          - platform: ${{ github.event_name == 'pull_request' && 'macos-14' || '' }}
     runs-on: ${{ matrix.platform }}
 
     steps:
@@ -58,10 +83,10 @@ jobs:
     - name: Install dependencies (macOS)
       if: startsWith(matrix.platform, 'macos')
       run: |
-        # ffmpeg-sys-next 7.x only supports FFmpeg <= 7; Homebrew's default `ffmpeg`
-        # is now 8.x, so install the keg-only ffmpeg@7 and expose it to pkg-config.
-        brew install ffmpeg@7 pkg-config
-        echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg@7)/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+        # Must match the ffmpeg-next major in src-tauri/Cargo.toml (8.x -> FFmpeg 8
+        # headers). Pin the crate and this line together; they drift silently otherwise.
+        brew install ffmpeg pkg-config
+        echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
 
     - name: Verify FFmpeg installation (Linux/macOS)
       if: matrix.platform != 'windows-latest'
@@ -107,6 +132,14 @@ jobs:
 
     - name: Install frontend dependencies
       run: npm ci
+
+    # tauri.windows.conf.json bundles ffmpeg.exe + the av*/sw* DLLs as resources, and
+    # drivers/windows/ffmpeg/ is gitignored — without this the Windows build fails on
+    # a missing resource path.
+    - name: Fetch Windows FFmpeg
+      if: matrix.platform == 'windows-latest'
+      shell: bash
+      run: npm run fetch:win-ffmpeg
 
     - name: Build app + installers and (on tag) publish to Release
       uses: tauri-apps/tauri-action@v0

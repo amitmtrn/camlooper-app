@@ -1,13 +1,25 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "camlooper",
   "private": true,
   "version": "0.2.1",
+  "description": "Turn any video into a virtual camera for Zoom, Teams, Meet, OBS and Discord",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://camlooper.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amitmtrn/camlooper-app.git"
+  },
+  "bugs": {
+    "url": "https://github.com/amitmtrn/camlooper-app/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "build:dev": "vite build --mode development",
+    "typecheck": "tsc -b --noEmit",
     "lint": "eslint .",
+    "fetch:win-ffmpeg": "bash scripts/fetch-windows-ffmpeg.sh",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
@@ -25,7 +37,6 @@
     "build:exe:windows:32": "npm run build && cargo build --release --target i686-pc-windows-gnu --manifest-path src-tauri/Cargo.toml",
     "build:exe:windows:debug": "npm run build && cargo build --target x86_64-pc-windows-gnu --manifest-path src-tauri/Cargo.toml",
     "build:linux": "tauri build --target x86_64-unknown-linux-gnu",
-    "build:linux:arm64": "tauri build --target aarch64-unknown-linux-gnu",
     "build:linux:all": "npm run build:linux",
     "build:linux:debug": "tauri build --debug --target x86_64-unknown-linux-gnu",
     "build:macos": "tauri build --target aarch64-apple-darwin",
