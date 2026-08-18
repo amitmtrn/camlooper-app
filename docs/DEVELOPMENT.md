@@ -17,10 +17,12 @@
 ### Prerequisites
 
 #### Required Tools
-- **Node.js** 18+ with npm
-- **Rust** 1.70+ with Cargo
+- **Node.js** 20+ with npm — use **npm**, not bun or yarn; `package-lock.json` is the lockfile CI installs from
+- **Rust** stable with Cargo
 - **Git** for version control
-- **FFmpeg** development libraries
+- **FFmpeg 8** development libraries — `ffmpeg-next 8.0` requires FFmpeg 8 headers, so
+  distributions shipping FFmpeg 4/6 (Ubuntu 22.04, Debian 12) cannot build the Rust side
+  without a newer FFmpeg
 
 #### Platform-Specific Requirements
 
@@ -43,19 +45,16 @@
 
 #### 1. Clone Repository
 ```bash
-git clone https://github.com/your-org/camlooper.git
-cd camlooper
+git clone https://github.com/amitmtrn/camlooper-app.git
+cd camlooper-app
 ```
 
 #### 2. Install Dependencies
 ```bash
-# Frontend dependencies
-npm install
+# Frontend dependencies, exactly as locked (the Tauri CLI comes with them)
+npm ci
 
-# Install Tauri CLI
-npm install --save-dev @tauri-apps/cli
-
-# Rust dependencies (handled automatically by Cargo)
+# Rust dependencies are handled automatically by Cargo
 ```
 
 #### 3. Install FFmpeg Development Libraries
@@ -70,13 +69,25 @@ npm install --save-dev @tauri-apps/cli
 brew install ffmpeg pkg-config
 ```
 
-**Linux (Ubuntu/Debian):**
+**Linux (Ubuntu/Debian):** the same set CI installs, plus the v4l2loopback module for
+running the virtual camera locally:
 ```bash
 sudo apt update
-sudo apt install ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
-                 libswscale-dev libswresample-dev pkg-config \
+sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+                 pkg-config libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+                 libavfilter-dev libswscale-dev libswresample-dev ffmpeg libclang-dev \
                  libv4l-dev v4l2loopback-dkms
 ```
+
+Two of these are easy to miss and fail late in the build:
+- **`libclang-dev`** — the FFmpeg bindings are generated at build time; without it the
+  `ffmpeg-sys-next` build script panics with "unable to find libclang"
+- **`librsvg2-dev`** — required by linuxdeploy's GTK plugin; without it `npm run tauri:build`
+  produces the `.deb` and `.rpm` and *then* fails with `failed to run linuxdeploy` while
+  bundling the AppImage
+
+Note that AppImage bundling also downloads `linuxdeploy` on first use, so the first build
+needs network access.
 
 #### 4. Environment Variables
 Create a `.env` file in the project root:

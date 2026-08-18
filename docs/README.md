@@ -40,8 +40,17 @@ CamLooper is a Tauri-based desktop application that transforms any video recordi
 - **[Architecture](ARCHITECTURE.md)** - Technical architecture and system design
 - **[API Documentation](API.md)** - Complete API reference for developers
 - **[Development Guide](DEVELOPMENT.md)** - Setup and development workflow
+- **[Cross-Compilation Guide](CROSS_COMPILATION_GUIDE.md)** - Building for other platforms
 - **[Troubleshooting](TROUBLESHOOTING.md)** - Common issues and solutions
-- **[Contributing](CONTRIBUTING.md)** - How to contribute to the project
+- **[Contributing](CONTRIBUTING.md)** - How to contribute, including the license terms and sign-off
+
+### Project policies
+
+- **[LICENSE](../LICENSE)** - PolyForm Noncommercial 1.0.0 (source-available, not open source)
+- **[THIRD-PARTY.md](../THIRD-PARTY.md)** - Bundled components and their licenses
+- **[TRADEMARK.md](../TRADEMARK.md)** - Use of the CamLooper name and logo
+- **[SECURITY.md](../SECURITY.md)** - Reporting vulnerabilities
+- **[CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)** - Community expectations
 
 ## Features
 
@@ -151,10 +160,11 @@ Supported formats: MP4, AVI, MOV, MKV, WMV, FLV
 - Monitor performance metrics in the app for optimization
 
 ### Security & Privacy
-- CamLooper processes all videos locally on your device
-- No data is transmitted to external servers
+- CamLooper processes all videos locally on your device — no video or frame data is ever uploaded
 - Virtual camera streams only within your local system
 - Temporary files are automatically cleaned up
+- The only outbound request is the ad banner iframe loaded from `camlooper.com/ads/banner`
+- Report vulnerabilities privately — see [SECURITY.md](../SECURITY.md)
 
 ---
 

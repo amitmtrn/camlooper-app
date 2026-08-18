@@ -1,5 +1,13 @@
 # Windows Limitations and Solutions
 
+> **Historical document.** This describes the pre-0.2.0 state, when Windows builds were
+> cross-compiled from Linux and FFmpeg could not be linked. Windows now builds natively in
+> CI and ships the [softcam](https://github.com/tshino/softcam) DirectShow filter with a
+> bundled FFmpeg. For the current design see
+> [WINDOWS_VIRTUAL_CAMERA_IMPLEMENTATION.md](WINDOWS_VIRTUAL_CAMERA_IMPLEMENTATION.md); for
+> current problems see [WINDOWS_TROUBLESHOOTING.md](WINDOWS_TROUBLESHOOTING.md). Kept for
+> context on why the Windows code path is structured the way it is.
+
 ## Current Windows Upload Issue
 
 The Windows build of CamLooper has limitations due to cross-compilation issues with FFmpeg. This document explains the current state and provides solutions.

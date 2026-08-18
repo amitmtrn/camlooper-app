@@ -3,6 +3,7 @@
 Thank you for your interest in contributing to CamLooper! This document provides guidelines and information for contributors.
 
 ## Table of Contents
+- [License and sign-off](#license-and-sign-off)
 - [Code of Conduct](#code-of-conduct)
 - [Getting Started](#getting-started)
 - [Development Setup](#development-setup)
@@ -14,24 +15,32 @@ Thank you for your interest in contributing to CamLooper! This document provides
 - [Feature Requests](#feature-requests)
 - [Community](#community)
 
+## License and sign-off
+
+CamLooper is **source-available, not open source**: it is licensed under
+[PolyForm Noncommercial 1.0.0](../LICENSE), which permits any noncommercial use — study,
+personal projects, research, teaching — but not commercial use. Please read it before
+investing time in a contribution, since it may not suit your or your employer's policies.
+
+By submitting a pull request you certify that you wrote the patch or otherwise have the
+right to submit it under this license, per the
+[Developer Certificate of Origin](https://developercertificate.org/). Certify it by
+signing off each commit:
+
+```bash
+git commit -s -m "fix(video): correct frame timing"
+```
+
+which appends `Signed-off-by: Your Name <your@email>` to the message. You keep the copyright
+in your contribution; the sign-off gives the maintainer the right to distribute it under this
+project's license and to offer it under commercial licenses alongside the rest of the code.
+Do not submit code you copied from a project with an incompatible license — in particular,
+**GPL-licensed code cannot be accepted**.
+
 ## Code of Conduct
 
-### Our Pledge
-We pledge to make participation in CamLooper a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, gender identity, level of experience, nationality, personal appearance, race, religion, or sexual identity and orientation.
-
-### Expected Behavior
-- Use welcoming and inclusive language
-- Be respectful of differing viewpoints and experiences
-- Gracefully accept constructive criticism
-- Focus on what is best for the community
-- Show empathy towards other community members
-
-### Unacceptable Behavior
-- The use of sexualized language or imagery
-- Trolling, insulting/derogatory comments, and personal or political attacks
-- Public or private harassment
-- Publishing others' private information without explicit permission
-- Other conduct which could reasonably be considered inappropriate
+This project follows the [Contributor Covenant](../CODE_OF_CONDUCT.md). Report unacceptable
+behavior to amit7000@gmail.com.
 
 ## Getting Started
 
@@ -54,34 +63,25 @@ Looking for a first contribution? Look for issues labeled:
 
 ### Prerequisites
 Before contributing, ensure you have:
-- **Node.js** 18+ with npm
-- **Rust** 1.70+ with Cargo
+- **Node.js** 20+ with npm
+- **Rust** stable with Cargo
 - **Git** for version control
-- **FFmpeg** development libraries
+- **FFmpeg 8** development libraries (see [DEVELOPMENT.md](DEVELOPMENT.md) — the version matters)
 
 ### Setup Instructions
 1. **Fork the repository** on GitHub
 2. **Clone your fork**:
    ```bash
-   git clone https://github.com/your-username/camlooper.git
-   cd camlooper
+   git clone https://github.com/YOUR-USERNAME/camlooper-app.git
+   cd camlooper-app
    ```
 
-3. **Install dependencies**:
+3. **Install dependencies** (platform packages first — see [DEVELOPMENT.md](DEVELOPMENT.md)):
    ```bash
-   npm install
+   npm ci
    ```
 
-4. **Set up development environment**:
-   ```bash
-   # Copy environment template
-   cp .env.example .env
-   
-   # Install platform-specific dependencies
-   # See DEVELOPMENT.md for detailed instructions
-   ```
-
-5. **Verify setup**:
+4. **Verify setup**:
    ```bash
    npm run tauri:dev
    ```
@@ -104,12 +104,13 @@ git checkout -b bugfix/issue-description
 - Ensure your changes work across platforms
 
 ### 3. Commit Changes
-Use conventional commit messages:
+Use conventional commit messages, and sign off (`-s`, see
+[License and sign-off](#license-and-sign-off)):
 ```bash
 # Format: type(scope): description
-git commit -m "feat(video): add H.265 codec support"
-git commit -m "fix(upload): resolve memory leak in large files"
-git commit -m "docs(api): update virtual camera documentation"
+git commit -s -m "feat(video): add H.265 codec support"
+git commit -s -m "fix(upload): resolve memory leak in large files"
+git commit -s -m "docs(api): update virtual camera documentation"
 ```
 
 #### Commit Types
@@ -122,17 +123,15 @@ git commit -m "docs(api): update virtual camera documentation"
 - `chore`: Maintenance tasks
 
 ### 4. Test Your Changes
+CI runs exactly these three commands on every PR, so run them before pushing:
 ```bash
-# Run all tests
-npm run test
-cargo test
-
-# Run linting
+npm run typecheck
 npm run lint
-cargo clippy
-
-# Test on multiple platforms if possible
+npm run build
 ```
+Then verify the behaviour by hand with `npm run tauri:dev` — there is no automated test
+suite yet, so a PR description should say what you tested and on which OS. Rust changes
+should also pass `cargo clippy` and `cargo test` from `src-tauri/`.
 
 ### 5. Push and Create PR
 ```bash
@@ -295,6 +294,11 @@ fn process_frame(frame_data: &[u8], quality: u8) -> Result<VideoFrame> {
 
 ## Testing Guidelines
 
+> **Note:** the project has no test harness wired up yet — there is no `npm run test`
+> script and no testing-library/jest dependency. The examples below are the conventions to
+> follow *if* you add tests (setting up the harness is itself a welcome contribution).
+> Until then, changes are verified manually plus `typecheck` / `lint` / `build`.
+
 ### Frontend Testing
 ```typescript
 // Component tests
@@ -364,7 +368,6 @@ mod tests {
 ```
 
 ### Test Coverage
-- Aim for >80% test coverage on new code
 - Test both success and error cases
 - Include integration tests for critical paths
 - Test platform-specific functionality
