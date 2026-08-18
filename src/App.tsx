@@ -41,7 +41,6 @@ import { useTranslation, Trans } from "react-i18next";
 import { AdBanner } from "./components/AdBanner";
 import { Stepper } from "./components/flow/Stepper";
 import { SUPPORTED_LANGUAGES } from "./i18n";
-import { useAdPopup } from "./hooks/use-ad-popup";
 import { cn } from "@/lib/utils";
 
 const queryClient = new QueryClient();
@@ -136,7 +135,6 @@ class SimpleFrameHolder {
 }
 
 function CamLooper() {
-  useAdPopup();
   const { t, i18n } = useTranslation();
 
   // Keep the document title in sync with the active language.
