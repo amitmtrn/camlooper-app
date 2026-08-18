@@ -1,5 +1,9 @@
 # Windows Virtual Camera Setup Guide
 
+> **Manual fallback only.** CamLooper bundles softcam and registers it for you, so none of
+> this is needed for a normal install. Follow it only if the virtual camera fails to appear
+> and [WINDOWS_TROUBLESHOOTING.md](WINDOWS_TROUBLESHOOTING.md) did not resolve it.
+
 ## 🚀 Quick Start (5 minutes)
 
 ### Step 1: Download Softcam

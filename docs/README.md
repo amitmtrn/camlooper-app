@@ -41,6 +41,7 @@ CamLooper is a Tauri-based desktop application that transforms any video recordi
 - **[API Documentation](API.md)** - Complete API reference for developers
 - **[Development Guide](DEVELOPMENT.md)** - Setup and development workflow
 - **[Cross-Compilation Guide](CROSS_COMPILATION_GUIDE.md)** - Building for other platforms
+- **[Windows Virtual Camera](WINDOWS_VIRTUAL_CAMERA_IMPLEMENTATION.md)** - How the DirectShow filter works, plus [manual setup fallback](WINDOWS_VIRTUAL_CAMERA_SETUP.md)
 - **[Troubleshooting](TROUBLESHOOTING.md)** - Common issues and solutions
 - **[Contributing](CONTRIBUTING.md)** - How to contribute, including the license terms and sign-off
 
