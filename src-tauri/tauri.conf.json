@@ -48,10 +48,25 @@
         "template": null
       },
       "nsis": {
-        "displayLanguageSelector": false,
+        "displayLanguageSelector": true,
         "installerIcon": "icons/icon.ico",
         "installMode": "perMachine",
-        "languages": ["English"]
+        "languages": [
+          "English",
+          "Arabic",
+          "French",
+          "German",
+          "Hebrew",
+          "Italian",
+          "Japanese",
+          "Korean",
+          "Portuguese",
+          "PortugueseBR",
+          "Russian",
+          "SimpChinese",
+          "Spanish",
+          "Turkish"
+        ]
       }
     },
     "macOS": {

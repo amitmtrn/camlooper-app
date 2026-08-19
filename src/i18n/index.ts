@@ -1,6 +1,7 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
+import { invoke } from "@tauri-apps/api/core";
 
 import en from "./locales/en.json";
 import es from "./locales/es.json";
@@ -44,6 +45,12 @@ export const SUPPORTED_LANGUAGES = [
 
 export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]["code"];
 
+const LANGUAGE_STORAGE_KEY = "camlooper-lang";
+
+// Must be read before init: the detector caches whatever it detects under this key, after
+// which an auto-detected default is indistinguishable from a language the user chose.
+const hadStoredLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) !== null;
+
 i18n
   .use(LanguageDetector)
   .use(initReactI18next)
@@ -75,7 +82,7 @@ i18n
     nonExplicitSupportedLngs: true,
     detection: {
       order: ["localStorage", "navigator"],
-      lookupLocalStorage: "camlooper-lang",
+      lookupLocalStorage: LANGUAGE_STORAGE_KEY,
       caches: ["localStorage"],
     },
     interpolation: { escapeValue: false }, // React already escapes
@@ -88,5 +95,30 @@ const applyDir = (lng: string) => {
 };
 applyDir(i18n.resolvedLanguage || i18n.language || "en");
 i18n.on("languageChanged", applyDir);
+
+// Locales the Windows installer can be shown in — the subset of SUPPORTED_LANGUAGES that
+// Tauri ships NSIS translations for (see bundle.windows.nsis.languages in tauri.conf.json).
+const INSTALLER_LANGUAGES: ReadonlySet<string> = new Set([
+  "en", "ar", "fr", "de", "he", "it", "ja", "ko", "pt", "ru", "zh", "es", "tr",
+]);
+
+// The Windows installer asks which language to install in and records the choice, so on
+// first launch prefer it over the locale detected above — the two differ whenever someone
+// installs in a language other than the one their OS is set to. Anything chosen later in
+// the app is cached under LANGUAGE_STORAGE_KEY and takes precedence from then on.
+if (!hadStoredLanguage) {
+  invoke<string | null>("installer_language")
+    .then((lng) => {
+      if (!lng || lng === i18n.resolvedLanguage) return;
+      // Someone whose language the installer can't display installs in English, which
+      // must not override the OS locale — the app itself is still translated for them.
+      const detected = i18n.resolvedLanguage;
+      if (lng === "en" && detected && !INSTALLER_LANGUAGES.has(detected)) return;
+      void i18n.changeLanguage(lng);
+    })
+    .catch(() => {
+      // Non-Windows, or no recorded choice: the detected locale already applies.
+    });
+}
 
 export default i18n;

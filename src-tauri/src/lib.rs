@@ -3,6 +3,7 @@ pub mod virtual_camera;
 mod video_processor;
 mod video_upload;
 mod camera_capture;
+mod installer_language;
 #[cfg(target_os = "windows")]
 mod softcam_register;
 #[cfg(target_os = "windows")]
@@ -317,6 +318,7 @@ pub fn run() {
                     camera_capture::stop_camera_recording,
                     camera_capture::get_camera_preview_frame,
                     camera_capture::get_recorded_video_base64,
+                    installer_language::installer_language,
                 ]
             }
             #[cfg(not(target_os = "windows"))]
@@ -361,6 +363,7 @@ pub fn run() {
                     camera_capture::stop_camera_recording,
                     camera_capture::get_camera_preview_frame,
                     camera_capture::get_recorded_video_base64,
+                    installer_language::installer_language,
                 ]
             }
         })
