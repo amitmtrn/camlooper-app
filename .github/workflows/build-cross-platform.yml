@@ -45,27 +45,19 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # On PRs only the Linux leg runs; Windows/macOS are reserved for tags and manual
+      # dispatch so a drive-by PR doesn't burn ~2h of runner time. This has to pick the
+      # whole list per event rather than use `exclude`, because GitHub applies `include`
+      # *after* `exclude` — so `exclude` cannot remove an include-only entry.
+      #
+      # macos-13 (Intel) is intentionally absent; those runners queue indefinitely. To
+      # restore Intel-Mac coverage, add:
+      #   {"platform":"macos-13","target":"x86_64-apple-darwin","name":"macos-x64"}
       matrix:
-        include:
-          - platform: 'windows-latest'
-            target: 'x86_64-pc-windows-msvc'
-            name: 'windows-x64'
-          - platform: 'macos-14'
-            target: 'aarch64-apple-darwin'
-            name: 'macos-arm64'
-          # macos-13 (Intel) disabled for now — those runners queue indefinitely.
-          # Re-add for Intel-Mac coverage:
-          # - platform: 'macos-13'
-          #   target: 'x86_64-apple-darwin'
-          #   name: 'macos-x64'
-          - platform: 'ubuntu-22.04'
-            target: 'x86_64-unknown-linux-gnu'
-            name: 'linux-x64'
-        # On PRs only the Linux leg runs; Windows/macOS are reserved for tags and
-        # manual dispatch so a drive-by PR doesn't burn ~2h of runner time.
-        exclude:
-          - platform: ${{ github.event_name == 'pull_request' && 'windows-latest' || '' }}
-          - platform: ${{ github.event_name == 'pull_request' && 'macos-14' || '' }}
+        include: >-
+          ${{ github.event_name == 'pull_request'
+          && fromJSON('[{"platform":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","name":"linux-x64"}]')
+          || fromJSON('[{"platform":"windows-latest","target":"x86_64-pc-windows-msvc","name":"windows-x64"},{"platform":"macos-14","target":"aarch64-apple-darwin","name":"macos-arm64"},{"platform":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","name":"linux-x64"}]') }}
     runs-on: ${{ matrix.platform }}
 
     steps:

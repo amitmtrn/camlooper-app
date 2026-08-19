@@ -1,6 +1,6 @@
 [package]
 name = "camlooper"
-version = "0.2.1"
+version = "0.2.2"
 description = "Turn any video into a virtual camera for Zoom, Teams, Meet, OBS and Discord"
 authors = ["Amit <amit7000@gmail.com>"]
 edition = "2021"

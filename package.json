@@ -1,7 +1,7 @@
 {
   "name": "camlooper",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Turn any video into a virtual camera for Zoom, Teams, Meet, OBS and Discord",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://camlooper.com",
