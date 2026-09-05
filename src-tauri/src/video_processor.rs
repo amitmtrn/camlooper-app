@@ -52,7 +52,45 @@ pub struct StreamStatus {
     pub target_fps: f64,
     pub frames_dropped: u32,
     pub average_processing_time: f64,
+    /// Natural motion decodes the clip into memory before it can start. True for that gap.
+    pub is_preparing: bool,
+    /// The clip outran the natural-motion window, so the walk only covers its start.
+    pub walk_truncated: bool,
+    /// Seconds of footage the walk is actually covering. 0 when not in natural motion.
+    pub walk_seconds: f64,
 }
+
+/// Playback options pushed from the UI. A named struct rather than a tuple because the
+/// fields are unrelated booleans and counts that are easy to transpose at a call site.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LoopSettings {
+    /// Number of passes to play; `0` means forever.
+    pub loop_count: u32,
+    /// Read by the frontend only -- auto-play is implemented in React, not here.
+    pub auto_start: bool,
+    /// Walk the frame index at random instead of playing a straight loop.
+    pub natural_motion: bool,
+}
+
+impl Default for LoopSettings {
+    fn default() -> Self {
+        Self { loop_count: 10, auto_start: true, natural_motion: true }
+    }
+}
+
+/// Seconds of video buffered for natural motion -- enough for the loop clips this app is
+/// built around, and bounded so a long file cannot exhaust memory.
+const WALK_WINDOW_SECS: f64 = 60.0;
+
+/// Hard ceiling on the buffer, whichever limit is reached first.
+///
+/// The frame cap alone does not bound memory, because JPEG size depends on content: at
+/// 640 wide and `-q:v 5`, a clean synthetic clip measures ~11 KB a frame while heavy sensor
+/// noise measures ~91 KB, so the same 1800-frame window swings between roughly 19 MB and
+/// 160 MB. Typical camera footage lands near 30 KB (~50 MB for the window), so this only
+/// bites on unusually noisy clips -- which are exactly the ones that would otherwise put
+/// a low-spec machine under memory pressure.
+const MAX_WALK_BYTES: usize = 96 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
@@ -72,8 +110,20 @@ pub struct VideoProcessor {
     stream_status: Arc<RwLock<StreamStatus>>,
     app_handle: Option<AppHandle>,
     is_streaming: Arc<AtomicBool>,
-    loop_settings: Arc<RwLock<(u32, bool)>>,
+    loop_settings: Arc<RwLock<LoopSettings>>,
     performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+    /// Frames decoded for natural motion, kept between streams so pause/resume on the same
+    /// clip doesn't pay the decode wait again. Cleared when a different video is loaded.
+    walk_cache: Arc<RwLock<Option<WalkBuffer>>>,
+}
+
+/// A clip decoded to JPEG frames, ready for random access.
+struct WalkBuffer {
+    source: PathBuf,
+    /// Shared so resuming a cached clip hands out a handle rather than copying ~70 MB.
+    frames: Arc<Vec<Vec<u8>>>,
+    /// The source ran past `WALK_WINDOW_SECS`, so `frames` holds only its opening window.
+    truncated: bool,
 }
 
 impl VideoProcessor {
@@ -97,10 +147,13 @@ impl VideoProcessor {
                 target_fps: 30.0,
                 frames_dropped: 0,
                 average_processing_time: 0.0,
+                is_preparing: false,
+                walk_truncated: false,
+                walk_seconds: 0.0,
             })),
             app_handle: None,
             is_streaming: Arc::new(AtomicBool::new(false)),
-            loop_settings: Arc::new(RwLock::new((10, true))),
+            loop_settings: Arc::new(RwLock::new(LoopSettings::default())),
             performance_metrics: Arc::new(RwLock::new(PerformanceMetrics {
                 frames_processed: 0,
                 frames_dropped: 0,
@@ -110,6 +163,7 @@ impl VideoProcessor {
                 buffer_size: 0,
                 memory_usage: 0,
             })),
+            walk_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -118,6 +172,10 @@ impl VideoProcessor {
     }
 
     pub async fn load_video(&mut self, file_path: PathBuf) -> Result<VideoInfo> {
+        // A recording can be written back to a path we've already buffered, so drop the
+        // cache on load rather than trusting the path alone to spot new content.
+        *self.walk_cache.write().await = None;
+
         #[cfg(not(windows))]
         {
             // FFmpeg implementation for all platforms except Windows
@@ -248,6 +306,8 @@ impl VideoProcessor {
     }
 
     pub async fn load_video_with_original_name(&mut self, file_path: PathBuf, original_filename: &str) -> Result<VideoInfo> {
+        *self.walk_cache.write().await = None;
+
         #[cfg(not(windows))]
         {
             // FFmpeg implementation for all platforms except Windows
@@ -377,6 +437,8 @@ impl VideoProcessor {
             status.current_loop = 0;
             status.buffer_health = 0.0;
             status.actual_fps = 0.0;
+            status.walk_truncated = false;
+            status.walk_seconds = 0.0;
         }
 
         {
@@ -384,6 +446,7 @@ impl VideoProcessor {
             let stream_status = self.stream_status.clone();
             let loop_settings = self.loop_settings.clone();
             let performance_metrics = self.performance_metrics.clone();
+            let walk_cache = self.walk_cache.clone();
 
             let fps = self.video_info.as_ref().map(|info| info.fps).unwrap_or(30.0);
             let width = self.video_info.as_ref().map(|info| info.width).unwrap_or(1920);
@@ -395,18 +458,42 @@ impl VideoProcessor {
             }
 
             tokio::task::spawn(async move {
-                if let Err(e) = Self::process_video_frames(
-                    ffmpeg_path,
-                    video_path,
-                    is_streaming,
-                    stream_status,
-                    loop_settings,
-                    performance_metrics,
-                    fps,
-                    width,
-                    height,
-                ).await {
+                let settings = *loop_settings.read().await;
+
+                let result = if settings.natural_motion {
+                    Self::walk_video_frames(
+                        ffmpeg_path,
+                        video_path,
+                        is_streaming,
+                        stream_status.clone(),
+                        walk_cache,
+                        performance_metrics,
+                        settings,
+                        fps,
+                        width,
+                        height,
+                    ).await
+                } else {
+                    Self::process_video_frames(
+                        ffmpeg_path,
+                        video_path,
+                        is_streaming,
+                        stream_status.clone(),
+                        performance_metrics,
+                        settings,
+                        fps,
+                        width,
+                        height,
+                    ).await
+                };
+
+                if let Err(e) = result {
                     eprintln!("Video streaming error: {}", e);
+                    // Clear the preparing flag on the way out, or the UI sits on
+                    // "Preparing…" forever after a failed decode.
+                    let mut status = stream_status.write().await;
+                    status.is_preparing = false;
+                    status.is_playing = false;
                 }
             });
         }
@@ -443,18 +530,16 @@ impl VideoProcessor {
         self.stream_status.read().await.clone()
     }
 
-    pub async fn set_loop_settings(&self, loop_count: u32, auto_start: bool) -> Result<()> {
-        let mut settings = self.loop_settings.write().await;
-        *settings = (loop_count, auto_start);
-        
-        let mut status = self.stream_status.write().await;
-        status.loop_count = loop_count;
-        
-        Ok(())
-    }
+    pub async fn set_loop_settings(&self, settings: LoopSettings) -> Result<()> {
+        {
+            let mut current = self.loop_settings.write().await;
+            *current = settings;
+        }
 
-    pub fn get_video_info(&self) -> Option<VideoInfo> {
-        self.video_info.clone()
+        let mut status = self.stream_status.write().await;
+        status.loop_count = settings.loop_count;
+
+        Ok(())
     }
 
     pub async fn get_performance_metrics(&self) -> PerformanceMetrics {
@@ -466,8 +551,8 @@ impl VideoProcessor {
         video_path: PathBuf,
         is_streaming: Arc<AtomicBool>,
         stream_status: Arc<RwLock<StreamStatus>>,
-        loop_settings: Arc<RwLock<(u32, bool)>>,
         performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+        settings: LoopSettings,
         target_fps: f64,
         target_width: u32,
         target_height: u32,
@@ -475,10 +560,10 @@ impl VideoProcessor {
         use std::time::{Duration, Instant};
         use std::process::Stdio;
         use tokio::io::AsyncReadExt;
-        
+
         let mut current_loop = 0u32;
-        let (max_loops, _auto_start) = *loop_settings.read().await;
-        
+        let max_loops = settings.loop_count;
+
         loop {
             if !is_streaming.load(Ordering::Relaxed) {
                 break;
@@ -489,11 +574,15 @@ impl VideoProcessor {
                 break;
             }
             
+            // Render at the resolution the virtual camera will emit, so nothing has to be
+            // rescaled downstream. -2 keeps the height even, which yuv420p requires.
+            let (out_width, _out_height) = crate::virtual_camera::output_resolution();
+
             // Process video file using external FFmpeg process
             let args = vec![
                 "-re".to_string(), // Read at native frame rate
                 "-i".to_string(), video_path.to_string_lossy().to_string(),
-                "-vf".to_string(), "scale=640:-1".to_string(), // Scale to 640px wide to match camera and reduce IPC overhead
+                "-vf".to_string(), format!("scale={}:-2", out_width),
                 "-c:v".to_string(), "mjpeg".to_string(),
                 "-q:v".to_string(), "5".to_string(),
                 "-f".to_string(), "image2pipe".to_string(),
@@ -567,14 +656,25 @@ impl VideoProcessor {
                                         total_frames: frame_batch.len(),
                                     };
                                     
-                                    loop {
+                                    // Drop the oldest queued batch rather than blocking
+                                    // when the preview isn't keeping up.
+                                    //
+                                    // This loop used to sleep until the webview drained
+                                    // the queue, which stalled the read of ffmpeg's
+                                    // stdout — and that read also feeds the virtual
+                                    // camera above. So a slow or backgrounded webview
+                                    // throttled the camera itself. WebView2 clamps timers
+                                    // for backgrounded windows, which is exactly what
+                                    // happens when the user switches to Zoom, so the
+                                    // preview stalled precisely when the camera mattered
+                                    // most. The preview may skip frames; the camera
+                                    // must not.
+                                    {
                                         let mut q = FRAME_QUEUE.lock().await;
-                                        if q.len() < 30 {
-                                            q.push_back(batch);
-                                            break;
+                                        while q.len() >= 30 {
+                                            q.pop_front();
                                         }
-                                        drop(q);
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                                        q.push_back(batch);
                                     }
                                     sequence_id += 1;
                                     frame_batch.clear();
@@ -664,68 +764,306 @@ impl VideoProcessor {
         Ok(())
     }
     
+    /// Decode a clip to JPEG frames at the streaming size, capped to the natural-motion
+    /// window. Same ffmpeg invocation the straight-loop path uses, minus `-re`: there's no
+    /// reason to decode at playback speed when the frames are going straight into a buffer.
+    async fn decode_walk_frames(
+        ffmpeg_path: &PathBuf,
+        video_path: &PathBuf,
+        max_frames: usize,
+        is_streaming: &Arc<AtomicBool>,
+    ) -> Result<(Vec<Vec<u8>>, bool)> {
+        use std::process::Stdio;
+        use tokio::io::AsyncReadExt;
+
+        // Same resolution as the streaming path, for the same reason.
+        let (out_width, _out_height) = crate::virtual_camera::output_resolution();
+
+        let args = vec![
+            "-i".to_string(), video_path.to_string_lossy().to_string(),
+            "-vf".to_string(), format!("scale={}:-2", out_width),
+            // Enforce the window at the source rather than decoding a long file in full and
+            // throwing most of it away. One frame beyond the cap, so that "we hit the cap"
+            // and "the clip is exactly the window long" stay distinguishable.
+            "-frames:v".to_string(), max_frames.saturating_add(1).to_string(),
+            "-c:v".to_string(), "mjpeg".to_string(),
+            "-q:v".to_string(), "5".to_string(),
+            "-f".to_string(), "image2pipe".to_string(),
+            "-".to_string(),
+        ];
+
+        let mut cmd = tokio::process::Command::new(ffmpeg_path);
+        cmd.args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
+        let mut child = cmd.spawn()
+            .map_err(|e| anyhow!("Failed to start ffmpeg ({}): {}", ffmpeg_path.display(), e))?;
+        let mut stdout = child.stdout.take().unwrap();
+
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 65536];
+        let mut frame_bytes = 0usize;
+        let mut hit_byte_cap = false;
+
+        loop {
+            // Stop pressed mid-decode: bail out instead of making the user wait for a clip
+            // they've already cancelled.
+            if !is_streaming.load(Ordering::Relaxed) {
+                break;
+            }
+
+            match stdout.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    buffer.extend_from_slice(&chunk[..n]);
+
+                    while let Some(start) = Self::find_subsequence(&buffer, &[0xFF, 0xD8]) {
+                        if let Some(end) = Self::find_subsequence(&buffer[start..], &[0xFF, 0xD9]) {
+                            let end_idx = start + end + 2;
+                            frame_bytes += end_idx - start;
+                            frames.push(buffer[start..end_idx].to_vec());
+                            buffer.drain(0..end_idx);
+
+                            if frame_bytes >= MAX_WALK_BYTES {
+                                hit_byte_cap = true;
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if hit_byte_cap {
+                        break;
+                    }
+                }
+                Err(e) => return Err(anyhow!("Failed to read from ffmpeg stdout: {}", e)),
+            }
+        }
+
+        // Dropping the handle kills ffmpeg (kill_on_drop) when we stopped early; without
+        // closing stdout first it would otherwise block writing into a full pipe.
+        drop(stdout);
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+
+        if frames.is_empty() {
+            return Err(anyhow!("ffmpeg decoded no frames from {}", video_path.display()));
+        }
+
+        // Getting past the cap means there was more clip than the window holds. A file
+        // exactly the window long lands on the cap and is not truncated.
+        let mut truncated = frames.len() > max_frames;
+        if truncated {
+            frames.truncate(max_frames);
+        }
+        // Heavy footage can exhaust the byte budget before the frame budget.
+        if hit_byte_cap {
+            truncated = true;
+        }
+        Ok((frames, truncated))
+    }
+
+    /// Natural motion: buffer the clip, then walk its frame index at random instead of
+    /// replaying it front to back. See [`crate::frame_walk`] for why the walk looks live.
+    #[allow(clippy::too_many_arguments)]
+    async fn walk_video_frames(
+        ffmpeg_path: PathBuf,
+        video_path: PathBuf,
+        is_streaming: Arc<AtomicBool>,
+        stream_status: Arc<RwLock<StreamStatus>>,
+        walk_cache: Arc<RwLock<Option<WalkBuffer>>>,
+        performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+        settings: LoopSettings,
+        target_fps: f64,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<()> {
+        use std::time::{Duration, Instant};
+
+        // Probed fps can be zero or NaN on a malformed file, and it divides the tick period.
+        let fps = if target_fps.is_finite() && target_fps > 0.0 { target_fps } else { 30.0 };
+        let max_frames = ((WALK_WINDOW_SECS * fps).ceil() as usize).max(1);
+
+        // Reuse the buffer when the same clip is already decoded, so pause/resume doesn't
+        // pay the decode wait again.
+        let cached = {
+            let cache = walk_cache.read().await;
+            match cache.as_ref() {
+                Some(buf) if buf.source == video_path => Some((Arc::clone(&buf.frames), buf.truncated)),
+                _ => None,
+            }
+        };
+
+        let (frames, truncated) = match cached {
+            Some(hit) => hit,
+            None => {
+                {
+                    let mut status = stream_status.write().await;
+                    status.is_preparing = true;
+                }
+                let decoded = Self::decode_walk_frames(
+                    &ffmpeg_path,
+                    &video_path,
+                    max_frames,
+                    &is_streaming,
+                ).await;
+                {
+                    let mut status = stream_status.write().await;
+                    status.is_preparing = false;
+                }
+
+                let (decoded_frames, truncated) = decoded?;
+
+                // Cancelled part-way through: the buffer holds only the opening of the clip,
+                // so drop it rather than caching a partial decode for the next play.
+                if !is_streaming.load(Ordering::Relaxed) {
+                    let mut status = stream_status.write().await;
+                    status.is_playing = false;
+                    return Ok(());
+                }
+
+                let decoded_frames = Arc::new(decoded_frames);
+                *walk_cache.write().await = Some(WalkBuffer {
+                    source: video_path.clone(),
+                    frames: Arc::clone(&decoded_frames),
+                    truncated,
+                });
+                (decoded_frames, truncated)
+            }
+        };
+
+        let frame_len = frames.len();
+        let buffer_bytes: u64 = frames.iter().map(|f| f.len() as u64).sum();
+        println!(
+            "Natural motion: {} frames buffered ({:.1} MB, {:.1}s){}",
+            frame_len,
+            buffer_bytes as f64 / (1024.0 * 1024.0),
+            frame_len as f64 / fps,
+            // Either cap can bite, so report what was kept rather than naming a limit.
+            if truncated { " -- clip truncated to fit the buffer" } else { "" }
+        );
+
+        {
+            let mut status = stream_status.write().await;
+            status.walk_truncated = truncated;
+            status.walk_seconds = frame_len as f64 / fps;
+        }
+
+        // Vary the walk per run so restarting a clip doesn't replay the same wander.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x5DEE_CE66_D000_0001);
+        let mut walk = crate::frame_walk::FrameWalk::new(frame_len, seed);
+
+        // Nothing upstream paces us now that `-re` is gone, so this tick is the clock the
+        // virtual camera runs on. `from_secs_f64` rather than integer millisecond division,
+        // which would quantise 30 fps to 30.30.
+        let mut ticker = tokio::time::interval(Duration::from_secs_f64(1.0 / fps));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let max_loops = settings.loop_count;
+        let mut frames_emitted = 0u64;
+        let mut frames_processed = 0u64;
+        let mut last_fps_update = Instant::now();
+        let mut sequence_id = 0u64;
+
+        loop {
+            if !is_streaming.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // The walk has no seam, so there is no pass to count. Measure elapsed playback in
+            // clip-lengths instead: N loops means N clip durations, which keeps the existing
+            // loop slider (and `0 == forever`) meaningful.
+            let current_loop = (frames_emitted / frame_len as u64) as u32;
+            if max_loops > 0 && current_loop >= max_loops {
+                let mut status = stream_status.write().await;
+                status.current_loop = current_loop;
+                status.is_playing = false;
+                break;
+            }
+
+            ticker.tick().await;
+
+            let process_start = Instant::now();
+            let idx = walk.next_index();
+            let jpeg = frames[idx].clone();
+
+            crate::virtual_camera::send_frame_to_virtual_camera(jpeg.clone()).await.ok();
+
+            // Preview only. Never block the camera clock waiting for the UI to drain this —
+            // drop the oldest frame instead, so a slow frontend costs preview smoothness
+            // rather than stalling the feed.
+            {
+                let mut q = FRAME_QUEUE.lock().await;
+                while q.len() >= 30 {
+                    q.pop_front();
+                }
+                q.push_back(FrameBatch {
+                    frames: vec![VideoFrame {
+                        data: jpeg,
+                        timestamp: idx as f64 / fps,
+                        width: target_width,
+                        height: target_height,
+                    }],
+                    sequence_id,
+                    total_frames: 1,
+                });
+            }
+            sequence_id += 1;
+
+            frames_emitted += 1;
+            frames_processed += 1;
+
+            {
+                let mut metrics = performance_metrics.write().await;
+                metrics.frames_processed = frames_emitted;
+                metrics.average_encode_time = process_start.elapsed().as_secs_f64() * 1000.0;
+                metrics.buffer_size = frame_len;
+                metrics.memory_usage = buffer_bytes;
+            }
+
+            {
+                let mut status = stream_status.write().await;
+                // Reports where in the clip the walk currently is, so the readout wanders
+                // back and forth exactly as the footage does.
+                status.current_time = idx as f64 / fps;
+                status.current_loop = current_loop;
+                status.buffer_health = 1.0;
+
+                let now = Instant::now();
+                if now.duration_since(last_fps_update) >= Duration::from_secs(1) {
+                    status.actual_fps = frames_processed as f64
+                        / now.duration_since(last_fps_update).as_secs_f64();
+                    last_fps_update = now;
+                    frames_processed = 0;
+                }
+            }
+        }
+
+        {
+            let mut status = stream_status.write().await;
+            status.is_playing = false;
+            status.current_time = 0.0;
+            status.buffer_health = 0.0;
+            status.actual_fps = 0.0;
+        }
+
+        println!("Natural motion streaming stopped after {frames_emitted} frames");
+        Ok(())
+    }
+
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|window| window == needle)
     }
 
-    #[cfg(windows)]
-    fn create_enhanced_frame(width: u32, height: u32, frame_count: u64, progress: f64, _filename: &str, _current_loop: u32) -> VideoFrame {
-        use image::{ImageBuffer, Rgb};
-        
-        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
-        
-        // Create a simple animated pattern for now
-        let time = frame_count as f64 * 0.1; // Slow animation speed
-        let wave_factor = (time * 2.0).sin() * 0.5 + 0.5;
-        
-        for y in 0..height {
-            for x in 0..width {
-                let nx = x as f64 / width as f64;
-                let ny = y as f64 / height as f64;
-                
-                // Create animated wave pattern
-                let pattern = ((nx * 10.0 + time).sin() * (ny * 10.0 + time).cos() * wave_factor + 1.0) * 0.5;
-                
-                // Color based on pattern and progress
-                let r = (pattern * 255.0 * progress + 50.0).min(255.0) as u8;
-                let g = ((1.0 - pattern) * 255.0 * progress + 50.0).min(255.0) as u8;
-                let b = (wave_factor * 255.0 + 50.0).min(255.0) as u8;
-                
-                rgb_data.push(r);
-                rgb_data.push(g);
-                rgb_data.push(b);
-            }
-        }
-        
-        // Create proper JPEG data using the image crate
-        let jpeg_data = match ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, rgb_data) {
-            Some(img) => {
-                // Encode to JPEG
-                let mut cursor = std::io::Cursor::new(Vec::new());
-                match image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 75).encode_image(&img) {
-                    Ok(_) => cursor.into_inner(),
-                    Err(e) => {
-                        eprintln!("Failed to encode JPEG: {}", e);
-                        // Fallback to a simple test pattern
-                        Self::create_fallback_jpeg(width, height)
-                    }
-                }
-            }
-            None => {
-                eprintln!("Failed to create image buffer");
-                // Fallback to a simple test pattern
-                Self::create_fallback_jpeg(width, height)
-            }
-        };
-        
-        VideoFrame {
-            data: jpeg_data,
-            timestamp: frame_count as f64 / 30.0, // Assume 30 FPS
-            width,
-            height,
-        }
-    }
-    
     #[cfg(windows)]
     fn parse_mp4_file(file_path: &std::path::PathBuf, original_filename: &str) -> Result<VideoInfo> {
         use std::fs::File;
@@ -802,230 +1140,6 @@ impl VideoProcessor {
             format: format!("Windows Compatible ({})", file_extension.to_uppercase()),
         }
     }
-
-    #[cfg(windows)]
-    async fn extract_video_samples(file_path: &std::path::PathBuf, max_samples: u64) -> Result<Vec<Vec<u8>>> {
-        use std::fs::File;
-        use std::io::BufReader;
-        
-        let file = File::open(file_path)?;
-        let file_size = file.metadata()?.len();
-        let reader = BufReader::new(file);
-        
-        let mut mp4_reader = mp4::Mp4Reader::read_header(reader, file_size)
-            .map_err(|e| anyhow!("Failed to read MP4 header for samples: {}", e))?;
-        
-        // Find the first video track and get its ID
-        let (track_id, sample_count) = {
-            let video_track = mp4_reader.tracks().values()
-                .find(|track| track.track_type().map_or(false, |t| t == mp4::TrackType::Video))
-                .ok_or_else(|| anyhow!("No video track found for sample extraction"))?;
-            
-            (video_track.track_id(), video_track.sample_count())
-        };
-        
-        let mut samples = Vec::new();
-        let step_size = if sample_count > max_samples as u32 { 
-            sample_count / max_samples as u32 
-        } else { 
-            1 
-        };
-        
-        println!("Extracting samples: total={}, step={}, target_max={}", sample_count, step_size, max_samples);
-        
-        // Extract sample data (we can't decode it without a decoder, but we can get raw data)
-        for sample_id in (1..=sample_count).step_by(step_size as usize) {
-            if samples.len() >= max_samples as usize {
-                break;
-            }
-            
-            match mp4_reader.read_sample(track_id, sample_id) {
-                Ok(Some(sample)) => {
-                    // Convert mp4::Bytes to Vec<u8>
-                    let sample_data = sample.bytes.to_vec();
-                    // Store raw sample data - this is encoded video data
-                    if sample_data.len() < 1024 * 1024 { // Skip very large samples (>1MB)
-                        samples.push(sample_data);
-                    }
-                }
-                Ok(None) => {
-                    println!("No sample data for sample {}", sample_id);
-                }
-                Err(e) => {
-                    println!("Failed to read sample {}: {}", sample_id, e);
-                }
-            }
-        }
-        
-        println!("Extracted {} video samples from MP4 file", samples.len());
-        Ok(samples)
-    }
-
-    #[cfg(windows)]
-    fn create_frame_from_sample(sample_data: &[u8], width: u32, height: u32, frame_count: u64, fps: f64, filename: &str) -> VideoFrame {
-        use image::{ImageBuffer, Rgb};
-        
-        // Since we can't decode the raw video data without a decoder,
-        // we'll create a frame that represents the video with some visual indicators
-        // and incorporate some characteristics from the sample data
-        
-        // Use sample data to influence the visual representation
-        let data_hash = sample_data.iter().fold(0u64, |acc, &byte| acc.wrapping_add(byte as u64));
-        let sample_size = sample_data.len();
-        
-        // Create a more sophisticated frame that reflects the actual video
-        let base_hue = (data_hash % 360) as f32;
-        let intensity = (sample_size as f32 / 1024.0).min(255.0);
-        
-        // Time-based animation with sample influence
-        let time_factor = (frame_count as f64 / fps) % 10.0; // 10 second cycle
-        let sample_factor = (data_hash % 1000) as f32 / 1000.0;
-        
-        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
-        
-        for y in 0..height {
-            for x in 0..width {
-                let nx = x as f32 / width as f32;
-                let ny = y as f32 / height as f32;
-                
-                // Create a pattern influenced by sample data
-                let pattern = ((nx * 20.0 + sample_factor * 10.0).sin() * 
-                              (ny * 20.0 + time_factor as f32).cos() + 
-                              (data_hash as f32 / 1000000.0).sin()) * 0.5 + 0.5;
-                
-                // Color based on sample data and position
-                let r = ((base_hue.sin() * pattern + 0.5) * intensity + 50.0).min(255.0) as u8;
-                let g = (((base_hue + 120.0).to_radians().sin() * pattern + 0.5) * intensity + 50.0).min(255.0) as u8;
-                let b = (((base_hue + 240.0).to_radians().sin() * pattern + 0.5) * intensity + 50.0).min(255.0) as u8;
-                
-                rgb_data.push(r);
-                rgb_data.push(g);
-                rgb_data.push(b);
-            }
-        }
-        
-        // Add visual indicators
-        Self::add_video_indicators(&mut rgb_data, width, height, sample_size, filename, frame_count);
-        
-        // Create proper JPEG data
-        let jpeg_data = match ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, rgb_data) {
-            Some(img) => {
-                let mut cursor = std::io::Cursor::new(Vec::new());
-                match image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 80).encode_image(&img) {
-                    Ok(_) => cursor.into_inner(),
-                    Err(_) => Self::create_fallback_jpeg(width, height)
-                }
-            }
-            None => Self::create_fallback_jpeg(width, height)
-        };
-        
-        VideoFrame {
-            data: jpeg_data,
-            timestamp: frame_count as f64 / fps,
-            width,
-            height,
-        }
-    }
-
-    #[cfg(windows)]
-    fn add_video_indicators(rgb_data: &mut [u8], width: u32, height: u32, sample_size: usize, filename: &str, frame_count: u64) {
-        // Add sample size indicator bar at the bottom
-        let bar_height = 8;
-        let bar_width = ((sample_size / 1024).min(width as usize)) as u32; // KB indicator
-        
-        for y in (height - bar_height)..height {
-            for x in 0..bar_width {
-                let idx = ((y * width + x) * 3) as usize;
-                if idx + 2 < rgb_data.len() {
-                    rgb_data[idx] = 0;     // R
-                    rgb_data[idx + 1] = 255; // G (green bar)
-                    rgb_data[idx + 2] = 0;   // B
-                }
-            }
-        }
-        
-        // Add filename indicator (first few characters as color pattern)
-        let filename_bytes = filename.as_bytes();
-        for (i, &byte) in filename_bytes.iter().enumerate().take(10) {
-            let x = i as u32 * 8;
-            if x < width {
-                let color = byte;
-                for dy in 0..8 {
-                    for dx in 0..8 {
-                        let px = x + dx;
-                        let py = dy;
-                        if px < width && py < height {
-                            let idx = ((py * width + px) * 3) as usize;
-                            if idx + 2 < rgb_data.len() {
-                                rgb_data[idx] = color;
-                                rgb_data[idx + 1] = color / 2;
-                                rgb_data[idx + 2] = 255 - color;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Add frame counter pattern
-        let frame_mod = (frame_count % 256) as u8;
-        for i in 0..16 {
-            let x = width - 20 + (i % 4);
-            let y = 10 + (i / 4);
-            if x < width && y < height {
-                let idx = ((y * width + x) * 3) as usize;
-                if idx + 2 < rgb_data.len() {
-                    rgb_data[idx] = frame_mod;
-                    rgb_data[idx + 1] = 255 - frame_mod;
-                    rgb_data[idx + 2] = frame_mod / 2;
-                }
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    fn create_fallback_jpeg(width: u32, height: u32) -> Vec<u8> {
-        use image::{ImageBuffer, Rgb};
-        
-        // Create a simple test pattern
-        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                let checker = ((x / 32) + (y / 32)) % 2;
-                if checker == 0 {
-                    rgb_data.extend_from_slice(&[200, 200, 200]); // Light gray
-                } else {
-                    rgb_data.extend_from_slice(&[100, 100, 100]); // Dark gray
-                }
-            }
-        }
-        
-        // Create and encode the fallback image
-        if let Some(img) = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, rgb_data) {
-            let mut cursor = std::io::Cursor::new(Vec::new());
-            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 75).encode_image(&img).is_ok() {
-                return cursor.into_inner();
-            }
-        }
-        
-        // If all else fails, create a minimal valid JPEG
-        vec![
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-            0x01, 0x01, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
-            0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
-            0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
-            0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
-            0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
-            0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
-            0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x01,
-            0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
-            0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0xFF, 0xC4,
-            0x00, 0x14, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xDA, 0x00, 0x0C,
-            0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00, 0x00, 0xFF, 0xD9
-        ]
-    }
 }
 
 #[tauri::command]
@@ -1074,14 +1188,9 @@ pub async fn get_video_stream_status() -> StreamStatus {
     processor.get_stream_status().await
 }
 
-pub async fn set_video_loop_settings(loop_count: u32, auto_start: bool) -> Result<()> {
+pub async fn set_video_loop_settings(settings: LoopSettings) -> Result<()> {
     let processor = VIDEO_PROCESSOR.lock().await;
-    processor.set_loop_settings(loop_count, auto_start).await
-}
-
-pub async fn get_video_info() -> Option<VideoInfo> {
-    let processor = VIDEO_PROCESSOR.lock().await;
-    processor.get_video_info()
+    processor.set_loop_settings(settings).await
 }
 
 pub async fn get_performance_metrics() -> Result<PerformanceMetrics> {
@@ -1093,3 +1202,215 @@ pub async fn init_video_processor(app_handle: AppHandle) {
     let mut processor = VIDEO_PROCESSOR.lock().await;
     processor.set_app_handle(app_handle);
 } 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- find_subsequence ---------------------------------------------------------
+    //
+    // This drives MJPEG frame extraction from the ffmpeg pipe: the stream loop locates a
+    // JPEG SOI (FF D8) and the following EOI (FF D9) to carve one frame out of a rolling
+    // buffer. An off-by-one here corrupts every frame the virtual camera emits, so the
+    // offsets are worth pinning down exactly.
+
+    #[test]
+    fn find_subsequence_reports_the_first_match_offset() {
+        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"abc"), Some(0));
+        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"cd"), Some(2));
+        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"f"), Some(5));
+    }
+
+    #[test]
+    fn find_subsequence_returns_none_when_absent() {
+        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"xyz"), None);
+        // A needle longer than the haystack must not panic -- the read loop hits this on
+        // every partial chunk before a full JPEG has arrived.
+        assert_eq!(VideoProcessor::find_subsequence(b"ab", b"abcdef"), None);
+        assert_eq!(VideoProcessor::find_subsequence(b"", b"a"), None);
+    }
+
+    #[test]
+    fn find_subsequence_finds_the_earliest_of_several_matches() {
+        assert_eq!(VideoProcessor::find_subsequence(b"aXbXcX", b"X"), Some(1));
+    }
+
+    /// Reproduces the exact call the stream loop makes, including the relative-offset
+    /// arithmetic (`end_idx = start + end + 2`) that turns the EOI position -- which is
+    /// searched from `start`, not from 0 -- back into an absolute index.
+    #[test]
+    fn jpeg_markers_carve_out_the_expected_frame() {
+        let mut buffer = vec![0x00, 0x11, 0x22];        // trailing bytes of a previous frame
+        buffer.extend_from_slice(&[0xFF, 0xD8]);        // SOI
+        buffer.extend_from_slice(&[0x41, 0x42, 0x43]);  // payload
+        buffer.extend_from_slice(&[0xFF, 0xD9]);        // EOI
+        buffer.extend_from_slice(&[0x99, 0x98]);        // start of the next frame
+
+        let start = VideoProcessor::find_subsequence(&buffer, &[0xFF, 0xD8]).unwrap();
+        let end = VideoProcessor::find_subsequence(&buffer[start..], &[0xFF, 0xD9]).unwrap();
+        let end_idx = start + end + 2;
+        let jpeg = &buffer[start..end_idx];
+
+        assert_eq!(start, 3);
+        assert_eq!(end, 5, "EOI offset is relative to start, not to the buffer");
+        assert_eq!(jpeg, &[0xFF, 0xD8, 0x41, 0x42, 0x43, 0xFF, 0xD9]);
+        assert_eq!(jpeg.first(), Some(&0xFF));
+        assert_eq!(jpeg.last(), Some(&0xD9), "the EOI marker must be included");
+    }
+
+    /// Documents a real precondition rather than a wish: `slice::windows(0)` panics, so
+    /// the needle must never be empty. Both call sites pass 2-byte literals, which is why
+    /// this is safe today -- it stops being safe the moment a caller derives one at runtime.
+    #[test]
+    #[should_panic(expected = "window size must be non-zero")]
+    fn find_subsequence_rejects_an_empty_needle() {
+        let _ = VideoProcessor::find_subsequence(b"abc", b"");
+    }
+
+    // --- create_estimated_video_info ----------------------------------------------
+    //
+    // The fallback used when a file cannot be parsed. Duration and resolution key off the
+    // *same* file size but with different cut points (1/10/50/200 MB vs 5/20 MB), which is
+    // exactly the kind of pairing that silently drifts when one range is edited.
+
+    #[cfg(windows)]
+    #[test]
+    fn estimated_duration_matches_its_size_bands() {
+        let d = |size| VideoProcessor::create_estimated_video_info("c.mp4", size, "mp4").duration;
+        assert_eq!(d(1_000_000), 5.0);
+        assert_eq!(d(1_000_001), 15.0, "1 MB is the upper bound of the 5s band");
+        assert_eq!(d(10_000_000), 15.0);
+        assert_eq!(d(10_000_001), 60.0);
+        assert_eq!(d(50_000_000), 60.0);
+        assert_eq!(d(50_000_001), 300.0);
+        assert_eq!(d(200_000_000), 300.0);
+        assert_eq!(d(200_000_001), 600.0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn estimated_resolution_uses_its_own_size_bands() {
+        let wh = |size| {
+            let i = VideoProcessor::create_estimated_video_info("c.mp4", size, "mp4");
+            (i.width, i.height)
+        };
+        assert_eq!(wh(5_000_000), (640, 480));
+        assert_eq!(wh(5_000_001), (1280, 720));
+        assert_eq!(wh(20_000_000), (1280, 720));
+        assert_eq!(wh(20_000_001), (1920, 1080));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn estimated_info_keeps_the_original_filename_and_is_uniquely_identified() {
+        let a = VideoProcessor::create_estimated_video_info("holiday clip.mp4", 3_000_000, "mp4");
+        let b = VideoProcessor::create_estimated_video_info("holiday clip.mp4", 3_000_000, "mp4");
+        assert_eq!(a.filename, "holiday clip.mp4");
+        assert_ne!(a.id, b.id, "each load must get its own id");
+    }
+
+    // --- decode_walk_frames -------------------------------------------------------
+    //
+    // Natural motion buffers the whole clip up front, and this function's cap decides
+    // both how much memory that costs and whether the UI tells the user the clip was
+    // cut short. The boundary case is invisible in ordinary use -- a clip exactly the
+    // window long once reported itself truncated -- so pin it against a real decode
+    // rather than trusting the arithmetic by eye.
+    //
+    // Skipped when ffmpeg isn't on PATH: the Windows CI runner has no system ffmpeg
+    // (the app ships its own as a bundled resource), and a decode test is not the place
+    // to discover that.
+
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// A `seconds`-long clip at 30 fps, so the exact frame count is known.
+    fn make_fixture(dir: &std::path::Path, seconds: u32) -> PathBuf {
+        let path = dir.join("fixture.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi",
+                "-i", &format!("testsrc=size=320x240:rate=30:duration={seconds}"),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            ])
+            .arg(&path)
+            .status()
+            .expect("failed to run ffmpeg");
+        assert!(status.success(), "ffmpeg could not build the fixture");
+        path
+    }
+
+    #[tokio::test]
+    async fn decode_walk_frames_caps_frames_and_reports_truncation() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = make_fixture(dir.path(), 4); // 4s at 30 fps == 120 frames
+        let ffmpeg = PathBuf::from("ffmpeg");
+        let streaming = Arc::new(AtomicBool::new(true));
+
+        // Cap well above the clip: everything is buffered, nothing is claimed truncated.
+        let (all, truncated) =
+            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 1_000, &streaming)
+                .await
+                .unwrap();
+        assert_eq!(all.len(), 120, "expected every frame of a 4s 30fps clip");
+        assert!(!truncated);
+
+        // Each carved chunk must be a standalone JPEG, or the virtual camera gets garbage.
+        for (i, frame) in all.iter().enumerate() {
+            assert!(frame.starts_with(&[0xFF, 0xD8]), "frame {i} has no JPEG SOI");
+            assert!(frame.ends_with(&[0xFF, 0xD9]), "frame {i} has no JPEG EOI");
+        }
+
+        // Cap below the clip: buffer stops exactly at the cap and says so.
+        let (capped, truncated) =
+            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 50, &streaming)
+                .await
+                .unwrap();
+        assert_eq!(capped.len(), 50);
+        assert!(truncated);
+
+        // Cap exactly equal to the clip: the boundary that used to report a false
+        // truncation, which would have shown the user a warning about a clip that fit.
+        let (exact, truncated) =
+            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 120, &streaming)
+                .await
+                .unwrap();
+        assert_eq!(exact.len(), 120);
+        assert!(!truncated, "a clip exactly the window long is not truncated");
+    }
+
+    #[tokio::test]
+    async fn decode_walk_frames_errors_on_a_file_with_no_video() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+
+        // An unreadable source must surface an error, not an empty buffer -- the walk
+        // would otherwise index into nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("not-a-video.mp4");
+        std::fs::write(&junk, b"this is not a video file").unwrap();
+
+        let result = VideoProcessor::decode_walk_frames(
+            &PathBuf::from("ffmpeg"),
+            &junk,
+            100,
+            &Arc::new(AtomicBool::new(true)),
+        ).await;
+
+        assert!(result.is_err(), "a non-video file must not decode to zero frames silently");
+    }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "camlooper"
-version = "0.2.2"
+version = "0.2.3"
 description = "Turn any video into a virtual camera for Zoom, Teams, Meet, OBS and Discord"
 authors = ["Amit <amit7000@gmail.com>"]
 edition = "2021"
@@ -20,10 +20,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-cc = "1.0"
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+# No "devtools" feature: every devtools API is already gated on
+# `cfg(any(debug_assertions, feature = "devtools"))`, so `tauri dev` keeps its
+# inspector either way. Naming the feature here is what forced it into release
+# builds as well.
+tauri = { version = "2" }
 tauri-plugin-opener = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
@@ -67,7 +70,6 @@ windows = { version = "0.58", features = [
 ] }
 widestring = "1.0"
 mp4 = "0.14.0"  # Pure Rust MP4 library for Windows video processing
-cc = "1.0"  # For building C code (softcam integration)
 # virtualcam-rs = { git = "https://github.com/itisl2220/virtualcam-rs" }  # TODO: Re-enable when API is documented
 # For Windows builds, we'll use a simpler implementation without FFmpeg
 # This avoids cross-compilation issues with native libraries
@@ -75,9 +77,23 @@ cc = "1.0"  # For building C code (softcam integration)
 # Platform-specific dependencies for virtual camera
 [target.'cfg(target_os = "linux")'.dependencies]
 v4l = "0.14"
-image = "0.25"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.9"
 core-graphics = "0.23"
 
+
+# Release tuning. Cargo's defaults (lto = false, codegen-units = 16) leave the
+# per-frame virtual-camera code slower than it needs to be; whole-program LTO and a
+# single codegen unit let the frame paths inline across module boundaries.
+# Note: deliberately no rustflags in .cargo/config.toml — they conflict with cargo-xwin
+# on the MSVC cross-build. Cargo *profile* keys are a different mechanism and are
+# honoured identically under cargo-xwin, so `strip` here is safe.
+#
+# No panic = "abort": the frame paths carry `unwrap()`s (e.g. `child.stdout.take()`),
+# and today a panic in a spawned task unwinds into its JoinHandle and leaves the app
+# running with a broken preview. Aborting would turn each of those into a hard crash.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

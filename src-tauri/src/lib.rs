@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod virtual_camera;
+mod frame_walk;
 mod video_processor;
 mod video_upload;
 mod camera_capture;
@@ -10,23 +11,17 @@ mod softcam_register;
 mod windows_virtual_camera;
 
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
-use video_processor::{VideoInfo, StreamStatus, PerformanceMetrics};
+use video_processor::{VideoInfo, StreamStatus, PerformanceMetrics, LoopSettings};
 
-#[allow(deprecated)]
-use video_upload::{
-    UploadRequest, UploadResponse, // Legacy types
-    StreamUploadResponse, ChunkUploadRequest, ChunkUploadResponse // New streaming types
-};
-
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+use video_upload::{StreamUploadResponse, ChunkUploadRequest, ChunkUploadResponse};
 
 // Virtual Camera Commands
 #[tauri::command]
-async fn start_virtual_camera(config: Option<VirtualCameraConfig>) -> Result<VirtualCameraStatus, String> {
-    virtual_camera::start_virtual_camera(config)
+async fn start_virtual_camera(
+    app: tauri::AppHandle,
+    config: Option<VirtualCameraConfig>,
+) -> Result<VirtualCameraStatus, String> {
+    virtual_camera::start_virtual_camera(config, app)
         .await
         .map_err(|e| e.to_string())
 }
@@ -43,16 +38,12 @@ async fn get_virtual_camera_status() -> VirtualCameraStatus {
     virtual_camera::get_virtual_camera_status().await
 }
 
+/// Set the output resolution before anything starts, so the MJPEG stage renders at the
+/// size the camera will emit. Needed as its own command because playback can begin before
+/// the camera is enabled, and the two must not disagree.
 #[tauri::command]
-async fn send_frame_to_virtual_camera(frame_data: String) -> Result<(), String> {
-    // Decode base64 frame data
-    use base64::prelude::*;
-    let decoded_data = BASE64_STANDARD.decode(&frame_data)
-        .map_err(|e| format!("Failed to decode frame data: {}", e))?;
-    
-    virtual_camera::send_frame_to_virtual_camera(decoded_data)
-        .await
-        .map_err(|e| e.to_string())
+async fn set_output_resolution(width: u32, height: u32) {
+    virtual_camera::set_output_resolution(width, height);
 }
 
 #[tauri::command]
@@ -104,65 +95,6 @@ async fn upload_chunk_stream(request: ChunkUploadRequest) -> Result<ChunkUploadR
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-async fn upload_complete_file_stream(filename: String, file_data: Vec<u8>) -> Result<String, String> {
-    if !video_upload::is_supported_video_format(&filename) {
-        return Err("Unsupported video format".to_string());
-    }
-    
-    video_upload::upload_complete_file_stream(filename, file_data)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_upload_progress(upload_id: String) -> Result<ChunkUploadResponse, String> {
-    video_upload::get_upload_progress(&upload_id)
-        .map_err(|e| e.to_string())
-}
-
-// Legacy Video Upload Commands (deprecated but maintained for backward compatibility)
-#[tauri::command]
-async fn start_video_upload(filename: String, total_chunks: usize) -> Result<String, String> {
-    if !video_upload::is_supported_video_format(&filename) {
-        return Err("Unsupported video format".to_string());
-    }
-    
-    #[allow(deprecated)]
-    video_upload::start_upload(filename, total_chunks)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-#[allow(deprecated)]
-async fn upload_video_chunk(upload_request: UploadRequest) -> Result<UploadResponse, String> {
-    video_upload::upload_chunk(upload_request)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn upload_complete_video_file(filename: String, file_data: String) -> Result<String, String> {
-    if !video_upload::is_supported_video_format(&filename) {
-        return Err("Unsupported video format".to_string());
-    }
-    
-    #[allow(deprecated)]
-    video_upload::upload_complete_file(filename, file_data)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-#[allow(deprecated)]
-async fn get_upload_status(upload_id: String) -> Result<UploadResponse, String> {
-    video_upload::get_upload_status(&upload_id)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn cleanup_video_upload(upload_id: String) -> Result<(), String> {
-    video_upload::cleanup_upload(&upload_id)
-        .map_err(|e| e.to_string())
-}
-
 // Video Processing Commands
 #[tauri::command]
 async fn load_video_file(file_path: String) -> Result<VideoInfo, String> {
@@ -198,15 +130,14 @@ async fn get_video_stream_status() -> StreamStatus {
 }
 
 #[tauri::command]
-async fn set_video_loop_settings(loop_count: u32, auto_start: bool) -> Result<(), String> {
-    video_processor::set_video_loop_settings(loop_count, auto_start)
+async fn set_video_loop_settings(
+    loop_count: u32,
+    auto_start: bool,
+    natural_motion: bool,
+) -> Result<(), String> {
+    video_processor::set_video_loop_settings(LoopSettings { loop_count, auto_start, natural_motion })
         .await
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_video_info() -> Option<VideoInfo> {
-    video_processor::get_video_info().await
 }
 
 #[tauri::command]
@@ -279,26 +210,17 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             {
                 tauri::generate_handler![
-                    greet,
                     // Virtual Camera
                     start_virtual_camera,
                     stop_virtual_camera,
                     get_virtual_camera_status,
-                    send_frame_to_virtual_camera,
+                    set_output_resolution,
                     list_video_devices,
                     // Windows Softcam Management
                     ensure_softcam_registered,
                     // New Streaming Upload Commands
                     start_stream_upload,
                     upload_chunk_stream,
-                    upload_complete_file_stream,
-                    get_upload_progress,
-                    // Legacy Video Upload Commands (deprecated)
-                    start_video_upload,
-                    upload_video_chunk,
-                    upload_complete_video_file,
-                    get_upload_status,
-                    cleanup_video_upload,
                     // Video Processing
                     load_video_file,
                     start_video_stream,
@@ -306,7 +228,6 @@ pub fn run() {
                     stop_video_stream,
                     get_video_stream_status,
                     set_video_loop_settings,
-                    get_video_info,
                     get_performance_metrics,
                     video_processor::get_video_frame_batch,
                     // Combined workflow commands
@@ -324,26 +245,17 @@ pub fn run() {
             #[cfg(not(target_os = "windows"))]
             {
                 tauri::generate_handler![
-                    greet,
                     // Virtual Camera
                     start_virtual_camera,
                     stop_virtual_camera,
                     get_virtual_camera_status,
-                    send_frame_to_virtual_camera,
+                    set_output_resolution,
                     list_video_devices,
                     // Linux v4l2loopback module management
                     ensure_v4l2loopback,
                     // New Streaming Upload Commands
                     start_stream_upload,
                     upload_chunk_stream,
-                    upload_complete_file_stream,
-                    get_upload_progress,
-                    // Legacy Video Upload Commands (deprecated)
-                    start_video_upload,
-                    upload_video_chunk,
-                    upload_complete_video_file,
-                    get_upload_status,
-                    cleanup_video_upload,
                     // Video Processing
                     load_video_file,
                     start_video_stream,
@@ -351,7 +263,6 @@ pub fn run() {
                     stop_video_stream,
                     get_video_stream_status,
                     set_video_loop_settings,
-                    get_video_info,
                     get_performance_metrics,
                     video_processor::get_video_frame_batch,
                     // Combined workflow commands

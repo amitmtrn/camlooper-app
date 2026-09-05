@@ -152,3 +152,72 @@ pub fn ensure_registered() -> RegisterOutcome {
         other => other,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend string-matches these values (`src/App.tsx`: `outcome === 'declined'`,
+    /// `outcome === 'justRegistered'`). Dropping the `rename_all` attribute or renaming a
+    /// variant would compile fine and silently stop the UAC-declined warning from ever
+    /// showing, so pin the wire format here.
+    #[test]
+    fn outcome_serializes_to_the_names_the_frontend_matches() {
+        let json = |o: RegisterOutcome| serde_json::to_string(&o).unwrap();
+        assert_eq!(json(RegisterOutcome::AlreadyRegistered), "\"alreadyRegistered\"");
+        assert_eq!(json(RegisterOutcome::JustRegistered), "\"justRegistered\"");
+        assert_eq!(json(RegisterOutcome::Declined), "\"declined\"");
+        assert_eq!(json(RegisterOutcome::Failed), "\"failed\"");
+    }
+
+    /// regsvr32 is resolved from %SystemRoot% rather than PATH specifically so that a
+    /// hijacked PATH cannot substitute a binary that we then launch *elevated*. Assert the
+    /// path stays absolute and lands in System32.
+    #[test]
+    fn regsvr32_path_is_absolute_and_under_system32() {
+        let path = regsvr32_path();
+        assert!(
+            path.to_ascii_lowercase().ends_with("\\system32\\regsvr32.exe"),
+            "expected a System32-qualified regsvr32, got {path}"
+        );
+        assert!(
+            path.contains(":\\"),
+            "expected an absolute path so PATH lookup is never consulted, got {path}"
+        );
+    }
+
+    /// Probing the registry must be side-effect free and safe to call before anything is
+    /// installed -- `ensure_registered` calls it on every "enable camera" action.
+    #[test]
+    fn is_registered_probe_does_not_panic() {
+        let _ = is_registered();
+    }
+
+    /// The CLSID in `is_registered` is only correct as long as the committed
+    /// `drivers/windows/softcam.dll` is the build that exports it. Swapping the DLL for a
+    /// softcam release with a different CLSID would leave the probe permanently reporting
+    /// "not registered" -- producing a UAC prompt on every camera enable, forever.
+    ///
+    /// So verify against the artefact rather than restating the constant: a COM server
+    /// embeds its CLSID as a little-endian GUID, which must appear in the DLL's bytes.
+    #[test]
+    fn softcam_clsid_matches_the_committed_driver() {
+        // Little-endian layout of {AEF3B972-5FA5-4647-9571-358EB472BC9E}.
+        const CLSID_LE: [u8; 16] = [
+            0x72, 0xb9, 0xf3, 0xae, 0xa5, 0x5f, 0x47, 0x46,
+            0x95, 0x71, 0x35, 0x8e, 0xb4, 0x72, 0xbc, 0x9e,
+        ];
+
+        let dll = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("drivers/windows/softcam.dll");
+        let bytes = std::fs::read(&dll)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dll.display()));
+
+        assert!(
+            bytes.windows(16).any(|w| w == CLSID_LE),
+            "the CLSID probed by is_registered() is absent from {} -- the bundled softcam \
+             build does not export it, so registration detection would never succeed",
+            dll.display()
+        );
+    }
+}

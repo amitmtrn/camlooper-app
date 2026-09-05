@@ -9,15 +9,18 @@ use v4l::Device;
 #[cfg(target_os = "linux")]
 use v4l::capability;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::process::Stdio;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use tokio::io::AsyncWriteExt;
-#[cfg(target_os = "linux")]
-use image;
+
+#[cfg(target_os = "windows")]
+use tokio::io::AsyncReadExt;
 
 #[cfg(target_os = "windows")]
 use crate::windows_virtual_camera::WindowsVirtualCamera;
+
+use tauri::AppHandle;
 
 /// Human-readable label we set on our v4l2loopback device (via the modprobe.d
 /// `card_label=` option). Used both to create the device with the right name and to pick
@@ -42,9 +45,11 @@ pub struct VirtualCameraConfig {
 
 impl Default for VirtualCameraConfig {
     fn default() -> Self {
+        // 720p: what conferencing apps actually request, and half the per-frame copy of
+        // 1080p. The frontend overrides this from the user's Resolution setting.
         Self {
-            width: 1920,
-            height: 1080,
+            width: 1280,
+            height: 720,
             fps: 30,
             camera_name: "CamLooper Virtual Camera".to_string(),
         }
@@ -65,6 +70,13 @@ pub struct VirtualCamera {
     status: Arc<Mutex<VirtualCameraStatus>>,
     frame_sender: Option<mpsc::UnboundedSender<Vec<u8>>>,
     is_running: Arc<Mutex<bool>>,
+    /// Needed on Windows to locate the bundled ffmpeg.exe under the Tauri resource dir.
+    app_handle: Option<AppHandle>,
+    /// Flipped to `true` on stop so the platform frame pump exits instead of running
+    /// forever. Without this the Windows pump leaked a task (and a softcam handle) per
+    /// camera toggle.
+    shutdown: Arc<tokio::sync::Notify>,
+    stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl VirtualCamera {
@@ -82,7 +94,14 @@ impl VirtualCamera {
             status: Arc::new(Mutex::new(status)),
             frame_sender: None,
             is_running: Arc::new(Mutex::new(false)),
+            app_handle: None,
+            shutdown: Arc::new(tokio::sync::Notify::new()),
+            stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_app_handle(&mut self, app_handle: AppHandle) {
+        self.app_handle = Some(app_handle);
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -92,6 +111,11 @@ impl VirtualCamera {
                 return Ok(());
             }
         }
+
+        // Clear any shutdown request left over from a previous run, so the pump we are
+        // about to spawn doesn't immediately exit.
+        self.stopping
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Create frame channel
         let (frame_sender, frame_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -168,81 +192,27 @@ impl VirtualCamera {
         self.status.lock().await.is_active
     }
 
-    /// Common frame resizing method (currently only used by the Windows softcam path).
-    #[allow(dead_code)]
-    fn resize_frame(rgb_data: &[u8], src_width: usize, src_height: usize, dst_width: usize, dst_height: usize) -> Vec<u8> {
-        if src_width == dst_width && src_height == dst_height {
-            return rgb_data.to_vec();
-        }
-
-        let mut resized_data = vec![0u8; dst_width * dst_height * 3];
-        
-        // Bilinear interpolation for better quality
-        for dst_y in 0..dst_height {
-            for dst_x in 0..dst_width {
-                // Calculate source coordinates
-                let src_x_f = (dst_x as f32 * src_width as f32) / dst_width as f32;
-                let src_y_f = (dst_y as f32 * src_height as f32) / dst_height as f32;
-                
-                // Get integer coordinates
-                let src_x = src_x_f as usize;
-                let src_y = src_y_f as usize;
-                
-                // Calculate fractional parts
-                let fx = src_x_f - src_x as f32;
-                let fy = src_y_f - src_y as f32;
-                
-                // Get the four surrounding pixels
-                let x1 = src_x.min(src_width - 1);
-                let y1 = src_y.min(src_height - 1);
-                let x2 = (src_x + 1).min(src_width - 1);
-                let y2 = (src_y + 1).min(src_height - 1);
-                
-                // Calculate destination index
-                let dst_idx = (dst_y * dst_width + dst_x) * 3;
-                
-                // Perform bilinear interpolation for each color channel
-                for c in 0..3 {
-                    let p1 = rgb_data[(y1 * src_width + x1) * 3 + c] as f32;
-                    let p2 = rgb_data[(y1 * src_width + x2) * 3 + c] as f32;
-                    let p3 = rgb_data[(y2 * src_width + x1) * 3 + c] as f32;
-                    let p4 = rgb_data[(y2 * src_width + x2) * 3 + c] as f32;
-                    
-                    // Interpolate
-                    let top = p1 * (1.0 - fx) + p2 * fx;
-                    let bottom = p3 * (1.0 - fx) + p4 * fx;
-                    let final_value = top * (1.0 - fy) + bottom * fy;
-                    
-                    resized_data[dst_idx + c] = final_value.round() as u8;
-                }
-            }
-        }
-        
-        resized_data
-    }
-
-    /// Convert JPEG to RGB and resize to target dimensions (Windows softcam path).
-    #[allow(dead_code)]
-    fn jpeg_to_rgb_resized(jpeg_data: &[u8], target_width: u32, target_height: u32) -> Result<Vec<u8>> {
-        // Decode JPEG to image
-        let img = image::load_from_memory(jpeg_data)?;
-        let rgb_img = img.to_rgb8();
-        
-        let src_width = rgb_img.width() as usize;
-        let src_height = rgb_img.height() as usize;
-        let raw_data = rgb_img.into_raw();
-        
-        // Resize to target dimensions
-        let resized_data = Self::resize_frame(&raw_data, src_width, src_height, target_width as usize, target_height as usize);
-        
-        Ok(resized_data)
-    }
-
     #[cfg(target_os = "windows")]
     async fn start_platform_camera(&self, mut frame_receiver: mpsc::UnboundedReceiver<Vec<u8>>) -> Result<()> {
-        // Windows implementation using the custom DirectShow virtual camera
+        // Windows implementation using the softcam DirectShow virtual camera.
+        //
+        // Frames arrive as MJPEG and softcam wants raw BGR24 at exactly config.width x
+        // config.height. We hand that whole conversion (decode + scale + RGB->BGR) to the
+        // bundled ffmpeg, exactly as the Linux leg does, instead of doing it by hand in
+        // Rust. The previous in-process version decoded with the `image` crate and ran a
+        // scalar bilinear resize, which measured ~99 ms/frame upscaling 640x360 to
+        // 1920x1080 — against a 33 ms frame budget, so most ticks were skipped and the
+        // camera delivered ~10 fps. swscale does strictly more work in ~1.6 ms.
         let config = self.config.clone();
         let status = self.status.clone();
+        let stopping = self.stopping.clone();
+
+        let app = self
+            .app_handle
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Virtual camera has no AppHandle; cannot locate bundled ffmpeg"))?;
+        let ffmpeg_path = crate::camera_capture::resolve_ffmpeg_path(app)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve bundled ffmpeg: {}", e))?;
 
         println!("Starting softcam DirectShow virtual camera...");
 
@@ -263,75 +233,135 @@ impl VirtualCamera {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start softcam virtual camera: {}", e))?;
 
+        // MJPEG in on stdin, tightly-packed BGR24 out on stdout. rawvideo has no padding
+        // or stride, so every frame is exactly width*height*3 bytes and the reader below
+        // can use a fixed-size read_exact.
+        let mut converter = {
+            // tokio's Command exposes creation_flags directly on Windows.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+            let mut cmd = tokio::process::Command::new(&ffmpeg_path);
+            cmd.args([
+                "-hide_banner",
+                "-loglevel", "error",
+                "-analyzeduration", "0",
+                "-probesize", "32768",
+                "-f", "mjpeg",
+                "-i", "pipe:0",
+                "-vf", &format!("scale={}:{}", config.width, config.height),
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .creation_flags(CREATE_NO_WINDOW)
+            .kill_on_drop(true);
+
+            cmd.spawn()
+                .map_err(|e| anyhow::anyhow!("Failed to start ffmpeg converter for the virtual camera: {}", e))?
+        };
+
+        let mut conv_stdin = converter
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to open ffmpeg converter stdin"))?;
+        let mut conv_stdout = converter
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to open ffmpeg converter stdout"))?;
+
+        let frame_size = (config.width as usize) * (config.height as usize) * 3;
+
+        // Writer: feed JPEGs to ffmpeg as they arrive. Repeats the last frame when the
+        // source is idle so the camera never goes stale, and exits when the channel is
+        // dropped (stop) — the old loop had no exit condition at all, so every camera
+        // toggle leaked a pump and a softcam handle.
+        let writer_stopping = stopping.clone();
+        let writer_fps = config.fps.max(1);
         tokio::spawn(async move {
-            let mut frame_count = 0u64;
-            let target_frame_duration = tokio::time::Duration::from_millis(1000 / config.fps as u64);
-            let mut frame_timer = tokio::time::interval(target_frame_duration);
-            frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            
-            // Buffer for latest frame
-            let mut latest_frame: Option<Vec<u8>> = None;
-            let mut vcam_available = true;
-            
+            // Two frame intervals, not one: at one interval this races with normal 30 fps
+            // arrival and writes a duplicate alongside almost every real frame. softcam
+            // already serves its last frame to consumers on its own, so this only has to
+            // be often enough to cover a genuinely idle source.
+            let idle_interval =
+                tokio::time::Duration::from_millis(2000 / writer_fps as u64);
+            let mut last_frame: Option<Vec<u8>> = None;
+
             loop {
-                // Wait for the next frame time
-                frame_timer.tick().await;
-                
-                // Collect any available frames (non-blocking)
-                while let Ok(frame_data) = frame_receiver.try_recv() {
-                    latest_frame = Some(frame_data);
+                if writer_stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
                 }
-                
-                // Process frame and send to virtual camera (only if available)
-                if vcam_available {
-                    if let Some(ref frame_data) = latest_frame {
-                        // Convert JPEG to RGB and resize to configured dimensions
-                        match Self::jpeg_to_rgb_resized(frame_data, config.width, config.height) {
-                            Ok(mut pixels) => {
-                                // softcam expects BGR (top-down, 24bpp); our decoder
-                                // produces RGB, so swap the R and B channels in place.
-                                for px in pixels.chunks_exact_mut(3) {
-                                    px.swap(0, 2);
-                                }
-                                if let Err(e) = vcam.send_frame(&pixels) {
-                                    eprintln!("Failed to send frame to softcam virtual camera: {}", e);
-                                    // Don't close the channel, just mark virtual camera as unavailable
-                                    vcam_available = false;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to convert JPEG to RGB: {}", e);
-                            }
-                        }
-                    } else {
-                        // Send black frame if no data available (BGR == RGB for black)
-                        let black_frame = vec![0u8; (config.width * config.height * 3) as usize];
-                        if let Err(e) = vcam.send_frame(&black_frame) {
-                            eprintln!("Failed to send black frame to softcam virtual camera: {}", e);
-                            // Don't close the channel, just mark virtual camera as unavailable
-                            vcam_available = false;
-                        }
+
+                let jpeg = match tokio::time::timeout(idle_interval, frame_receiver.recv()).await {
+                    // New frame from the producer.
+                    Ok(Some(frame)) => {
+                        last_frame = Some(frame.clone());
+                        Some(frame)
                     }
-                } else {
-                    // Virtual camera is not available, but keep the channel open
-                    if frame_count % 30 == 0 {
-                        println!("Custom virtual camera unavailable, but keeping channel open. Frame count: {}", frame_count);
+                    // Producer went away (camera stopped) — shut the pipe down.
+                    Ok(None) => break,
+                    // Nothing new this interval; repeat the last frame to hold the feed.
+                    Err(_) => last_frame.clone(),
+                };
+
+                if let Some(jpeg) = jpeg {
+                    if conv_stdin.write_all(&jpeg).await.is_err() {
+                        break;
+                    }
+                    if conv_stdin.flush().await.is_err() {
+                        break;
                     }
                 }
-                
+            }
+
+            // Dropping stdin gives ffmpeg EOF so it exits and the reader below unblocks.
+            drop(conv_stdin);
+        });
+
+        // Reader: pull finished BGR24 frames and push them straight into softcam's shared
+        // memory. One reusable buffer, so there is no per-frame allocation.
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; frame_size];
+            let mut frame_count = 0u64;
+
+            loop {
+                if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+
+                match conv_stdout.read_exact(&mut buf).await {
+                    Ok(_) => {}
+                    // EOF or a short read means ffmpeg exited — normal on stop.
+                    Err(e) => {
+                        if !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                            eprintln!("Virtual camera converter ended: {}", e);
+                        }
+                        break;
+                    }
+                }
+
+                if let Err(e) = vcam.send_frame(&buf) {
+                    eprintln!("Failed to send frame to softcam virtual camera: {}", e);
+                    break;
+                }
+
                 frame_count += 1;
-                if frame_count % 30 == 0 && vcam_available {
-                    println!("Sent {} frames to custom virtual camera", frame_count);
-                }
-                
-                // Update status
                 {
                     let mut status_lock = status.lock().await;
                     status_lock.frame_count = frame_count;
                 }
             }
+
+            // Drops `vcam`, which calls scDeleteCamera and releases the softcam instance.
+            if let Err(e) = vcam.stop() {
+                eprintln!("Failed to stop softcam virtual camera cleanly: {}", e);
+            }
+            let _ = converter.kill().await;
+            println!("Virtual camera frame pump stopped after {} frames", frame_count);
         });
-        
+
         Ok(())
     }
 
@@ -555,8 +585,19 @@ impl VirtualCamera {
     }
 
     async fn stop_platform_camera(&self) -> Result<()> {
-        // Platform-specific cleanup - simplified for now
         println!("Stopping platform-specific virtual camera...");
+
+        // Tell the frame pump to exit. `stop()` has already dropped `frame_sender`, which
+        // is the primary signal (the writer sees a closed channel); this flag covers the
+        // window where the pump is mid-iteration and makes the intent explicit.
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown.notify_waiters();
+
+        // Give the pump a moment to unwind and release the platform camera handle before
+        // a subsequent start() tries to create a second one.
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
         Ok(())
     }
 
@@ -867,18 +908,57 @@ static VIRTUAL_CAMERA: Lazy<Arc<Mutex<Option<VirtualCamera>>>> = Lazy::new(|| {
     Arc::new(Mutex::new(None))
 });
 
+/// The output resolution the user picked, shared with the video processor.
+///
+/// Both ends must agree: the MJPEG stage renders at this size and the camera emits it, so
+/// there is no rescaling in between. They used to disagree — the source was hardcoded to
+/// 640 wide and the camera to 1920x1080, so every frame was upscaled from 360p to 1080p
+/// for no gain in detail. Defaults match `VirtualCameraConfig::default`, which covers the
+/// case where video playback starts before the camera is enabled.
+static OUTPUT_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1280);
+static OUTPUT_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(720);
+
+pub fn set_output_resolution(width: u32, height: u32) {
+    OUTPUT_WIDTH.store(width, std::sync::atomic::Ordering::Relaxed);
+    OUTPUT_HEIGHT.store(height, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn output_resolution() -> (u32, u32) {
+    (
+        OUTPUT_WIDTH.load(std::sync::atomic::Ordering::Relaxed),
+        OUTPUT_HEIGHT.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 // Public API functions
-pub async fn start_virtual_camera(config: Option<VirtualCameraConfig>) -> Result<VirtualCameraStatus> {
+pub async fn start_virtual_camera(
+    config: Option<VirtualCameraConfig>,
+    app: AppHandle,
+) -> Result<VirtualCameraStatus> {
     let config = config.unwrap_or_default();
+
+    // Keep the MJPEG stage in step with what the camera will emit.
+    set_output_resolution(config.width, config.height);
+
+    let mut global_camera = VIRTUAL_CAMERA.lock().await;
+
+    // Tear down any camera that is still running before replacing it. Without this a
+    // second start (e.g. the user changing resolution) left the previous frame pump alive
+    // and its platform camera handle unreleased, so both pumps kept writing frames.
+    if let Some(ref mut existing) = global_camera.as_mut() {
+        existing.stop().await?;
+    }
+    *global_camera = None;
+
     let mut camera = VirtualCamera::new(config);
-    
+    camera.set_app_handle(app);
+
     camera.start().await?;
     let status = camera.get_status().await;
-    
+
     // Store the camera instance
-    let mut global_camera = VIRTUAL_CAMERA.lock().await;
     *global_camera = Some(camera);
-    
+
     Ok(status)
 }
 
