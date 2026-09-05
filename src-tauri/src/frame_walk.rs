@@ -62,6 +62,22 @@ impl FrameWalk {
         }
     }
 
+    /// Extend the walk over a clip that is still being decoded.
+    ///
+    /// Playback starts as soon as a short prefix of the clip is buffered and the rest fills
+    /// in behind it, so this only ever grows — shrinking would let `pos` fall outside the
+    /// buffer. Safe to call every tick.
+    ///
+    /// The walk cannot outrun the decoder: `next_index` starts at 0 and moves at most one
+    /// frame per call, so after *k* ticks the index is at most *k*, while the decoder runs
+    /// without `-re` — i.e. faster than realtime on any machine that can also encode the
+    /// store in realtime.
+    pub fn grow(&mut self, len: usize) {
+        if len > self.len {
+            self.len = len;
+        }
+    }
+
     /// The next frame index to emit. The first call yields 0 so playback opens on the first
     /// frame of the clip; every call after that moves exactly one frame.
     pub fn next_index(&mut self) -> usize {
@@ -243,6 +259,51 @@ mod tests {
         let hi = *seq.iter().max().unwrap();
         assert_eq!(lo, 0);
         assert_eq!(hi, len - 1, "walk never reached the end of the clip");
+    }
+
+    // --- growing while the clip is still decoding -----------------------------------------
+
+    #[test]
+    fn growing_never_breaks_adjacency() {
+        // The invariant that matters most, now under a buffer that changes size mid-walk.
+        let mut walk = FrameWalk::new(30, 4242);
+        let mut seq = Vec::new();
+        let mut len = 30;
+        for i in 0..5_000 {
+            if i % 7 == 0 && len < 900 {
+                len += 3;
+                walk.grow(len);
+            }
+            seq.push(walk.next_index());
+        }
+        for pair in seq.windows(2) {
+            assert_eq!((pair[1] as i64 - pair[0] as i64).abs(), 1, "{pair:?}");
+        }
+        assert!(*seq.iter().max().unwrap() < len);
+    }
+
+    #[test]
+    fn growing_is_monotonic() {
+        // A shrink would let pos fall outside the buffer and panic on the frame lookup.
+        let mut walk = FrameWalk::new(100, 1);
+        walk.grow(50);
+        assert_eq!(walk.len, 100, "grow must never shrink the walk");
+        walk.grow(400);
+        assert_eq!(walk.len, 400);
+    }
+
+    #[test]
+    fn a_walk_that_starts_on_one_frame_recovers_once_more_arrive() {
+        // Playback opens on a prefix that may be a single frame. Before grow() that was a
+        // permanent fixed point, because len <= 1 short-circuits next_index.
+        let mut walk = FrameWalk::new(1, 7);
+        assert_eq!(collect(&mut walk, 3), vec![0, 0, 0]);
+        walk.grow(200);
+        let seq = collect(&mut walk, 50);
+        assert!(seq.iter().any(|&i| i > 0), "walk never left frame 0 after growing");
+        for pair in seq.windows(2) {
+            assert_eq!((pair[1] as i64 - pair[0] as i64).abs(), 1, "{pair:?}");
+        }
     }
 
     #[test]

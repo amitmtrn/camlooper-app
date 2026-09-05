@@ -89,13 +89,19 @@ const WALK_WINDOW_SECS: f64 = 60.0;
 
 /// Hard ceiling on the buffer, whichever limit is reached first.
 ///
-/// The frame cap alone does not bound memory, because JPEG size depends on content: at
-/// 640 wide and `-q:v 5`, a clean synthetic clip measures ~11 KB a frame while heavy sensor
-/// noise measures ~91 KB, so the same 1800-frame window swings between roughly 19 MB and
-/// 160 MB. Typical camera footage lands near 30 KB (~50 MB for the window), so this only
-/// bites on unusually noisy clips -- which are exactly the ones that would otherwise put
-/// a low-spec machine under memory pressure.
-const MAX_WALK_BYTES: usize = 96 * 1024 * 1024;
+/// The frame cap alone does not bound memory, because JPEG size depends on content and on
+/// the store width, which follows the user's output resolution. Measured at 720p on a
+/// deliberately detailed synthetic clip: the old `-q:v 5` yuvj420p store ran ~47 KB a frame,
+/// and the `-q:v 2` yuvj422p store this now uses runs ~81 KB. Ordinary camera footage
+/// compresses well below both.
+///
+/// 96 MiB was sized against the old, lower-quality store; at 81 KB a frame it would cut the
+/// walk to ~40 s, and a short window makes the walk hover in one spot instead of covering
+/// the clip (see `frame_walk::covers_the_clip_rather_than_hovering_in_one_spot`). 192 MiB
+/// keeps the full 60 s window at 720p so [`WALK_WINDOW_SECS`] stays the binding limit, and
+/// still bounds the one large allocation the app makes. What was actually kept is reported
+/// to the UI as `walk_seconds`.
+const MAX_WALK_BYTES: usize = 192 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
@@ -122,6 +128,11 @@ pub struct VideoProcessor {
     walk_cache: Arc<RwLock<Option<WalkBuffer>>>,
 }
 
+/// The natural-motion frame store: JPEGs, appended by the decoder and read at random by
+/// the walk. Behind a `std::sync::Mutex` because it is touched once per tick for a length
+/// and one `Arc` clone — both too short to be worth an async lock.
+type SharedFrames = Arc<std::sync::Mutex<Vec<Arc<[u8]>>>>;
+
 /// A clip decoded to JPEG frames, ready for random access.
 struct WalkBuffer {
     source: PathBuf,
@@ -129,7 +140,7 @@ struct WalkBuffer {
     /// 720p camera is the wrong store for a 1080p one.
     width: u32,
     /// Shared so resuming a cached clip hands out a handle rather than copying ~70 MB.
-    frames: Arc<Vec<Vec<u8>>>,
+    frames: SharedFrames,
     /// The source ran past `WALK_WINDOW_SECS`, so `frames` holds only its opening window.
     truncated: bool,
 }
@@ -521,13 +532,21 @@ impl VideoProcessor {
 
     pub async fn stop_streaming(&mut self) -> Result<()> {
         self.is_streaming.store(false, Ordering::Relaxed);
-        
+
         {
             let mut status = self.stream_status.write().await;
             status.is_playing = false;
             status.current_time = 0.0;
             status.current_loop = 0;
+            status.walk_seconds = 0.0;
+            status.walk_truncated = false;
         }
+
+        // Release the natural-motion store. Up to ~192 MB was staying resident for the rest
+        // of the session on nothing but a stop — only loading a different video cleared it.
+        // Pause deliberately keeps it, which is what the cache is for; re-decoding after a
+        // stop is cheap now that playback no longer waits for the whole window.
+        *self.walk_cache.write().await = None;
 
         Ok(())
     }
@@ -779,6 +798,9 @@ impl VideoProcessor {
     ///
     /// `store_width` is clamped to the source width by the caller: encoding an upscaled
     /// frame pays JPEG rates for invented detail.
+    /// Collecting wrapper around [`Self::decode_walk_frames_into`], for callers that want
+    /// the whole store at once rather than watching it fill.
+    #[cfg(test)]
     async fn decode_walk_frames(
         ffmpeg_path: &PathBuf,
         video_path: &PathBuf,
@@ -786,6 +808,38 @@ impl VideoProcessor {
         max_frames: usize,
         is_streaming: &Arc<AtomicBool>,
     ) -> Result<(Vec<Vec<u8>>, bool)> {
+        let store: SharedFrames = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let truncated = Self::decode_walk_frames_into(
+            ffmpeg_path,
+            video_path,
+            store_width,
+            max_frames,
+            is_streaming,
+            &store,
+        )
+        .await?;
+        let frames = store
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|f| f.to_vec())
+            .collect();
+        Ok((frames, truncated))
+    }
+
+    /// Decode into `store`, appending each frame as it arrives.
+    ///
+    /// Appending rather than returning at the end is what lets playback start on a short
+    /// prefix while the rest of the clip fills in behind the walk — the "preparing" spinner
+    /// used to sit there for the whole decode.
+    async fn decode_walk_frames_into(
+        ffmpeg_path: &PathBuf,
+        video_path: &PathBuf,
+        store_width: u32,
+        max_frames: usize,
+        is_streaming: &Arc<AtomicBool>,
+        store: &SharedFrames,
+    ) -> Result<bool> {
         // One frame beyond the cap, so that "we hit the cap" and "the clip is exactly the
         // window long" stay distinguishable.
         let args = pipeline::mjpeg_store_args(
@@ -806,11 +860,11 @@ impl VideoProcessor {
             .map_err(|e| anyhow!("Failed to start ffmpeg ({}): {}", ffmpeg_path.display(), e))?;
         let mut stdout = child.stdout.take().unwrap();
 
-        let mut frames: Vec<Vec<u8>> = Vec::new();
         let mut reader = JpegStreamReader::new();
         let mut chunk = [0u8; 65536];
         let mut frame_bytes = 0usize;
         let mut hit_byte_cap = false;
+        let mut count = 0usize;
 
         loop {
             // Stop pressed mid-decode: bail out instead of making the user wait for a clip
@@ -826,7 +880,13 @@ impl VideoProcessor {
 
                     while let Some(frame) = reader.next_frame() {
                         frame_bytes += frame.len();
-                        frames.push(frame);
+                        // One frame past the window is decoded on purpose, to tell "the clip
+                        // is longer than the window" from "the clip is exactly the window
+                        // long". Don't publish it.
+                        if count < max_frames {
+                            store.lock().unwrap().push(Arc::from(frame.into_boxed_slice()));
+                        }
+                        count += 1;
 
                         if frame_bytes >= MAX_WALK_BYTES {
                             hit_byte_cap = true;
@@ -834,7 +894,7 @@ impl VideoProcessor {
                         }
                     }
 
-                    if hit_byte_cap {
+                    if hit_byte_cap || count > max_frames {
                         break;
                     }
                 }
@@ -848,21 +908,14 @@ impl VideoProcessor {
         let _ = child.kill().await;
         let _ = child.wait().await;
 
-        if frames.is_empty() {
+        if count == 0 {
             return Err(anyhow!("ffmpeg decoded no frames from {}", video_path.display()));
         }
 
         // Getting past the cap means there was more clip than the window holds. A file
-        // exactly the window long lands on the cap and is not truncated.
-        let mut truncated = frames.len() > max_frames;
-        if truncated {
-            frames.truncate(max_frames);
-        }
-        // Heavy footage can exhaust the byte budget before the frame budget.
-        if hit_byte_cap {
-            truncated = true;
-        }
-        Ok((frames, truncated))
+        // exactly the window long lands on the cap and is not truncated. Heavy footage can
+        // exhaust the byte budget before the frame budget.
+        Ok(count > max_frames || hit_byte_cap)
     }
 
     /// Natural motion: buffer the clip, then walk its frame index at random instead of
@@ -906,61 +959,94 @@ impl VideoProcessor {
             }
         };
 
-        let (frames, truncated) = match cached {
-            Some(hit) => hit,
+        // Playback used to wait for the whole window to decode — up to a minute of video
+        // behind a spinner. Now it starts on a short prefix and the store fills in behind
+        // the walk. That is safe because the walk moves at most one frame per tick while the
+        // decoder runs without `-re`; see `FrameWalk::grow`.
+        let (frames, decoding) = match cached {
+            Some((frames, truncated)) => {
+                {
+                    let mut status = stream_status.write().await;
+                    status.walk_truncated = truncated;
+                }
+                (frames, None)
+            }
             None => {
+                let store: SharedFrames = Arc::new(std::sync::Mutex::new(Vec::new()));
                 {
                     let mut status = stream_status.write().await;
                     status.is_preparing = true;
+                    status.walk_truncated = false;
                 }
-                let decoded = Self::decode_walk_frames(
-                    &ffmpeg_path,
-                    &video_path,
-                    store_width,
-                    max_frames,
-                    &is_streaming,
-                ).await;
+
+                let handle = {
+                    let (ffmpeg_path, video_path) = (ffmpeg_path.clone(), video_path.clone());
+                    let (is_streaming, store) = (is_streaming.clone(), Arc::clone(&store));
+                    let (walk_cache, stream_status) = (walk_cache.clone(), stream_status.clone());
+                    tokio::spawn(async move {
+                        let result = Self::decode_walk_frames_into(
+                            &ffmpeg_path,
+                            &video_path,
+                            store_width,
+                            max_frames,
+                            &is_streaming,
+                            &store,
+                        )
+                        .await;
+                        match result {
+                            Ok(truncated) => {
+                                // Only cache a decode that ran to completion; a cancelled one
+                                // holds just the opening of the clip.
+                                if is_streaming.load(Ordering::Relaxed) {
+                                    *walk_cache.write().await = Some(WalkBuffer {
+                                        source: video_path,
+                                        width: store_width,
+                                        frames: Arc::clone(&store),
+                                        truncated,
+                                    });
+                                }
+                                let mut status = stream_status.write().await;
+                                status.walk_truncated = truncated;
+                            }
+                            Err(e) => eprintln!("Natural motion decode failed: {}", e),
+                        }
+                    })
+                };
+
+                // Enough to walk on while the rest arrives. One second, floored at a handful
+                // of frames so a very short clip still starts.
+                let prefix = ((fps.round() as usize).max(1)).min(max_frames).max(4);
+                loop {
+                    if !is_streaming.load(Ordering::Relaxed) {
+                        let mut status = stream_status.write().await;
+                        status.is_playing = false;
+                        status.is_preparing = false;
+                        return Ok(());
+                    }
+                    if store.lock().unwrap().len() >= prefix || handle.is_finished() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+
                 {
                     let mut status = stream_status.write().await;
                     status.is_preparing = false;
                 }
 
-                let (decoded_frames, truncated) = decoded?;
-
-                // Cancelled part-way through: the buffer holds only the opening of the clip,
-                // so drop it rather than caching a partial decode for the next play.
-                if !is_streaming.load(Ordering::Relaxed) {
+                if store.lock().unwrap().is_empty() {
                     let mut status = stream_status.write().await;
                     status.is_playing = false;
-                    return Ok(());
+                    return Err(anyhow!("ffmpeg decoded no frames from {}", video_path.display()));
                 }
-
-                let decoded_frames = Arc::new(decoded_frames);
-                *walk_cache.write().await = Some(WalkBuffer {
-                    source: video_path.clone(),
-                    width: store_width,
-                    frames: Arc::clone(&decoded_frames),
-                    truncated,
-                });
-                (decoded_frames, truncated)
+                (store, Some(handle))
             }
         };
-
-        let frame_len = frames.len();
-        let buffer_bytes: u64 = frames.iter().map(|f| f.len() as u64).sum();
-        println!(
-            "Natural motion: {} frames buffered ({:.1} MB, {:.1}s){}",
-            frame_len,
-            buffer_bytes as f64 / (1024.0 * 1024.0),
-            frame_len as f64 / fps,
-            // Either cap can bite, so report what was kept rather than naming a limit.
-            if truncated { " -- clip truncated to fit the buffer" } else { "" }
-        );
+        let _ = decoding;
 
         {
-            let mut status = stream_status.write().await;
-            status.walk_truncated = truncated;
-            status.walk_seconds = frame_len as f64 / fps;
+            let n = frames.lock().unwrap().len();
+            println!("Natural motion: playing from {n} frames, store still filling");
         }
 
         // The walk hands out JPEGs from its in-memory store, but the camera takes raw
@@ -1013,7 +1099,8 @@ impl VideoProcessor {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x5DEE_CE66_D000_0001);
-        let mut walk = crate::frame_walk::FrameWalk::new(frame_len, seed);
+        // Starts on whatever the decoder has so far; grow() extends it as more lands.
+        let mut walk = crate::frame_walk::FrameWalk::new(frames.lock().unwrap().len(), seed);
 
         // Nothing upstream paces us now that `-re` is gone, so this tick is the clock the
         // virtual camera runs on. `from_secs_f64` rather than integer millisecond division,
@@ -1026,15 +1113,33 @@ impl VideoProcessor {
         let mut frames_processed = 0u64;
         let mut last_fps_update = Instant::now();
 
+        let mut frame_len = 0usize;
+        let mut buffer_bytes = 0u64;
+
         loop {
             if !is_streaming.load(Ordering::Relaxed) {
                 break;
             }
 
+            // Pick up whatever the decoder has appended since the last tick. Cheap: a lock,
+            // a length, and one Arc clone.
+            let (idx, idx_frame, len_now) = {
+                let store = frames.lock().unwrap();
+                walk.grow(store.len());
+                let idx = walk.next_index();
+                (idx, Arc::clone(&store[idx]), store.len())
+            };
+            if len_now != frame_len {
+                frame_len = len_now;
+                buffer_bytes = frames.lock().unwrap().iter().map(|f| f.len() as u64).sum();
+                let mut status = stream_status.write().await;
+                status.walk_seconds = frame_len as f64 / fps;
+            }
+
             // The walk has no seam, so there is no pass to count. Measure elapsed playback in
             // clip-lengths instead: N loops means N clip durations, which keeps the existing
             // loop slider (and `0 == forever`) meaningful.
-            let current_loop = (frames_emitted / frame_len as u64) as u32;
+            let current_loop = (frames_emitted / frame_len.max(1) as u64) as u32;
             if max_loops > 0 && current_loop >= max_loops {
                 let mut status = stream_status.write().await;
                 status.current_loop = current_loop;
@@ -1045,12 +1150,11 @@ impl VideoProcessor {
             ticker.tick().await;
 
             let process_start = Instant::now();
-            let idx = walk.next_index();
 
-            // No clone: the store is shared and the decoder only needs to read these bytes.
-            // This used to copy the whole JPEG twice per tick — once for the camera and once
-            // for the preview — off a buffer that was already resident.
-            if decoder_stdin.write_all(&frames[idx]).await.is_err() {
+            // No copy of the JPEG itself: the store hands out an Arc and the decoder only
+            // reads these bytes. This used to clone the whole frame twice per tick — once
+            // for the camera and once for the preview — off a buffer already resident.
+            if decoder_stdin.write_all(&idx_frame).await.is_err() {
                 // The decoder exited (stop, or ffmpeg died). Nothing left to feed.
                 break;
             }
