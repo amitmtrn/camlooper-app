@@ -1,7 +1,6 @@
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner, toast } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -41,11 +40,10 @@ import { useTranslation, Trans } from "react-i18next";
 import { AdBanner } from "./components/AdBanner";
 import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { Stepper } from "./components/flow/Stepper";
-import { SUPPORTED_LANGUAGES } from "./i18n";
+import { SUPPORTED_LANGUAGES, loadLanguage } from "./i18n";
 import { cn } from "@/lib/utils";
 import { loadNaturalMotion, saveNaturalMotion } from "@/lib/playback-settings";
 
-const queryClient = new QueryClient();
 
 // Types for virtual camera
 interface VirtualCameraStatus {
@@ -1077,7 +1075,7 @@ function CamLooper() {
           </div>
           <div className="flex items-center gap-3">
             <Stepper current={stepIndex} steps={[t('stepper.golive'), t('stepper.record'), t('stepper.loop')]} />
-            <Select value={i18n.resolvedLanguage} onValueChange={(lng) => i18n.changeLanguage(lng)}>
+            <Select value={i18n.resolvedLanguage} onValueChange={(lng) => void loadLanguage(lng)}>
               <SelectTrigger className="h-9 w-auto gap-1" aria-label={t('language.label')}>
                 <Globe className="h-4 w-4" />
                 <SelectValue />
@@ -1616,13 +1614,11 @@ function CamLooper() {
 }
 
 const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <CamLooper />
-    </TooltipProvider>
-  </QueryClientProvider>
+  <TooltipProvider>
+    <Toaster />
+    <Sonner />
+    <CamLooper />
+  </TooltipProvider>
 );
 
 export default App;

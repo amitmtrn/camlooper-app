@@ -1,26 +1,19 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
-import LanguageDetector from "i18next-browser-languagedetector";
 import { invoke } from "@tauri-apps/api/core";
 
-import en from "./locales/en.json";
-import es from "./locales/es.json";
-import pt from "./locales/pt.json";
-import hi from "./locales/hi.json";
-import ar from "./locales/ar.json";
-import he from "./locales/he.json";
-import fr from "./locales/fr.json";
-import de from "./locales/de.json";
-import it from "./locales/it.json";
-import zh from "./locales/zh.json";
-import ja from "./locales/ja.json";
-import ko from "./locales/ko.json";
-import ru from "./locales/ru.json";
-import tr from "./locales/tr.json";
-import id from "./locales/id.json";
-import vi from "./locales/vi.json";
-import pl from "./locales/pl.json";
-import th from "./locales/th.json";
+/**
+ * Locale bundles, one lazy chunk each.
+ *
+ * These used to be eighteen static imports, so every user shipped and parsed all ~93 KB of
+ * translations to read one of them. `import.meta.glob` lets Vite emit a chunk per locale and
+ * we fetch only the active one (plus English as the fallback).
+ */
+const LOCALE_MODULES = import.meta.glob<{ default: Record<string, unknown> }>(
+  "./locales/*.json",
+);
+
+const localeLoader = (code: string) => LOCALE_MODULES[`./locales/${code}.json`];
 
 export const SUPPORTED_LANGUAGES = [
   { code: "en", label: "English" },
@@ -46,55 +39,91 @@ export const SUPPORTED_LANGUAGES = [
 export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]["code"];
 
 const LANGUAGE_STORAGE_KEY = "camlooper-lang";
+const SUPPORTED_CODES: ReadonlySet<string> = new Set(
+  SUPPORTED_LANGUAGES.map((l) => l.code),
+);
 
-// Must be read before init: the detector caches whatever it detects under this key, after
-// which an auto-detected default is indistinguishable from a language the user chose.
-const hadStoredLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) !== null;
+// Must be read before init: the detector used to cache whatever it detected under this key,
+// after which an auto-detected default was indistinguishable from a language the user chose.
+const storedLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+const hadStoredLanguage = storedLanguage !== null;
 
-i18n
-  .use(LanguageDetector)
-  .use(initReactI18next)
-  .init({
-    resources: {
-      en: { translation: en },
-      es: { translation: es },
-      pt: { translation: pt },
-      hi: { translation: hi },
-      ar: { translation: ar },
-      he: { translation: he },
-      fr: { translation: fr },
-      de: { translation: de },
-      it: { translation: it },
-      zh: { translation: zh },
-      ja: { translation: ja },
-      ko: { translation: ko },
-      ru: { translation: ru },
-      tr: { translation: tr },
-      id: { translation: id },
-      vi: { translation: vi },
-      pl: { translation: pl },
-      th: { translation: th },
-    },
-    fallbackLng: "en",
-    supportedLngs: SUPPORTED_LANGUAGES.map((l) => l.code),
-    // Match "en-US" → "en", "pt-BR" → "pt", etc.
-    load: "languageOnly",
-    nonExplicitSupportedLngs: true,
-    detection: {
-      order: ["localStorage", "navigator"],
-      lookupLocalStorage: LANGUAGE_STORAGE_KEY,
-      caches: ["localStorage"],
-    },
-    interpolation: { escapeValue: false }, // React already escapes
-  });
+/**
+ * Resolve the startup language without i18next's detector.
+ *
+ * The detector is gone because it decides the language *during* init, which is too late to
+ * know which bundle to load. This reproduces its configured order — localStorage, then
+ * navigator — including the "en-US" → "en" narrowing that `load: "languageOnly"` did.
+ */
+function detectLanguage(): string {
+  const candidates = [storedLanguage, ...(navigator.languages ?? [navigator.language])];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const base = raw.toLowerCase().split("-")[0];
+    if (SUPPORTED_CODES.has(base)) return base;
+  }
+  return "en";
+}
+
+async function loadBundle(code: string): Promise<Record<string, unknown> | null> {
+  const loader = localeLoader(code);
+  if (!loader) return null;
+  try {
+    return (await loader()).default;
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch a locale if it isn't loaded yet, then switch to it. */
+export async function loadLanguage(code: string): Promise<void> {
+  if (!i18n.hasResourceBundle(code, "translation")) {
+    const bundle = await loadBundle(code);
+    if (!bundle) return;
+    i18n.addResourceBundle(code, "translation", bundle, true, true);
+  }
+  await i18n.changeLanguage(code);
+}
 
 // Keep <html dir/lang> in sync with the active language (RTL for ar/he).
 const applyDir = (lng: string) => {
   document.documentElement.lang = lng;
   document.documentElement.dir = i18n.dir(lng);
 };
-applyDir(i18n.resolvedLanguage || i18n.language || "en");
-i18n.on("languageChanged", applyDir);
+
+/**
+ * Initialise i18next with only the languages actually needed.
+ *
+ * Awaited by main.tsx before the first render, so there is no flash of untranslated text.
+ */
+export async function initI18n(): Promise<void> {
+  const lng = detectLanguage();
+  const [active, fallback] = await Promise.all([
+    loadBundle(lng),
+    lng === "en" ? Promise.resolve(null) : loadBundle("en"),
+  ]);
+
+  const resources: Record<string, { translation: Record<string, unknown> }> = {};
+  if (active) resources[lng] = { translation: active };
+  if (fallback) resources.en = { translation: fallback };
+
+  await i18n.use(initReactI18next).init({
+    resources,
+    lng,
+    fallbackLng: "en",
+    supportedLngs: SUPPORTED_LANGUAGES.map((l) => l.code),
+    interpolation: { escapeValue: false }, // React already escapes
+  });
+
+  // The detector used to write this; keep the key populated so a chosen language persists.
+  i18n.on("languageChanged", (next) => {
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, next);
+    applyDir(next);
+  });
+  applyDir(i18n.resolvedLanguage || i18n.language || "en");
+
+  applyInstallerLanguage();
+}
 
 // Locales the Windows installer can be shown in — the subset of SUPPORTED_LANGUAGES that
 // Tauri ships NSIS translations for (see bundle.windows.nsis.languages in tauri.conf.json).
@@ -106,7 +135,8 @@ const INSTALLER_LANGUAGES: ReadonlySet<string> = new Set([
 // first launch prefer it over the locale detected above — the two differ whenever someone
 // installs in a language other than the one their OS is set to. Anything chosen later in
 // the app is cached under LANGUAGE_STORAGE_KEY and takes precedence from then on.
-if (!hadStoredLanguage) {
+function applyInstallerLanguage() {
+  if (hadStoredLanguage) return;
   invoke<string | null>("installer_language")
     .then((lng) => {
       if (!lng || lng === i18n.resolvedLanguage) return;
@@ -114,7 +144,7 @@ if (!hadStoredLanguage) {
       // must not override the OS locale — the app itself is still translated for them.
       const detected = i18n.resolvedLanguage;
       if (lng === "en" && detected && !INSTALLER_LANGUAGES.has(detected)) return;
-      void i18n.changeLanguage(lng);
+      void loadLanguage(lng);
     })
     .catch(() => {
       // Non-Windows, or no recorded choice: the detected locale already applies.
