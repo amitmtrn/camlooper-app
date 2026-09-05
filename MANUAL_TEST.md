@@ -89,6 +89,62 @@ enable raises a single UAC prompt to register the driver; that is by design.
 
 <!-- Newest entries first. -->
 
+### Aspect ratio: sources are letterboxed, not stretched
+_Added 2026-09-05 · All · single-ffmpeg pipeline_
+
+A clip whose shape does not match the selected output resolution now gets black
+bars instead of being distorted. This is most visible on clips recorded **in the
+app**, because the recorder captures 4:3 while the camera defaults to 16:9 — every
+one of those used to be stretched horizontally.
+
+**Setup:** a build, plus a 4:3 or vertical/portrait video (a phone clip is ideal).
+Output resolution left at 720p.
+
+**Steps:**
+1. Load the 4:3 or portrait clip and start the virtual camera.
+2. Open the camera in any consumer — Zoom's video preview, OBS, or on Linux
+   `ffplay /dev/video0`.
+3. Look at a circular or square object in the frame, or at any on-screen text.
+4. Switch the Resolution setting in Advanced to 1080p and repeat.
+
+**Expected:** the picture is centred with black bars on the left and right (or top
+and bottom for a portrait clip). Circles stay circular and faces are not widened.
+The bars are pure black and the same width on both sides. Nothing is cropped —
+the whole frame is visible.
+
+**Known gotchas:** black bars are the *fix*, not a regression — before this change
+the picture filled the frame by being stretched. A 16:9 source into a 16:9 camera
+has no bars at all, so test with something that is not 16:9.
+
+### Natural motion starts immediately
+_Added 2026-09-05 · All · incremental walk store_
+
+Natural motion used to decode the entire buffered window before playing anything.
+On a long clip that was seconds of "Preparing…". It now starts on about one
+second of video and fills the rest in behind playback.
+
+**Setup:** a build, natural motion ON, and a clip of at least 30 seconds. Watch the
+Advanced panel so the buffered-seconds readout is visible.
+
+**Steps:**
+1. Load the long clip and press Play. Start counting as you click.
+2. Watch the "Preparing…" badge.
+3. With the Advanced panel open, watch the buffered-seconds readout for the next
+   ~30 seconds while playback continues.
+4. Press Stop, then Play again on the same clip.
+
+**Expected:** the preview shows motion within a moment of clicking — the
+"Preparing…" badge appears only briefly rather than for seconds. Playback is
+smooth from the first frame and never stalls or jumps while the readout climbs.
+The readout rises as more of the clip is buffered and settles at either the clip
+length or the window cap. After Stop → Play the clip is decoded again, so the
+brief badge reappears; after Pause → Play it does not.
+
+**Known gotchas:** the walk cannot outrun the decoder by construction, so a stutter
+just after starting is not expected — if you see one, note the clip's resolution and
+frame rate. Stop deliberately frees the buffer (that is the memory fix), which is
+why only Stop → Play re-decodes.
+
 ### Natural motion (random-walk playback)
 _Added 2026-09-05 · All · `src-tauri/src/frame_walk.rs`_
 
@@ -248,4 +304,26 @@ _No feature-specific entries yet._
 
 <!-- Newest entries first. -->
 
-_No feature-specific entries yet._
+### The virtual camera reports itself unavailable
+_Added 2026-09-05 · macOS · sink restructure_
+
+macOS has no working virtual camera: the CMIO Camera Extension cannot load until
+the app is signed and notarised, and its frame receiver is still a stub. The app
+used to accept the toggle anyway — it logged every frame and slept — so the UI
+showed a running camera that no application could ever see.
+
+**Setup:** an unsigned macOS build.
+
+**Steps:**
+1. Load any video.
+2. Turn on the virtual camera.
+3. Open Zoom or Photo Booth and look at the camera list.
+
+**Expected:** an error appears saying the virtual camera is not available on this
+platform and that macOS needs a signed, notarised build. The toggle does not stay
+on. "CamLooper Virtual Camera" does not appear in the camera list — which was
+already true, but the app now says so instead of implying otherwise.
+
+**Known gotchas:** this is a deliberate change from silently pretending to work.
+Video loading, playback and the in-app preview are unaffected; only the camera
+output is refused. Recording still works.
