@@ -1,7 +1,7 @@
 # CamLooper
 
 <div align="center">
-  <img src="public/favicon.ico" alt="CamLooper Logo" width="80" height="80">
+  <img src="public/app-icon.png" alt="CamLooper Logo" width="80" height="80">
   
   **Transform any video recording into a seamless virtual camera**
   
