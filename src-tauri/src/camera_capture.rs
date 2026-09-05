@@ -175,13 +175,26 @@ async fn start_ffmpeg_process(app: AppHandle, record: bool, device_id: Option<St
         state.is_recording = false;
     }
 
-    // Output 2 (or 1 if not recording): MJPEG to stdout
-    args.extend(vec![
-        "-c:v".to_string(), "mjpeg".to_string(),
-        "-q:v".to_string(), "5".to_string(),
-        "-f".to_string(), "image2pipe".to_string(),
-        "-".to_string()
-    ]);
+    // Remaining outputs: the virtual-camera leg and the UI preview.
+    //
+    // The camera leg used to be absent here. Live frames were encoded to MJPEG for the UI,
+    // then handed to the virtual camera, which spawned a *second* ffmpeg to decode that same
+    // MJPEG straight back to raw — a full JPEG round trip on live video. Now one process
+    // feeds both, and on a raw-stdout sink the preview is derived from the frames Rust is
+    // already forwarding rather than encoded a second time.
+    let (sink, camera_geometry) = crate::virtual_camera::active_sink().await;
+    let geometry = camera_geometry.unwrap_or_else(|| {
+        let (w, h) = crate::virtual_camera::output_resolution();
+        crate::pipeline::Geometry { width: w, height: h, fps: 30 }
+    });
+    let camera_spec = crate::pipeline::PipelineSpec {
+        source: crate::pipeline::Source::Device { args: Vec::new() },
+        sink: sink.clone(),
+        geometry,
+        preview: Some(crate::pipeline::PreviewSpec::default()),
+        realtime: false,
+    };
+    args.extend(crate::pipeline::build_outputs(&camera_spec));
 
     println!("Spawning ffmpeg ({}) with args: {:?}", ffmpeg_path.display(), args);
     let mut cmd = tokio::process::Command::new(&ffmpeg_path);
@@ -201,39 +214,55 @@ async fn start_ffmpeg_process(app: AppHandle, record: bool, device_id: Option<St
 
     state.ffmpeg_stdin = Some(stdin);
 
+    let frame_bytes = sink.frame_bytes(&geometry);
+
     let task = tokio::spawn(async move {
         // Keep child alive as long as this task is alive
         let mut _child = child;
-        
-        let mut buffer = Vec::new();
+
+        // Raw-stdout sink (Windows softcam): stdout carries camera frames, and the preview
+        // is decimated out of the frames we are already forwarding.
+        if let Some(size) = frame_bytes {
+            let mut buf = vec![0u8; size];
+            let mut encoder = crate::preview::PreviewEncoder::new(
+                &geometry,
+                crate::pipeline::PreviewSpec::default(),
+            );
+            loop {
+                if stdout.read_exact(&mut buf).await.is_err() {
+                    break;
+                }
+                crate::virtual_camera::push_raw_frame(&buf).await.ok();
+                if let Some(jpeg) = encoder.sample(&buf) {
+                    let base64_frame = BASE64_STANDARD.encode(&jpeg);
+                    if let Ok(mut state) = CAPTURE_STATE.try_lock() {
+                        state.latest_frame = Some(base64_frame);
+                    }
+                }
+            }
+            println!("Camera capture task ended");
+            return;
+        }
+
+        // Device sink or preview-only: ffmpeg has already delivered the camera frames, so
+        // stdout is the preview MJPEG.
+        let mut reader = crate::preview::JpegStreamReader::new();
         let mut chunk = [0u8; 8192];
-        
+
         loop {
             match stdout.read(&mut chunk).await {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    buffer.extend_from_slice(&chunk[..n]);
-                    
-                    while let Some(start) = find_subsequence(&buffer, &[0xFF, 0xD8]) {
-                        if let Some(end) = find_subsequence(&buffer[start..], &[0xFF, 0xD9]) {
-                            let end_idx = start + end + 2;
-                            let jpeg_data = &buffer[start..end_idx];
-                            
-                            // Send directly to virtual camera
-                            let jpeg_vec = jpeg_data.to_vec();
-                            crate::virtual_camera::send_frame_to_virtual_camera(jpeg_vec).await.ok();
-                            
-                            let base64_frame = BASE64_STANDARD.encode(jpeg_data);
-                            
-                            // Store the latest frame instead of emitting
-                            if let Ok(mut state) = CAPTURE_STATE.try_lock() {
-                                state.latest_frame = Some(base64_frame);
-                            }
-                            
-                            buffer.drain(0..end_idx);
-                        } else {
-                            break;
+                    reader.extend(&chunk[..n]);
+
+                    while let Some(jpeg) = reader.next_frame() {
+                        let base64_frame = BASE64_STANDARD.encode(&jpeg);
+
+                        // Store the latest frame instead of emitting
+                        if let Ok(mut state) = CAPTURE_STATE.try_lock() {
+                            state.latest_frame = Some(base64_frame);
                         }
+                        crate::virtual_camera::note_frame_delivered().await;
                     }
                 },
                 Err(e) => {

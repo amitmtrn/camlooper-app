@@ -10,6 +10,11 @@ use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 use std::collections::VecDeque;
+use std::process::Stdio;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::pipeline::{self, Geometry, PipelineSpec, PreviewSpec, Source};
+use crate::preview::{JpegStreamReader, PreviewEncoder};
 
 static FRAME_QUEUE: Lazy<Arc<Mutex<VecDeque<FrameBatch>>>> = Lazy::new(|| Arc::new(Mutex::new(VecDeque::new())));
 
@@ -120,6 +125,9 @@ pub struct VideoProcessor {
 /// A clip decoded to JPEG frames, ready for random access.
 struct WalkBuffer {
     source: PathBuf,
+    /// Width the store was encoded at. Part of the cache key: the same clip decoded for a
+    /// 720p camera is the wrong store for a 1080p one.
+    width: u32,
     /// Shared so resuming a cached clip hands out a handle rather than copying ~70 MB.
     frames: Arc<Vec<Vec<u8>>>,
     /// The source ran past `WALK_WINDOW_SECS`, so `frames` holds only its opening window.
@@ -450,7 +458,8 @@ impl VideoProcessor {
 
             let fps = self.video_info.as_ref().map(|info| info.fps).unwrap_or(30.0);
             let width = self.video_info.as_ref().map(|info| info.width).unwrap_or(1920);
-            let height = self.video_info.as_ref().map(|info| info.height).unwrap_or(1080);
+            // Height is no longer needed: the pipeline derives it from the camera geometry.
+            let _ = &self.video_info;
 
             // Clear frame queue
             if let Ok(mut q) = FRAME_QUEUE.try_lock() {
@@ -471,10 +480,9 @@ impl VideoProcessor {
                         settings,
                         fps,
                         width,
-                        height,
                     ).await
                 } else {
-                    Self::process_video_frames(
+                    Self::run_loop_pipeline(
                         ffmpeg_path,
                         video_path,
                         is_streaming,
@@ -482,8 +490,6 @@ impl VideoProcessor {
                         performance_metrics,
                         settings,
                         fps,
-                        width,
-                        height,
                     ).await
                 };
 
@@ -546,7 +552,19 @@ impl VideoProcessor {
         self.performance_metrics.read().await.clone()
     }
 
-    async fn process_video_frames(
+    /// Straight-loop playback: one ffmpeg, from the source file to the camera.
+    ///
+    /// This used to be two processes. The producer decoded the clip, scaled it, and encoded
+    /// MJPEG; the sink decoded that MJPEG straight back to raw and handed it to the platform
+    /// camera. Nothing between those two steps needed a JPEG — it was only ever a way to
+    /// move frames between processes. Measured at 720p the encode cost ~8.2 ms of CPU per
+    /// frame and the decode ~4.7 ms, against ~2.0 ms to emit raw frames in one pass, and the
+    /// MJPEG stage re-subsampled chroma on the way through. So: one process, no JPEG on the
+    /// camera path, and a separate small preview leg for the UI.
+    ///
+    /// Looping happens inside ffmpeg via `-stream_loop` rather than by respawning the
+    /// process once per pass.
+    async fn run_loop_pipeline(
         ffmpeg_path: PathBuf,
         video_path: PathBuf,
         is_streaming: Arc<AtomicBool>,
@@ -554,204 +572,151 @@ impl VideoProcessor {
         performance_metrics: Arc<RwLock<PerformanceMetrics>>,
         settings: LoopSettings,
         target_fps: f64,
-        target_width: u32,
-        target_height: u32,
     ) -> Result<()> {
-        use std::time::{Duration, Instant};
-        use std::process::Stdio;
-        use tokio::io::AsyncReadExt;
+        use std::time::Instant;
 
-        let mut current_loop = 0u32;
-        let max_loops = settings.loop_count;
+        let fps = if target_fps.is_finite() && target_fps > 0.0 { target_fps } else { 30.0 };
+        let (sink, camera_geometry) = crate::virtual_camera::active_sink().await;
 
-        loop {
-            if !is_streaming.load(Ordering::Relaxed) {
-                break;
-            }
-            
-            // Check if we've reached the loop limit
-            if max_loops > 0 && current_loop >= max_loops {
-                break;
-            }
-            
-            // Render at the resolution the virtual camera will emit, so nothing has to be
-            // rescaled downstream. -2 keeps the height even, which yuv420p requires.
-            let (out_width, _out_height) = crate::virtual_camera::output_resolution();
+        // With the camera off the user is only previewing, so the pipeline still runs — it
+        // just has no camera leg. Fall back to the configured output size for the preview's
+        // aspect ratio.
+        let geometry = camera_geometry.unwrap_or_else(|| {
+            let (w, h) = crate::virtual_camera::output_resolution();
+            Geometry { width: w, height: h, fps: fps.round().max(1.0) as u32 }
+        });
 
-            // Process video file using external FFmpeg process
-            let args = vec![
-                "-re".to_string(), // Read at native frame rate
-                "-i".to_string(), video_path.to_string_lossy().to_string(),
-                "-vf".to_string(), format!("scale={}:-2", out_width),
-                "-c:v".to_string(), "mjpeg".to_string(),
-                "-q:v".to_string(), "5".to_string(),
-                "-f".to_string(), "image2pipe".to_string(),
-                "-".to_string()
-            ];
-            
-            let mut cmd = tokio::process::Command::new(&ffmpeg_path);
-            cmd.args(&args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-            let mut child = match cmd.spawn() {
-                Ok(child) => child,
-                Err(e) => {
-                    eprintln!("Failed to start ffmpeg ({}) for video processing: {}", ffmpeg_path.display(), e);
-                    break;
-                }
-            };
-            
-            let mut stdout = child.stdout.take().unwrap();
-            
-            let mut buffer = Vec::new();
-            let mut chunk = [0u8; 32768];
-            
-            let mut frame_count = 0u64;
-            let mut frames_processed = 0u64;
-            let mut last_fps_update = Instant::now();
-            let mut sequence_id = 0u64;
-            
-            let mut frame_batch = Vec::new();
-            const BATCH_SIZE: usize = 1;
-            
-            loop {
-                if !is_streaming.load(Ordering::Relaxed) {
-                    break;
-                }
-                
-                match stdout.read(&mut chunk).await {
-                    Ok(0) => break, // EOF, loop finishes
-                    Ok(n) => {
-                        buffer.extend_from_slice(&chunk[..n]);
-                        
-                        while let Some(start) = Self::find_subsequence(&buffer, &[0xFF, 0xD8]) {
-                            if let Some(end) = Self::find_subsequence(&buffer[start..], &[0xFF, 0xD9]) {
-                                let process_start = Instant::now();
-                                
-                                let end_idx = start + end + 2;
-                                let jpeg_data = buffer[start..end_idx].to_vec();
-                                let jpeg_size = jpeg_data.len();
-                                
-                                let timestamp = frame_count as f64 / target_fps;
-                                
-                                let video_frame = VideoFrame {
-                                    data: jpeg_data.clone(),
-                                    timestamp,
-                                    width: target_width,
-                                    height: target_height,
-                                };
-                                
-                                // Push directly to virtual camera (zero-overhead)
-                                crate::virtual_camera::send_frame_to_virtual_camera(jpeg_data).await.ok();
-                                
-                                frame_batch.push(video_frame);
-                                
-                                if frame_batch.len() >= BATCH_SIZE {
-                                    let batch = FrameBatch {
-                                        frames: frame_batch.clone(),
-                                        sequence_id,
-                                        total_frames: frame_batch.len(),
-                                    };
-                                    
-                                    // Drop the oldest queued batch rather than blocking
-                                    // when the preview isn't keeping up.
-                                    //
-                                    // This loop used to sleep until the webview drained
-                                    // the queue, which stalled the read of ffmpeg's
-                                    // stdout — and that read also feeds the virtual
-                                    // camera above. So a slow or backgrounded webview
-                                    // throttled the camera itself. WebView2 clamps timers
-                                    // for backgrounded windows, which is exactly what
-                                    // happens when the user switches to Zoom, so the
-                                    // preview stalled precisely when the camera mattered
-                                    // most. The preview may skip frames; the camera
-                                    // must not.
-                                    {
-                                        let mut q = FRAME_QUEUE.lock().await;
-                                        while q.len() >= 30 {
-                                            q.pop_front();
-                                        }
-                                        q.push_back(batch);
-                                    }
-                                    sequence_id += 1;
-                                    frame_batch.clear();
-                                }
-                                
-                                buffer.drain(0..end_idx);
-                                
-                                // Metrics update
-                                frames_processed += 1;
-                                frame_count += 1;
-                                
-                                let process_time = process_start.elapsed();
-                                
-                                {
-                                    let mut metrics = performance_metrics.write().await;
-                                    metrics.frames_processed = frames_processed;
-                                    metrics.average_encode_time = process_time.as_secs_f64() * 1000.0;
-                                    metrics.buffer_size = frame_batch.len();
-                                    metrics.memory_usage = (frame_batch.len() * jpeg_size) as u64;
-                                }
-                                
-                                {
-                                    let mut status = stream_status.write().await;
-                                    status.current_time = timestamp;
-                                    status.current_loop = current_loop;
-                                    status.buffer_health = 1.0;
-                                    
-                                    let now = Instant::now();
-                                    if now.duration_since(last_fps_update) >= Duration::from_secs(1) {
-                                        status.actual_fps = frames_processed as f64 / now.duration_since(last_fps_update).as_secs_f64();
-                                        last_fps_update = now;
-                                        frames_processed = 0;
-                                    }
-                                }
-                                
-                            } else {
-                                break;
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to read from ffmpeg stdout: {}", e);
+        // loop_count 0 means "forever"; otherwise -stream_loop counts *additional* passes.
+        let stream_loop = if settings.loop_count == 0 {
+            -1
+        } else {
+            settings.loop_count.saturating_sub(1) as i32
+        };
+
+        let spec = PipelineSpec {
+            source: Source::File {
+                path: video_path.to_string_lossy().into_owned(),
+                stream_loop,
+            },
+            sink: sink.clone(),
+            geometry,
+            preview: Some(PreviewSpec::default()),
+            realtime: true,
+        };
+
+        let mut cmd = tokio::process::Command::new(&ffmpeg_path);
+        cmd.args(pipeline::build(&spec))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow!("Failed to start ffmpeg ({}): {}", ffmpeg_path.display(), e))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open the pipeline's stdout"))?;
+
+        let started = Instant::now();
+        let frame_bytes = sink.frame_bytes(&geometry);
+
+        // Progress is derived from elapsed time rather than counted frames: on a device sink
+        // the pixels go straight from ffmpeg to /dev/videoN and Rust never sees them.
+        let clip_seconds = {
+            let status = stream_status.read().await;
+            if status.duration > 0.0 { status.duration } else { 0.0 }
+        };
+
+        match frame_bytes {
+            // Push sink (Windows softcam): raw frames come back on stdout and Rust forwards
+            // them into shared memory. One reusable buffer, so there is no per-frame
+            // allocation on the camera path at all.
+            Some(size) => {
+                let mut buf = vec![0u8; size];
+                let mut frames = 0u64;
+                let mut preview = PreviewEncoder::new(&geometry, PreviewSpec::default());
+
+                loop {
+                    if !is_streaming.load(Ordering::Relaxed) {
                         break;
                     }
+                    if let Err(e) = stdout.read_exact(&mut buf).await {
+                        // EOF is the normal end of a bounded loop count.
+                        if is_streaming.load(Ordering::Relaxed) {
+                            println!("Pipeline ended: {}", e);
+                        }
+                        break;
+                    }
+
+                    if let Err(e) = crate::virtual_camera::push_raw_frame(&buf).await {
+                        eprintln!("Failed to deliver frame to the virtual camera: {}", e);
+                        break;
+                    }
+                    frames += 1;
+
+                    // Derived from the frame we already have in hand, at a fraction of the
+                    // camera's rate. Never blocks the loop above.
+                    preview.maybe_publish(&buf);
+
+                    Self::publish_progress(
+                        &stream_status,
+                        &performance_metrics,
+                        started,
+                        fps,
+                        clip_seconds,
+                        settings.loop_count,
+                        frames,
+                    )
+                    .await;
                 }
             }
-            
-            // Wait for child process to finish if it hasn't
-            let _ = child.wait().await;
-            
-            // Clean up remaining frames
-            if !frame_batch.is_empty() {
-                let batch = FrameBatch {
-                    frames: frame_batch.clone(),
-                    sequence_id,
-                    total_frames: frame_batch.len(),
-                };
-                let mut q = FRAME_QUEUE.lock().await;
-                q.push_back(batch);
-                frame_batch.clear();
-            }
-            
-            current_loop += 1;
-            
-            // Update loop status
-            {
-                let mut status = stream_status.write().await;
-                status.current_loop = current_loop;
-                if max_loops > 0 && current_loop >= max_loops {
-                    status.is_playing = false;
+            // Device sink (Linux v4l2) or preview-only: ffmpeg owns the camera leg, and
+            // stdout carries the preview MJPEG.
+            None => {
+                let mut reader = JpegStreamReader::new();
+                let mut chunk = vec![0u8; 32 * 1024];
+                let mut frames = 0u64;
+
+                loop {
+                    if !is_streaming.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let n = match stdout.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("Failed to read the preview stream: {}", e);
+                            break;
+                        }
+                    };
+                    reader.extend(&chunk[..n]);
+                    while let Some(jpeg) = reader.next_frame() {
+                        publish_preview_frame(jpeg);
+                        frames += 1;
+                    }
+
+                    Self::publish_progress(
+                        &stream_status,
+                        &performance_metrics,
+                        started,
+                        fps,
+                        clip_seconds,
+                        settings.loop_count,
+                        (started.elapsed().as_secs_f64() * fps) as u64,
+                    )
+                    .await;
+                    let _ = frames;
                 }
             }
-            
-            println!("Completed loop {} of {}", current_loop, if max_loops == 0 { "∞".to_string() } else { max_loops.to_string() });
         }
-        
-        // Reset streaming state
+
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+
         {
             let mut status = stream_status.write().await;
             status.is_playing = false;
@@ -759,38 +724,75 @@ impl VideoProcessor {
             status.buffer_health = 0.0;
             status.actual_fps = 0.0;
         }
-        
+
         println!("Video streaming completed");
         Ok(())
     }
+
+    /// Shared status bookkeeping for the loop pipeline.
+    ///
+    /// `frames` is the camera's frame count where we have one and an estimate from elapsed
+    /// time where we do not; either way it only drives the UI.
+    async fn publish_progress(
+        stream_status: &Arc<RwLock<StreamStatus>>,
+        performance_metrics: &Arc<RwLock<PerformanceMetrics>>,
+        started: std::time::Instant,
+        fps: f64,
+        clip_seconds: f64,
+        loop_count: u32,
+        frames: u64,
+    ) {
+        let elapsed = started.elapsed().as_secs_f64();
+        let (current_time, current_loop) = if clip_seconds > 0.0 {
+            (elapsed % clip_seconds, (elapsed / clip_seconds) as u32)
+        } else {
+            (elapsed, 0)
+        };
+
+        {
+            let mut status = stream_status.write().await;
+            status.current_time = current_time;
+            status.current_loop = current_loop;
+            status.buffer_health = 1.0;
+            if elapsed > 0.0 {
+                status.actual_fps = frames as f64 / elapsed;
+            }
+            if loop_count > 0 && current_loop >= loop_count {
+                status.is_playing = false;
+            }
+        }
+        {
+            let mut metrics = performance_metrics.write().await;
+            metrics.frames_processed = frames;
+            metrics.buffer_size = 0;
+        }
+        let _ = fps;
+    }
     
-    /// Decode a clip to JPEG frames at the streaming size, capped to the natural-motion
-    /// window. Same ffmpeg invocation the straight-loop path uses, minus `-re`: there's no
-    /// reason to decode at playback speed when the frames are going straight into a buffer.
+    /// Decode a clip into the natural-motion frame store.
+    ///
+    /// The store is MJPEG because the walk needs random access and raw frames cannot be held
+    /// (1800 frames at 720p is ~4.7 GB). See [`crate::pipeline::mjpeg_store_args`] for why
+    /// the quality settings are what they are — briefly: this is the one place the app's own
+    /// encoding quality is visible in the output, so it is near-transparent and, unlike
+    /// before, pins a pixel format.
+    ///
+    /// `store_width` is clamped to the source width by the caller: encoding an upscaled
+    /// frame pays JPEG rates for invented detail.
     async fn decode_walk_frames(
         ffmpeg_path: &PathBuf,
         video_path: &PathBuf,
+        store_width: u32,
         max_frames: usize,
         is_streaming: &Arc<AtomicBool>,
     ) -> Result<(Vec<Vec<u8>>, bool)> {
-        use std::process::Stdio;
-        use tokio::io::AsyncReadExt;
-
-        // Same resolution as the streaming path, for the same reason.
-        let (out_width, _out_height) = crate::virtual_camera::output_resolution();
-
-        let args = vec![
-            "-i".to_string(), video_path.to_string_lossy().to_string(),
-            "-vf".to_string(), format!("scale={}:-2", out_width),
-            // Enforce the window at the source rather than decoding a long file in full and
-            // throwing most of it away. One frame beyond the cap, so that "we hit the cap"
-            // and "the clip is exactly the window long" stay distinguishable.
-            "-frames:v".to_string(), max_frames.saturating_add(1).to_string(),
-            "-c:v".to_string(), "mjpeg".to_string(),
-            "-q:v".to_string(), "5".to_string(),
-            "-f".to_string(), "image2pipe".to_string(),
-            "-".to_string(),
-        ];
+        // One frame beyond the cap, so that "we hit the cap" and "the clip is exactly the
+        // window long" stay distinguishable.
+        let args = pipeline::mjpeg_store_args(
+            video_path,
+            store_width,
+            max_frames.saturating_add(1),
+        );
 
         let mut cmd = tokio::process::Command::new(ffmpeg_path);
         cmd.args(&args)
@@ -805,7 +807,7 @@ impl VideoProcessor {
         let mut stdout = child.stdout.take().unwrap();
 
         let mut frames: Vec<Vec<u8>> = Vec::new();
-        let mut buffer = Vec::new();
+        let mut reader = JpegStreamReader::new();
         let mut chunk = [0u8; 65536];
         let mut frame_bytes = 0usize;
         let mut hit_byte_cap = false;
@@ -820,20 +822,14 @@ impl VideoProcessor {
             match stdout.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    buffer.extend_from_slice(&chunk[..n]);
+                    reader.extend(&chunk[..n]);
 
-                    while let Some(start) = Self::find_subsequence(&buffer, &[0xFF, 0xD8]) {
-                        if let Some(end) = Self::find_subsequence(&buffer[start..], &[0xFF, 0xD9]) {
-                            let end_idx = start + end + 2;
-                            frame_bytes += end_idx - start;
-                            frames.push(buffer[start..end_idx].to_vec());
-                            buffer.drain(0..end_idx);
+                    while let Some(frame) = reader.next_frame() {
+                        frame_bytes += frame.len();
+                        frames.push(frame);
 
-                            if frame_bytes >= MAX_WALK_BYTES {
-                                hit_byte_cap = true;
-                                break;
-                            }
-                        } else {
+                        if frame_bytes >= MAX_WALK_BYTES {
+                            hit_byte_cap = true;
                             break;
                         }
                     }
@@ -881,8 +877,7 @@ impl VideoProcessor {
         performance_metrics: Arc<RwLock<PerformanceMetrics>>,
         settings: LoopSettings,
         target_fps: f64,
-        target_width: u32,
-        target_height: u32,
+        source_width: u32,
     ) -> Result<()> {
         use std::time::{Duration, Instant};
 
@@ -890,12 +885,23 @@ impl VideoProcessor {
         let fps = if target_fps.is_finite() && target_fps > 0.0 { target_fps } else { 30.0 };
         let max_frames = ((WALK_WINDOW_SECS * fps).ceil() as usize).max(1);
 
-        // Reuse the buffer when the same clip is already decoded, so pause/resume doesn't
-        // pay the decode wait again.
+        // Never store more detail than the source has. Encoding at the camera's width
+        // upscales a small clip and then pays JPEG rates for the invented pixels — at 1080p
+        // output from a 640-wide source that is roughly 9x the bytes for no extra detail.
+        // The decoder scales up once, later, with lanczos.
+        let (out_width, _) = crate::virtual_camera::output_resolution();
+        let store_width = source_width.min(out_width).max(2) & !1; // even: yuvj422p needs it
+
+        // Reuse the buffer when the same clip is already decoded at the same size, so
+        // pause/resume doesn't pay the decode wait again. The width has to be part of the
+        // key: changing the Resolution setting mid-session used to silently reuse a store
+        // decoded for the old size.
         let cached = {
             let cache = walk_cache.read().await;
             match cache.as_ref() {
-                Some(buf) if buf.source == video_path => Some((Arc::clone(&buf.frames), buf.truncated)),
+                Some(buf) if buf.source == video_path && buf.width == store_width => {
+                    Some((Arc::clone(&buf.frames), buf.truncated))
+                }
                 _ => None,
             }
         };
@@ -910,6 +916,7 @@ impl VideoProcessor {
                 let decoded = Self::decode_walk_frames(
                     &ffmpeg_path,
                     &video_path,
+                    store_width,
                     max_frames,
                     &is_streaming,
                 ).await;
@@ -931,6 +938,7 @@ impl VideoProcessor {
                 let decoded_frames = Arc::new(decoded_frames);
                 *walk_cache.write().await = Some(WalkBuffer {
                     source: video_path.clone(),
+                    width: store_width,
                     frames: Arc::clone(&decoded_frames),
                     truncated,
                 });
@@ -955,6 +963,51 @@ impl VideoProcessor {
             status.walk_seconds = frame_len as f64 / fps;
         }
 
+        // The walk hands out JPEGs from its in-memory store, but the camera takes raw
+        // frames, so this path keeps a decoder. Unlike the old design that is not a round
+        // trip: the MJPEG here is the random-access *store* the walk needs, and the decoder
+        // is the only thing turning it back into pixels — there is no re-encode.
+        let (sink, camera_geometry) = crate::virtual_camera::active_sink().await;
+        let geometry = camera_geometry.unwrap_or_else(|| {
+            let (w, h) = crate::virtual_camera::output_resolution();
+            Geometry { width: w, height: h, fps: fps.round().max(1.0) as u32 }
+        });
+        let decoder_spec = PipelineSpec {
+            source: Source::MjpegStdin { fps: geometry.fps },
+            sink: sink.clone(),
+            geometry,
+            preview: Some(PreviewSpec::default()),
+            // The ticker below is the clock; -re here would fight it.
+            realtime: false,
+        };
+
+        let mut decoder = {
+            let mut cmd = tokio::process::Command::new(&ffmpeg_path);
+            cmd.args(pipeline::build(&decoder_spec))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            cmd.spawn()
+                .map_err(|e| anyhow!("Failed to start the walk decoder ({}): {}", ffmpeg_path.display(), e))?
+        };
+        let mut decoder_stdin = decoder
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open the walk decoder's stdin"))?;
+        let decoder_stdout = decoder
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open the walk decoder's stdout"))?;
+        let reader = Self::spawn_sink_reader(
+            decoder_stdout,
+            sink.clone(),
+            geometry,
+            is_streaming.clone(),
+        );
+
         // Vary the walk per run so restarting a clip doesn't replay the same wander.
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -972,7 +1025,6 @@ impl VideoProcessor {
         let mut frames_emitted = 0u64;
         let mut frames_processed = 0u64;
         let mut last_fps_update = Instant::now();
-        let mut sequence_id = 0u64;
 
         loop {
             if !is_streaming.load(Ordering::Relaxed) {
@@ -994,30 +1046,14 @@ impl VideoProcessor {
 
             let process_start = Instant::now();
             let idx = walk.next_index();
-            let jpeg = frames[idx].clone();
 
-            crate::virtual_camera::send_frame_to_virtual_camera(jpeg.clone()).await.ok();
-
-            // Preview only. Never block the camera clock waiting for the UI to drain this —
-            // drop the oldest frame instead, so a slow frontend costs preview smoothness
-            // rather than stalling the feed.
-            {
-                let mut q = FRAME_QUEUE.lock().await;
-                while q.len() >= 30 {
-                    q.pop_front();
-                }
-                q.push_back(FrameBatch {
-                    frames: vec![VideoFrame {
-                        data: jpeg,
-                        timestamp: idx as f64 / fps,
-                        width: target_width,
-                        height: target_height,
-                    }],
-                    sequence_id,
-                    total_frames: 1,
-                });
+            // No clone: the store is shared and the decoder only needs to read these bytes.
+            // This used to copy the whole JPEG twice per tick — once for the camera and once
+            // for the preview — off a buffer that was already resident.
+            if decoder_stdin.write_all(&frames[idx]).await.is_err() {
+                // The decoder exited (stop, or ffmpeg died). Nothing left to feed.
+                break;
             }
-            sequence_id += 1;
 
             frames_emitted += 1;
             frames_processed += 1;
@@ -1048,6 +1084,13 @@ impl VideoProcessor {
             }
         }
 
+        // Closing stdin gives ffmpeg EOF, which lets the reader below finish rather than
+        // block forever on a decoder that will never produce another frame.
+        drop(decoder_stdin);
+        let _ = reader.await;
+        let _ = decoder.kill().await;
+        let _ = decoder.wait().await;
+
         {
             let mut status = stream_status.write().await;
             status.is_playing = false;
@@ -1060,8 +1103,48 @@ impl VideoProcessor {
         Ok(())
     }
 
-    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack.windows(needle.len()).position(|window| window == needle)
+    /// Drain a pipeline's stdout for the lifetime of a stream.
+    ///
+    /// Which stream that is depends on the sink: a push sink (Windows softcam) sends raw
+    /// frames back for Rust to forward, while a device sink has already delivered the frames
+    /// itself and sends only the preview MJPEG.
+    fn spawn_sink_reader(
+        mut stdout: tokio::process::ChildStdout,
+        sink: pipeline::CameraSink,
+        geometry: Geometry,
+        is_streaming: Arc<AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            match sink.frame_bytes(&geometry) {
+                Some(size) => {
+                    let mut buf = vec![0u8; size];
+                    let mut preview = PreviewEncoder::new(&geometry, PreviewSpec::default());
+                    while is_streaming.load(Ordering::Relaxed) {
+                        if stdout.read_exact(&mut buf).await.is_err() {
+                            break;
+                        }
+                        if crate::virtual_camera::push_raw_frame(&buf).await.is_err() {
+                            break;
+                        }
+                        preview.maybe_publish(&buf);
+                    }
+                }
+                None => {
+                    let mut reader = JpegStreamReader::new();
+                    let mut chunk = vec![0u8; 32 * 1024];
+                    while is_streaming.load(Ordering::Relaxed) {
+                        match stdout.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => reader.extend(&chunk[..n]),
+                        }
+                        while let Some(jpeg) = reader.next_frame() {
+                            publish_preview_frame(jpeg);
+                            crate::virtual_camera::note_frame_delivered().await;
+                        }
+                    }
+                }
+            }
+        })
     }
 
     #[cfg(windows)]
@@ -1151,6 +1234,26 @@ pub async fn get_video_frame_batch() -> Result<Option<FrameBatch>, String> {
     }
 }
 
+/// Hand a preview JPEG to the UI.
+///
+/// `try_lock`, and drop the frame on contention: the preview must never be able to slow the
+/// pipeline that is feeding the camera. Only the newest frame is worth anything to a viewer,
+/// so the queue is capped and drops from the front.
+pub fn publish_preview_frame(jpeg: Vec<u8>) {
+    if let Ok(mut q) = FRAME_QUEUE.try_lock() {
+        while q.len() >= 4 {
+            q.pop_front();
+        }
+        let len = jpeg.len();
+        q.push_back(FrameBatch {
+            frames: vec![VideoFrame { data: jpeg, timestamp: 0.0, width: 0, height: 0 }],
+            sequence_id: 0,
+            total_frames: 1,
+        });
+        let _ = len;
+    }
+}
+
 // Global video processor instance
 static VIDEO_PROCESSOR: Lazy<Arc<Mutex<VideoProcessor>>> = 
     Lazy::new(|| Arc::new(Mutex::new(VideoProcessor::new())));
@@ -1205,66 +1308,6 @@ pub async fn init_video_processor(app_handle: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- find_subsequence ---------------------------------------------------------
-    //
-    // This drives MJPEG frame extraction from the ffmpeg pipe: the stream loop locates a
-    // JPEG SOI (FF D8) and the following EOI (FF D9) to carve one frame out of a rolling
-    // buffer. An off-by-one here corrupts every frame the virtual camera emits, so the
-    // offsets are worth pinning down exactly.
-
-    #[test]
-    fn find_subsequence_reports_the_first_match_offset() {
-        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"abc"), Some(0));
-        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"cd"), Some(2));
-        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"f"), Some(5));
-    }
-
-    #[test]
-    fn find_subsequence_returns_none_when_absent() {
-        assert_eq!(VideoProcessor::find_subsequence(b"abcdef", b"xyz"), None);
-        // A needle longer than the haystack must not panic -- the read loop hits this on
-        // every partial chunk before a full JPEG has arrived.
-        assert_eq!(VideoProcessor::find_subsequence(b"ab", b"abcdef"), None);
-        assert_eq!(VideoProcessor::find_subsequence(b"", b"a"), None);
-    }
-
-    #[test]
-    fn find_subsequence_finds_the_earliest_of_several_matches() {
-        assert_eq!(VideoProcessor::find_subsequence(b"aXbXcX", b"X"), Some(1));
-    }
-
-    /// Reproduces the exact call the stream loop makes, including the relative-offset
-    /// arithmetic (`end_idx = start + end + 2`) that turns the EOI position -- which is
-    /// searched from `start`, not from 0 -- back into an absolute index.
-    #[test]
-    fn jpeg_markers_carve_out_the_expected_frame() {
-        let mut buffer = vec![0x00, 0x11, 0x22];        // trailing bytes of a previous frame
-        buffer.extend_from_slice(&[0xFF, 0xD8]);        // SOI
-        buffer.extend_from_slice(&[0x41, 0x42, 0x43]);  // payload
-        buffer.extend_from_slice(&[0xFF, 0xD9]);        // EOI
-        buffer.extend_from_slice(&[0x99, 0x98]);        // start of the next frame
-
-        let start = VideoProcessor::find_subsequence(&buffer, &[0xFF, 0xD8]).unwrap();
-        let end = VideoProcessor::find_subsequence(&buffer[start..], &[0xFF, 0xD9]).unwrap();
-        let end_idx = start + end + 2;
-        let jpeg = &buffer[start..end_idx];
-
-        assert_eq!(start, 3);
-        assert_eq!(end, 5, "EOI offset is relative to start, not to the buffer");
-        assert_eq!(jpeg, &[0xFF, 0xD8, 0x41, 0x42, 0x43, 0xFF, 0xD9]);
-        assert_eq!(jpeg.first(), Some(&0xFF));
-        assert_eq!(jpeg.last(), Some(&0xD9), "the EOI marker must be included");
-    }
-
-    /// Documents a real precondition rather than a wish: `slice::windows(0)` panics, so
-    /// the needle must never be empty. Both call sites pass 2-byte literals, which is why
-    /// this is safe today -- it stops being safe the moment a caller derives one at runtime.
-    #[test]
-    #[should_panic(expected = "window size must be non-zero")]
-    fn find_subsequence_rejects_an_empty_needle() {
-        let _ = VideoProcessor::find_subsequence(b"abc", b"");
-    }
 
     // --- create_estimated_video_info ----------------------------------------------
     //
@@ -1361,7 +1404,7 @@ mod tests {
 
         // Cap well above the clip: everything is buffered, nothing is claimed truncated.
         let (all, truncated) =
-            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 1_000, &streaming)
+            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 320, 1_000, &streaming)
                 .await
                 .unwrap();
         assert_eq!(all.len(), 120, "expected every frame of a 4s 30fps clip");
@@ -1375,7 +1418,7 @@ mod tests {
 
         // Cap below the clip: buffer stops exactly at the cap and says so.
         let (capped, truncated) =
-            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 50, &streaming)
+            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 320, 50, &streaming)
                 .await
                 .unwrap();
         assert_eq!(capped.len(), 50);
@@ -1384,7 +1427,7 @@ mod tests {
         // Cap exactly equal to the clip: the boundary that used to report a false
         // truncation, which would have shown the user a warning about a clip that fit.
         let (exact, truncated) =
-            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 120, &streaming)
+            VideoProcessor::decode_walk_frames(&ffmpeg, &fixture, 320, 120, &streaming)
                 .await
                 .unwrap();
         assert_eq!(exact.len(), 120);
@@ -1407,6 +1450,7 @@ mod tests {
         let result = VideoProcessor::decode_walk_frames(
             &PathBuf::from("ffmpeg"),
             &junk,
+            320,
             100,
             &Arc::new(AtomicBool::new(true)),
         ).await;

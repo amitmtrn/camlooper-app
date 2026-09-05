@@ -526,6 +526,7 @@ dependencies = [
  "ffmpeg-next",
  "futures-util",
  "image",
+ "memchr",
  "mp4",
  "once_cell",
  "serde",

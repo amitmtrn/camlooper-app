@@ -1,9 +1,8 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod virtual_camera;
 mod frame_walk;
-// Exercised only by its own tests until the runtime paths move onto it.
-#[allow(dead_code)]
 mod pipeline;
+mod preview;
 mod video_processor;
 mod video_upload;
 mod camera_capture;

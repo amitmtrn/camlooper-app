@@ -181,6 +181,14 @@ impl PipelineSpec {
 
 /// Build the full argument vector for a pipeline.
 pub fn build(spec: &PipelineSpec) -> Vec<String> {
+    let mut a = build_input(spec);
+    a.extend(build_outputs(spec));
+    a
+}
+
+/// Global flags plus the input. Split out so a caller that assembles its own input — the
+/// live-camera path, which has device flags of its own — can still share the output legs.
+fn build_input(spec: &PipelineSpec) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
@@ -217,6 +225,12 @@ pub fn build(spec: &PipelineSpec) -> Vec<String> {
         }
     }
 
+    a
+}
+
+/// The camera leg and, where stdout is free for it, the preview leg.
+pub fn build_outputs(spec: &PipelineSpec) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
     let fit = fit_filter(&spec.geometry);
 
     match &spec.sink {
@@ -573,3 +587,4 @@ mod tests {
         assert!(joined(&s).contains("-f v4l2 -i /dev/video1"));
     }
 }
+
