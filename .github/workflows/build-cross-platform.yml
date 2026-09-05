@@ -37,8 +37,53 @@ jobs:
     - run: npm run lint
     - run: npm run build
 
-  build:
+  # Rust unit tests. Runs on both OSes because a large share of the Windows-specific
+  # code (softcam registration, the DirectShow paths) is `#[cfg(windows)]` and therefore
+  # invisible to a Linux-only run -- which is exactly where the risky code lives.
+  #
+  # The frontend has to be built first: tauri_build::build() resolves `frontendDist`
+  # (../dist) from tauri.conf.json, and dist/ is gitignored.
+  test:
     needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            name: linux
+          - platform: windows-latest
+            name: windows
+    runs-on: ${{ matrix.platform }}
+    name: test (${{ matrix.name }})
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: src-tauri
+
+    # Linux needs the GTK/WebKit headers for the tauri crate to compile at all.
+    - name: Install Linux build dependencies
+      if: matrix.platform == 'ubuntu-22.04'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+          librsvg2-dev patchelf libavcodec-dev libavformat-dev libavutil-dev \
+          libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev
+
+    - run: npm ci
+    - run: npm run build
+
+    - name: cargo test
+      working-directory: src-tauri
+      run: cargo test --lib -- --nocapture
+
+  build:
+    needs: [check, test]
     permissions:
       # tauri-action needs write access to create/upload the Release on tag runs.
       # Fork PRs get a read-only token regardless, so this is a no-op there.

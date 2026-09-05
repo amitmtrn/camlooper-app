@@ -205,7 +205,6 @@ async fn upload_and_load_video(filename: String, file_data: String) -> Result<Vi
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_fs::init())
         .invoke_handler({
             #[cfg(target_os = "windows")]
             {

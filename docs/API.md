@@ -59,6 +59,9 @@ interface StreamStatus {
   target_fps: number;
   frames_dropped: number;
   average_processing_time: number;
+  is_preparing: boolean;   // natural motion is buffering the clip; no frames out yet
+  walk_truncated: boolean; // the clip outran the buffer, so the walk covers only its start
+  walk_seconds: number;    // seconds of footage the walk covers; 0 outside natural motion
 }
 
 interface PerformanceMetrics {
@@ -403,21 +406,45 @@ Configures video looping behavior.
 ```typescript
 async function set_video_loop_settings(
   loop_count: number,
-  auto_start: boolean
+  auto_start: boolean,
+  natural_motion: boolean
 ): Promise<void>
 ```
 
 **Parameters:**
 - `loop_count`: Number of loops (1-10, or 10 for infinite)
 - `auto_start`: Whether to start automatically after loading
+- `natural_motion`: Walk the frame index at random instead of replaying the clip in
+  order (default `true`). See below.
 
 **Example:**
 ```typescript
 await invoke('set_video_loop_settings', {
   loopCount: 5,
-  autoStart: true
+  autoStart: true,
+  naturalMotion: true
 });
 ```
+
+**Natural motion**
+
+A straight loop plays `1 2 3 … N, 1 2 3 …`, which cuts at the seam every pass and repeats
+on a period equal to the clip length. Natural motion buffers the clip and walks its frame
+index instead — `1 2 3 2 1 2 1 2 3 4 3 …` — stepping one frame at a time so motion stays
+continuous, and reversing direction at random so there is no seam and no repeat.
+Implemented in `src-tauri/src/frame_walk.rs`.
+
+Two consequences for callers:
+
+- Playback cannot start until the clip is buffered. `StreamStatus.is_preparing` is true
+  for that gap; the buffer is then cached, so pause/resume on the same clip is instant.
+- The buffer is capped at 60 seconds or 96 MB, whichever comes first. Past that,
+  `walk_truncated` is set and the walk covers only `walk_seconds` of the clip.
+
+Settings are read when streaming starts, so toggling this mid-stream applies on the next
+start. With natural motion on there is no pass to count, so `current_loop` reports elapsed
+playback in clip-lengths — `loop_count` still means "N clip durations", and `0` still means
+forever.
 
 ### get_video_info
 

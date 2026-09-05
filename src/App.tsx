@@ -39,9 +39,11 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation, Trans } from "react-i18next";
 import { AdBanner } from "./components/AdBanner";
+import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { Stepper } from "./components/flow/Stepper";
 import { SUPPORTED_LANGUAGES } from "./i18n";
 import { cn } from "@/lib/utils";
+import { loadNaturalMotion, saveNaturalMotion } from "@/lib/playback-settings";
 
 const queryClient = new QueryClient();
 
@@ -77,6 +79,51 @@ interface VideoFrame {
   timestamp: number;
   width: number;
   height: number;
+  /// Populated once when the frame arrives; see frameToDataUrl.
+  url?: string;
+}
+
+/**
+ * Output resolutions offered in Advanced → Virtual Camera.
+ *
+ * The source render and the camera output are always the same size, so nothing is
+ * rescaled in between. They used to disagree — the video was rendered 640px wide and the
+ * camera advertised 1920x1080 — so every frame was upscaled from 360p to 1080p, which
+ * added no detail and cost more per frame than everything else combined.
+ *
+ * 720p is the default: it is what conferencing apps request, and it halves the per-frame
+ * copy compared to 1080p.
+ */
+const RESOLUTIONS = {
+  '480p': { width: 854, height: 480, label: '480p (854×480)' },
+  '720p': { width: 1280, height: 720, label: '720p (1280×720)' },
+  '1080p': { width: 1920, height: 1080, label: '1080p (1920×1080)' },
+} as const;
+
+type ResolutionKey = keyof typeof RESOLUTIONS;
+
+const RESOLUTION_STORAGE_KEY = 'camlooper.outputResolution';
+const DEFAULT_RESOLUTION: ResolutionKey = '720p';
+
+function loadStoredResolution(): ResolutionKey {
+  const stored = localStorage.getItem(RESOLUTION_STORAGE_KEY);
+  return stored && stored in RESOLUTIONS ? (stored as ResolutionKey) : DEFAULT_RESOLUTION;
+}
+
+/// Turn a frame's JPEG bytes into a data URL.
+///
+/// Chunked on purpose. The obvious `String.fromCharCode(...bytes)` spreads every byte as a
+/// separate function argument, which is slow and throws `RangeError: Maximum call stack
+/// size exceeded` once a frame exceeds the engine's argument limit — reachable as soon as
+/// the output resolution goes above the old hardcoded 640px.
+function frameToDataUrl(frame: VideoFrame): string {
+  const bytes = frame.data;
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.slice(i, i + CHUNK) as unknown as number[]);
+  }
+  return `data:image/jpeg;base64,${btoa(binary)}`;
 }
 
 interface FrameBatch {
@@ -96,6 +143,12 @@ interface StreamStatus {
   target_fps: number;
   frames_dropped: number;
   average_processing_time: number;
+  /** Natural motion buffers the clip before it can start. True for that gap. */
+  is_preparing: boolean;
+  /** The clip outran the natural-motion window, so the walk covers only its opening. */
+  walk_truncated: boolean;
+  /** Seconds of footage the walk is actually covering. 0 when not in natural motion. */
+  walk_seconds: number;
 }
 
 interface PerformanceMetrics {
@@ -137,12 +190,15 @@ class SimpleFrameHolder {
 function CamLooper() {
   const { t, i18n } = useTranslation();
 
+  useWelcomePopup();
+
   // Keep the document title in sync with the active language.
   useEffect(() => {
     document.title = t("app.title");
   }, [t, i18n.language]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isVirtualCamActive, setIsVirtualCamActive] = useState(false);
+  const [outputResolution, setOutputResolution] = useState<ResolutionKey>(loadStoredResolution);
   const [loopCount, setLoopCount] = useState([10]);
   const [selectedVideo, setSelectedVideo] = useState<File | null>(null);
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
@@ -163,7 +219,10 @@ function CamLooper() {
     actual_fps: 0.0,
     target_fps: 30.0,
     frames_dropped: 0,
-    average_processing_time: 0.0
+    average_processing_time: 0.0,
+    is_preparing: false,
+    walk_truncated: false,
+    walk_seconds: 0
   });
   const [performanceMetrics, setPerformanceMetrics] = useState<PerformanceMetrics>({
     frames_processed: 0,
@@ -178,6 +237,7 @@ function CamLooper() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [autoStart, setAutoStart] = useState(true);
+  const [naturalMotion, setNaturalMotion] = useState(loadNaturalMotion);
   const [isLoopingComplete, setIsLoopingComplete] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
@@ -478,21 +538,27 @@ function CamLooper() {
             const batch = await invoke<FrameBatch | null>('get_video_frame_batch');
             
             if (batch) {
-              console.log('Received video frame batch:', batch.frames.length, 'frames, sequence:', batch.sequence_id);
-              
+              // Deliberately not logging per batch. console.log is monkey-patched into
+              // React state further up (addLog does a setLogs spread plus a setTimeout),
+              // so a log here fired on every single frame and cost more than the frame
+              // handling itself.
+
               // Handle test event
               if (batch.sequence_id === 999) {
                 console.log('Received test event - event system is working!');
                 continue;
               }
-              
+
               // Display frames immediately as they arrive
               if (batch.frames.length > 0) {
                 // Use the latest frame from the batch
                 const latestFrame = batch.frames[batch.frames.length - 1];
                 frameHolder.current.setLatestFrame(latestFrame);
-                setCurrentFrame(latestFrame);
-                // console.log('Displaying frame with timestamp:', latestFrame.timestamp);
+                // Build the data URL once, here, rather than in the render body: the
+                // conversion is O(frame size) and rendering re-runs for unrelated state
+                // changes too. String.fromCharCode(...arr) also spreads the whole frame as
+                // function arguments, which throws RangeError once frames get bigger.
+                setCurrentFrame({ ...latestFrame, url: frameToDataUrl(latestFrame) });
               }
               
               // Fast poll if we got frames
@@ -553,10 +619,26 @@ function CamLooper() {
     if (videoInfo) {
       invoke('set_video_loop_settings', {
         loopCount: loopCount[0] === 10 ? 0 : loopCount[0],
-        autoStart
+        autoStart,
+        naturalMotion
       }).catch(console.error);
     }
-  }, [loopCount, autoStart, videoInfo]);
+  }, [loopCount, autoStart, naturalMotion, videoInfo]);
+
+  // Persist the output resolution and tell the backend about it. This runs on mount too,
+  // so the video processor renders at the right size even when playback starts before the
+  // virtual camera is switched on.
+  useEffect(() => {
+    localStorage.setItem(RESOLUTION_STORAGE_KEY, outputResolution);
+    const { width, height } = RESOLUTIONS[outputResolution];
+    invoke('set_output_resolution', { width, height }).catch(console.error);
+  }, [outputResolution]);
+
+  // Natural motion is the only playback setting with a default that fights the user, so it
+  // is the only one that persists.
+  useEffect(() => {
+    saveNaturalMotion(naturalMotion);
+  }, [naturalMotion]);
 
   // Count up the elapsed recording time while a live recording is in progress.
   useEffect(() => {
@@ -670,9 +752,10 @@ function CamLooper() {
         // 'ready' → fall through and start the camera.
       }
 
+      const { width, height } = RESOLUTIONS[outputResolution];
       const config: VirtualCameraConfig = {
-        width: 1920,
-        height: 1080,
+        width,
+        height,
         fps: 30,
         camera_name: "CamLooper Virtual Camera"
       };
@@ -1032,7 +1115,7 @@ function CamLooper() {
             </div>
           ) : currentFrame ? (
             <img
-              src={`data:image/jpeg;base64,${btoa(String.fromCharCode(...currentFrame.data))}`}
+              src={currentFrame.url ?? frameToDataUrl(currentFrame)}
               alt={t('stage.altLoop')}
               className="w-full h-full object-cover"
             />
@@ -1071,6 +1154,17 @@ function CamLooper() {
                   current: streamStatus.current_loop + 1,
                   total: streamStatus.loop_count === 10 || streamStatus.loop_count === 0 ? '∞' : streamStatus.loop_count,
                 })}
+              </Badge>
+            </div>
+          )}
+
+          {/* Natural motion buffers the clip before the first frame goes out, so say so
+              rather than leaving the stage looking hung. */}
+          {streamStatus.is_preparing && (
+            <div className="absolute top-3 left-3">
+              <Badge variant="secondary" className="bg-primary/20 text-primary border-primary/40">
+                <Loader2 className="h-3 w-3 me-1 animate-spin" />
+                {t('advanced.naturalMotionPreparing')}
               </Badge>
             </div>
           )}
@@ -1304,6 +1398,33 @@ function CamLooper() {
                       />
                     </div>
 
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm">{t('advanced.resolution', 'Resolution')}</span>
+                        <Select
+                          value={outputResolution}
+                          onValueChange={(v) => setOutputResolution(v as ResolutionKey)}
+                          disabled={isVirtualCamActive || isVirtualCamLoading}
+                        >
+                          <SelectTrigger className="w-[170px] h-8 text-sm">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {(Object.keys(RESOLUTIONS) as ResolutionKey[]).map((key) => (
+                              <SelectItem key={key} value={key}>
+                                {RESOLUTIONS[key].label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {isVirtualCamActive && (
+                        <p className="text-xs text-muted-foreground">
+                          {t('advanced.resolutionLocked', 'Turn the camera off to change this.')}
+                        </p>
+                      )}
+                    </div>
+
                     <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">
                       {t('advanced.statusLine', { status: virtualCameraStatus.is_active ? t('advanced.statusReady') : t('advanced.statusDisabled') })}
                       {virtualCameraStatus.is_active && (
@@ -1339,6 +1460,28 @@ function CamLooper() {
                       <span>{t('advanced.once')}</span>
                       <span>{t('advanced.forever')}</span>
                     </div>
+                  </div>
+
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm">{t('advanced.naturalMotion')}</div>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {t('advanced.naturalMotionDesc')}
+                      </p>
+                      {isPlaying && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {t('advanced.naturalMotionRestart')}
+                        </p>
+                      )}
+                      {streamStatus.walk_truncated && (
+                        <p className="text-xs text-amber-500 mt-1">
+                          {t('advanced.naturalMotionTruncated', {
+                            seconds: Math.round(streamStatus.walk_seconds)
+                          })}
+                        </p>
+                      )}
+                    </div>
+                    <Switch checked={naturalMotion} onCheckedChange={setNaturalMotion} />
                   </div>
 
                   <div className="flex items-center justify-between">
