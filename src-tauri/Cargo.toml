@@ -26,7 +26,7 @@ tauri-build = { version = "2", features = [] }
 # `cfg(any(debug_assertions, feature = "devtools"))`, so `tauri dev` keeps its
 # inspector either way. Naming the feature here is what forced it into release
 # builds as well.
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
