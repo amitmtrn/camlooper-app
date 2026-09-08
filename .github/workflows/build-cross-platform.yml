@@ -75,7 +75,33 @@ jobs:
           librsvg2-dev patchelf libavcodec-dev libavformat-dev libavutil-dev \
           libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev
 
+    - name: Set up MSBuild (Windows)
+      if: matrix.platform == 'windows-latest'
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build softcam driver (Windows)
+      if: matrix.platform == 'windows-latest'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        # Build the softcam DirectShow virtual-camera DLL from source (MIT).
+        git clone --depth 1 --branch v1.8.1 https://github.com/tshino/softcam.git "$env:RUNNER_TEMP\softcam"
+        msbuild "$env:RUNNER_TEMP\softcam\softcam.sln" /t:softcam /p:Configuration=Release /p:Platform=x64 /m
+        $dll = Get-ChildItem -Path "$env:RUNNER_TEMP\softcam" -Recurse -Filter softcam.dll |
+          Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+        if (-not $dll) { throw "softcam.dll not found after build" }
+        New-Item -ItemType Directory -Force -Path "src-tauri\drivers\windows" | Out-Null
+        Copy-Item $dll.FullName "src-tauri\drivers\windows\softcam.dll" -Force
+        Copy-Item "$env:RUNNER_TEMP\softcam\LICENSE" "src-tauri\drivers\windows\softcam-LICENSE.txt" -Force
+        Write-Host "Bundled softcam.dll from $($dll.FullName)"
+
     - run: npm ci
+
+    - name: Fetch Windows FFmpeg
+      if: matrix.platform == 'windows-latest'
+      shell: bash
+      run: npm run fetch:win-ffmpeg
+
     - run: npm run build
 
     - name: cargo test
