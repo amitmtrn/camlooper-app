@@ -9,12 +9,12 @@
   [![Platform Support](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue.svg)](https://github.com/amitmtrn/camlooper-app/releases)
   [![Version](https://img.shields.io/github/v/release/amitmtrn/camlooper-app)](https://github.com/amitmtrn/camlooper-app/releases)
   
-  [Download](https://camlooper.com/download) • [Documentation](docs/) • [Report Bug](https://github.com/amitmtrn/camlooper-app/issues) • [Feature Request](https://github.com/amitmtrn/camlooper-app/issues)
+  [Website](https://camlooper.com) • [Download](https://camlooper.com/download) • [Documentation](docs/) • [Report Bug](https://github.com/amitmtrn/camlooper-app/issues) • [Feature Request](https://github.com/amitmtrn/camlooper-app/issues)
 </div>
 
 ## 🎥 What is CamLooper?
 
-CamLooper is a powerful desktop application that transforms any video recording into a virtual camera that works seamlessly with video conferencing applications, streaming software, and any application that supports camera input. Perfect for content creators, streamers, educators, and professionals who want to use pre-recorded content in their video calls or streams.
+[CamLooper](https://camlooper.com) is a powerful desktop application that transforms any video recording into a virtual camera that works seamlessly with video conferencing applications, streaming software, and any application that supports camera input. Perfect for content creators, streamers, educators, and professionals who want to use pre-recorded content in their video calls or streams.
 
 ### ✨ Key Features
 
@@ -29,7 +29,7 @@ CamLooper is a powerful desktop application that transforms any video recording 
 
 ## 🚀 Quick Start
 
-1. **Download** CamLooper from [camlooper.com/download](https://camlooper.com/download) or the [releases page](https://github.com/amitmtrn/camlooper-app/releases)
+1. **Download** CamLooper from [camlooper.com](https://camlooper.com) (or [camlooper.com/download](https://camlooper.com/download)) / [releases page](https://github.com/amitmtrn/camlooper-app/releases)
 2. **Install** the application on your system
 3. **Upload** your video file using drag-and-drop
 4. **Configure** loop settings and quality options
@@ -53,7 +53,7 @@ CamLooper is a powerful desktop application that transforms any video recording 
 
 ### Download & Install
 
-Grab the installer for your platform from the
+Grab the installer for your platform from [camlooper.com](https://camlooper.com) or the
 [releases page](https://github.com/amitmtrn/camlooper-app/releases).
 
 > ⚠️ **Unsigned builds:** the published installers are not yet code-signed. Windows
@@ -275,6 +275,7 @@ CamLooper is built on top of amazing open-source technologies:
 ## 📞 Support
 
 ### Getting Help
+- 🌐 **Website**: Visit [camlooper.com](https://camlooper.com) for official downloads and updates
 - 📖 **Documentation**: Start with our comprehensive [documentation](docs/)
 - 🐛 **Issues**: Report bugs on [GitHub Issues](https://github.com/amitmtrn/camlooper-app/issues)
 - 💬 **Discussions**: Ask questions in [GitHub Discussions](https://github.com/amitmtrn/camlooper-app/discussions)
@@ -292,8 +293,9 @@ Join our growing community of content creators, developers, and enthusiasts:
 <div align="center">
   <p>Made with ❤️ by the CamLooper community</p>
   <p>
+    <a href="https://camlooper.com">🌐 Website</a> •
+    <a href="https://camlooper.com/download">📥 Download Latest</a> •
     <a href="https://github.com/amitmtrn/camlooper-app/stargazers">⭐ Star us on GitHub</a> •
-    <a href="https://github.com/amitmtrn/camlooper-app/releases">📥 Download Latest</a> •
     <a href="docs/">📚 Read Docs</a>
   </p>
 </div>

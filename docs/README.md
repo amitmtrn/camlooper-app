@@ -15,7 +15,7 @@ Welcome to CamLooper - the ultimate virtual camera solution for content creators
 
 ## Overview
 
-CamLooper is a Tauri-based desktop application that transforms any video recording into a seamless virtual camera. It enables you to loop videos infinitely and use them as camera sources in video conferencing applications, streaming software, and any application that supports camera input.
+[CamLooper](https://camlooper.com) is a Tauri-based desktop application that transforms any video recording into a seamless virtual camera. It enables you to loop videos infinitely and use them as camera sources in video conferencing applications, streaming software, and any application that supports camera input.
 
 ### Key Benefits
 
@@ -27,7 +27,7 @@ CamLooper is a Tauri-based desktop application that transforms any video recordi
 
 ## Quick Start
 
-1. **Download** CamLooper from our [releases page](../../releases)
+1. **Download** CamLooper from [camlooper.com](https://camlooper.com) or our [releases page](../../releases)
 2. **Install** the application on your system
 3. **Upload** your video file using drag-and-drop
 4. **Configure** loop settings and quality options
@@ -149,6 +149,7 @@ Supported formats: MP4, AVI, MOV, MKV, WMV, FLV
 ## Support
 
 ### Getting Help
+- **Website**: Visit [camlooper.com](https://camlooper.com) for downloads and details
 - **Documentation**: Start with this documentation set
 - **Troubleshooting**: Check [troubleshooting guide](TROUBLESHOOTING.md)
 - **Issues**: Report bugs on [GitHub Issues](../../issues)
