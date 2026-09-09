@@ -236,16 +236,38 @@ jobs:
         $ErrorActionPreference = "Stop"
         npx tauri build --target ${{ matrix.target }} -c src-tauri/tauri.store.conf.json
         $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-        $dir = "src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
-        $src = Join-Path $dir "camlooper_${v}_x64-setup.exe"
-        $dst = Join-Path $dir "camlooper_${v}_x64-store-setup.exe"
-        Copy-Item $src $dst -Force
-        Write-Host "Microsoft Store installer: $dst"
+        $nsisDir = "src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
+        $srcExe = Join-Path $nsisDir "camlooper_${v}_x64-setup.exe"
+        $dstExe = Join-Path $nsisDir "camlooper_${v}_x64-store-setup.exe"
+        if (Test-Path $srcExe) {
+          Copy-Item $srcExe $dstExe -Force
+          Write-Host "Microsoft Store EXE installer: $dstExe"
+        }
+        $msiDir = "src-tauri/target/${{ matrix.target }}/release/bundle/msi"
+        $srcMsi = Get-ChildItem -Path $msiDir -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($srcMsi) {
+          $dstMsi = Join-Path $msiDir "camlooper_${v}_x64-store.msi"
+          Copy-Item $srcMsi.FullName $dstMsi -Force
+          Write-Host "Microsoft Store MSI installer: $dstMsi"
+        }
+
+    - name: Package Microsoft Store MSIX (Windows)
+      if: matrix.platform == 'windows-latest'
+      shell: pwsh
+      env:
+        MS_STORE_PACKAGE_NAME: ${{ secrets.MS_STORE_PACKAGE_NAME || vars.MS_STORE_PACKAGE_NAME || 'CamLooper' }}
+        MS_STORE_PUBLISHER_ID: ${{ secrets.MS_STORE_PUBLISHER_ID || vars.MS_STORE_PUBLISHER_ID || 'CN=CamLooper' }}
+        MS_STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.MS_STORE_PUBLISHER_DISPLAY_NAME || vars.MS_STORE_PUBLISHER_DISPLAY_NAME || 'CamLooper' }}
+      run: |
+        pwsh ./scripts/package-msix.ps1 -Target ${{ matrix.target }}
 
     - name: Upload Microsoft Store installer (Windows)
       if: matrix.platform == 'windows-latest'
       uses: actions/upload-artifact@v4
       with:
         name: camlooper-windows-store
-        path: src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-store-setup.exe
+        path: |
+          src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-store-setup.exe
+          src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+          src-tauri/target/${{ matrix.target }}/release/bundle/msix/*.msix
         if-no-files-found: error
