@@ -99,11 +99,12 @@ if (Test-Path $ffmpegSrc) {
 # 5. Copy Store Icons to Assets/
 $iconsDir = Join-Path $rootDir "src-tauri/icons"
 $requiredIcons = @(
-    @{ Src = "StoreLogo.png";       Dst = "StoreLogo.png" },
-    @{ Src = "Square150x150Logo.png"; Dst = "Square150x150Logo.png" },
-    @{ Src = "Square44x44Logo.png";   Dst = "Square44x44Logo.png" },
-    @{ Src = "Square310x310Logo.png"; Dst = "Square310x310Logo.png" },
-    @{ Src = "Square71x71Logo.png";   Dst = "Square71x71Logo.png" }
+    @{ Src = "StoreLogo.png";         Dst = "StoreLogo.png" },
+    @{ Src = "Square150x150Logo.png";   Dst = "Square150x150Logo.png" },
+    @{ Src = "Square44x44Logo.png";     Dst = "Square44x44Logo.png" },
+    @{ Src = "Square310x310Logo.png";   Dst = "Square310x310Logo.png" },
+    @{ Src = "Square71x71Logo.png";     Dst = "Square71x71Logo.png" },
+    @{ Src = "Wide310x150Logo.png";     Dst = "Wide310x150Logo.png" }
 )
 
 foreach ($icon in $requiredIcons) {
@@ -155,7 +156,10 @@ $manifestContent = @"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">
-        <uap:DefaultTile Square310x310Logo="Assets\Square310x310Logo.png" />
+        <uap:DefaultTile
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png"
+          Wide310x150Logo="Assets\Wide310x150Logo.png" />
       </uap:VisualElements>
     </Application>
   </Applications>
