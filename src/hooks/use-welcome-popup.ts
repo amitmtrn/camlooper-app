@@ -12,12 +12,17 @@ import {
  * Opens the welcome ad page in the user's default browser shortly after launch, at most
  * once every WELCOME_POPUP_MIN_INTERVAL_MS. The last-shown time is persisted so the
  * throttle survives restarts — someone reopening the app all afternoon sees it once.
+ *
+ * `enabled` is whether the window has actually been shown (see use-window-shown.ts): when the
+ * app is started hidden by "start at login", the timer only begins once the user opens the
+ * window, so a login never opens a browser tab by itself.
  */
-export function useWelcomePopup() {
+export function useWelcomePopup(enabled: boolean) {
   const { i18n } = useTranslation();
   const startedRef = useRef(false);
 
   useEffect(() => {
+    if (!enabled) return;
     // Opening a browser tab on every Vite restart makes the app unpleasant to develop.
     if (!import.meta.env.PROD) return;
 
@@ -51,5 +56,5 @@ export function useWelcomePopup() {
 
     return () => clearTimeout(timeoutId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [enabled]);
 }

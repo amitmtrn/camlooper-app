@@ -18,7 +18,8 @@
         "minWidth": 900,
         "minHeight": 560,
         "resizable": false,
-        "maximizable": false
+        "maximizable": false,
+        "visible": false
       }
     ],
     "security": {
@@ -75,7 +76,7 @@
     },
     "linux": {
       "deb": {
-        "depends": ["v4l2loopback-dkms", "dkms", "ffmpeg"],
+        "depends": ["v4l2loopback-dkms", "dkms", "ffmpeg", "libayatana-appindicator3-1 | libappindicator3-1"],
         "files": {
           "/etc/modules-load.d/camlooper-v4l2loopback.conf": "linux/modules-load.d/camlooper-v4l2loopback.conf",
           "/etc/modprobe.d/camlooper-v4l2loopback.conf": "linux/modprobe.d/camlooper-v4l2loopback.conf"
@@ -84,7 +85,7 @@
         "postRemoveScript": "linux/postrm"
       },
       "rpm": {
-        "depends": ["v4l2loopback-dkms", "dkms", "ffmpeg"],
+        "depends": ["v4l2loopback-dkms", "dkms", "ffmpeg", "libappindicator-gtk3"],
         "files": {
           "/etc/modules-load.d/camlooper-v4l2loopback.conf": "linux/modules-load.d/camlooper-v4l2loopback.conf",
           "/etc/modprobe.d/camlooper-v4l2loopback.conf": "linux/modprobe.d/camlooper-v4l2loopback.conf"

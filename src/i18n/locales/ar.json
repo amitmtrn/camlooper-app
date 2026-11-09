@@ -113,5 +113,56 @@
   "ad": {
     "title": "إعلان",
     "dismiss": "إغلاق الإعلان"
+  },
+  "remote": {
+    "title": "التحكم من الهاتف",
+    "badgeConnected": "متصل",
+    "badgeOffline": "غير متصل",
+    "badgeLinking": "جارٍ الربط…",
+    "networkNote": "لا يتصل CamLooper بالإنترنت إلا بعد ربط هاتف.",
+    "unlinkedDesc": "اربط هاتفك لبدء مكالمة Zoom أو Teams أو Meet على هذا الكمبيوتر من أي مكان: يفتح CamLooper الاجتماع ويشغّل الحلقة الخاصة بك.",
+    "codeLabel": "أدخل الرمز المكوّن من 6 أرقام المعروض في CamLooper Remote على هاتفك",
+    "codeAria": "رمز الاقتران",
+    "linkButton": "ربط",
+    "linking": "جارٍ الربط…",
+    "errors": {
+      "code_invalid": "هذا الرمز لم يعمل. تنتهي صلاحية الرموز بعد خمس دقائق — احصل على رمز جديد من هاتفك.",
+      "rate_limited": "محاولات كثيرة جدًا. انتظر لحظة ثم حاول مرة أخرى.",
+      "network": "تعذّر الوصول إلى خدمة CamLooper البعيدة. تحقق من اتصالك وحاول مرة أخرى.",
+      "server": "حدث خطأ من جانبنا. حاول مرة أخرى بعد دقيقة.",
+      "disabled": "التحكم من الهاتف غير متاح في هذا الإصدار."
+    },
+    "linkedWith": "مرتبط بـ {{phone}}",
+    "linkedDesc": "أرسل رابط اجتماع من هاتفك وسيفتحه هذا الكمبيوتر.",
+    "unlink": "إلغاء ربط الهاتف",
+    "relink": "ربط هاتف آخر",
+    "cancel": "إلغاء",
+    "yourPhone": "هاتفك",
+    "autostartLabel": "تشغيل CamLooper عند تسجيل الدخول",
+    "autostartDesc": "يبدأ مخفيًا في شريط النظام حتى يتمكن هاتفك من الوصول إليه دائمًا.",
+    "trayHint": "ما دام هناك هاتف مرتبط، يبقى CamLooper يعمل في شريط النظام عند إغلاق النافذة.",
+    "toastLinkedTitle": "تم الربط بـ {{phone}}",
+    "toastLinkedDesc": "سيبدأ CamLooper عند تسجيل الدخول وينتظر في شريط النظام، جاهزًا للاجتماعات المرسلة من هاتفك.",
+    "toastAutostartFailed": "تم الربط، لكن تعذّر تفعيل التشغيل عند تسجيل الدخول. يمكنك تفعيله من متقدم ← التحكم من الهاتف.",
+    "openingMeeting": "جارٍ فتح اجتماع {{app}} من {{phone}}",
+    "openFailedTitle": "تعذّر فتح رابط الاجتماع",
+    "noLoopHintTitle": "لا توجد حلقة محمّلة",
+    "noLoopHintDesc": "سجّل مقطعًا أو حمّله حتى يتمكن CamLooper من تشغيل الكاميرا عند وصول اجتماع.",
+    "rejectedTitle": "تم تجاهل رابط من هاتفك",
+    "rejectedDesc": "تُقبل فقط روابط https إلى Zoom أو Microsoft Teams أو Google Meet.",
+    "unlinkedByPhoneTitle": "تم إلغاء ربط الهاتف",
+    "unlinkedByPhoneDesc": "لم يعد هذا الكمبيوتر مرتبطًا بأي هاتف وتوقف عن الاتصال بالإنترنت.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "فيديو"
+    }
+  },
+  "tray": {
+    "show": "إظهار CamLooper",
+    "link": "ربط هاتف…",
+    "autostart": "التشغيل عند تسجيل الدخول",
+    "quit": "إنهاء"
   }
 }

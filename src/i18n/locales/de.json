@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - Präsent bleiben, Privatsphäre wahren" },
-  "topbar": { "tagline": "Erscheine im Unterricht präsent und wahre deine Privatsphäre – nimm einen kurzen Clip auf und spiele ihn als Kamera in Schleife ab." },
-  "language": { "label": "Sprache" },
-  "stepper": { "golive": "Live gehen", "record": "Aufnehmen", "loop": "Schleife" },
+  "app": {
+    "title": "CamLooper - Präsent bleiben, Privatsphäre wahren"
+  },
+  "topbar": {
+    "tagline": "Erscheine im Unterricht präsent und wahre deine Privatsphäre – nimm einen kurzen Clip auf und spiele ihn als Kamera in Schleife ab."
+  },
+  "language": {
+    "label": "Sprache"
+  },
+  "stepper": {
+    "golive": "Live gehen",
+    "record": "Aufnehmen",
+    "loop": "Schleife"
+  },
   "stage": {
     "startingCamera": "Kamera wird gestartet…",
     "altLive": "Live-Kamera",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "Nicht unterstütztes Videoformat. Bitte wähle eine MP4-, MOV-, WebM-, MKV- oder AVI-Datei.",
     "uploadFailed": "Video-Upload fehlgeschlagen. Bitte versuche es erneut."
   },
-  "ad": { "title": "Werbung", "dismiss": "Werbung schließen" }
+  "ad": {
+    "title": "Werbung",
+    "dismiss": "Werbung schließen"
+  },
+  "remote": {
+    "title": "Handy-Fernbedienung",
+    "badgeConnected": "Verbunden",
+    "badgeOffline": "Offline",
+    "badgeLinking": "Wird verknüpft…",
+    "networkNote": "CamLooper verbindet sich erst mit dem Internet, nachdem du ein Handy verknüpft hast.",
+    "unlinkedDesc": "Verknüpfe dein Handy, um von überall einen Zoom-, Teams- oder Meet-Anruf auf diesem Computer zu starten: CamLooper öffnet das Meeting und schaltet deine Schleife ein.",
+    "codeLabel": "Gib den 6-stelligen Code ein, den CamLooper Remote auf deinem Handy anzeigt",
+    "codeAria": "Kopplungscode",
+    "linkButton": "Verknüpfen",
+    "linking": "Wird verknüpft…",
+    "errors": {
+      "code_invalid": "Dieser Code hat nicht funktioniert. Codes laufen nach fünf Minuten ab – hol dir auf dem Handy einen neuen.",
+      "rate_limited": "Zu viele Versuche. Warte kurz und versuche es erneut.",
+      "network": "Der CamLooper-Remote-Dienst ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.",
+      "server": "Auf unserer Seite ist etwas schiefgelaufen. Versuche es in einer Minute erneut.",
+      "disabled": "Die Handy-Fernbedienung ist in dieser Version nicht verfügbar."
+    },
+    "linkedWith": "Verknüpft mit {{phone}}",
+    "linkedDesc": "Sende einen Meeting-Link von deinem Handy und dieser Computer öffnet ihn.",
+    "unlink": "Handy trennen",
+    "relink": "Anderes Handy verknüpfen",
+    "cancel": "Abbrechen",
+    "yourPhone": "deinem Handy",
+    "autostartLabel": "CamLooper bei der Anmeldung starten",
+    "autostartDesc": "Startet versteckt im Infobereich, damit dein Handy es jederzeit erreichen kann.",
+    "trayHint": "Solange ein Handy verknüpft ist, läuft CamLooper nach dem Schließen des Fensters im Infobereich weiter.",
+    "toastLinkedTitle": "Verknüpft mit {{phone}}",
+    "toastLinkedDesc": "CamLooper startet bei der Anmeldung und wartet im Infobereich auf Meetings von deinem Handy.",
+    "toastAutostartFailed": "Verknüpft, aber der Autostart konnte nicht aktiviert werden. Du kannst ihn unter Erweitert → Handy-Fernbedienung einschalten.",
+    "openingMeeting": "{{app}}-Meeting von {{phone}} wird geöffnet",
+    "openFailedTitle": "Meeting-Link konnte nicht geöffnet werden",
+    "noLoopHintTitle": "Keine Schleife geladen",
+    "noLoopHintDesc": "Nimm einen Clip auf oder lade einen, damit CamLooper deine Kamera einschalten kann, wenn ein Meeting eintrifft.",
+    "rejectedTitle": "Ein Link von deinem Handy wurde ignoriert",
+    "rejectedDesc": "Es werden nur https-Links zu Zoom, Microsoft Teams oder Google Meet akzeptiert.",
+    "unlinkedByPhoneTitle": "Handy getrennt",
+    "unlinkedByPhoneDesc": "Dieser Computer ist mit keinem Handy mehr verknüpft und verbindet sich nicht mehr mit dem Internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "Video"
+    }
+  },
+  "tray": {
+    "show": "CamLooper anzeigen",
+    "link": "Handy verknüpfen…",
+    "autostart": "Bei der Anmeldung starten",
+    "quit": "Beenden"
+  }
 }

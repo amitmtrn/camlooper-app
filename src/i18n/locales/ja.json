@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - 出席しながらプライバシーを守る" },
-  "topbar": { "tagline": "プライバシーを守りながら授業で出席しているように見せる——短いクリップを録画し、カメラとしてループ再生します。" },
-  "language": { "label": "言語" },
-  "stepper": { "golive": "ライブ開始", "record": "録画", "loop": "ループ" },
+  "app": {
+    "title": "CamLooper - 出席しながらプライバシーを守る"
+  },
+  "topbar": {
+    "tagline": "プライバシーを守りながら授業で出席しているように見せる——短いクリップを録画し、カメラとしてループ再生します。"
+  },
+  "language": {
+    "label": "言語"
+  },
+  "stepper": {
+    "golive": "ライブ開始",
+    "record": "録画",
+    "loop": "ループ"
+  },
   "stage": {
     "startingCamera": "カメラを起動中…",
     "altLive": "ライブカメラ",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "対応していない動画形式です。MP4、MOV、WebM、MKV、AVI のいずれかのファイルを選んでください。",
     "uploadFailed": "動画のアップロードに失敗しました。もう一度お試しください。"
   },
-  "ad": { "title": "広告", "dismiss": "広告を閉じる" }
+  "ad": {
+    "title": "広告",
+    "dismiss": "広告を閉じる"
+  },
+  "remote": {
+    "title": "スマホリモコン",
+    "badgeConnected": "接続中",
+    "badgeOffline": "オフライン",
+    "badgeLinking": "リンク中…",
+    "networkNote": "CamLooper がインターネットに接続するのは、スマホをリンクした後だけです。",
+    "unlinkedDesc": "スマホをリンクすると、どこからでもこのパソコンで Zoom・Teams・Meet の通話を始められます。CamLooper が会議を開き、ループをオンにします。",
+    "codeLabel": "スマホの CamLooper Remote に表示された 6 桁のコードを入力",
+    "codeAria": "ペアリングコード",
+    "linkButton": "リンク",
+    "linking": "リンク中…",
+    "errors": {
+      "code_invalid": "そのコードは使えませんでした。コードは 5 分で期限切れになります。スマホで新しいコードを取得してください。",
+      "rate_limited": "試行回数が多すぎます。少し待ってからやり直してください。",
+      "network": "CamLooper のリモートサービスに接続できません。接続を確認してやり直してください。",
+      "server": "こちら側で問題が発生しました。1 分後にやり直してください。",
+      "disabled": "このビルドではスマホリモコンを利用できません。"
+    },
+    "linkedWith": "{{phone}} とリンク済み",
+    "linkedDesc": "スマホから会議リンクを送ると、このパソコンがそれを開きます。",
+    "unlink": "スマホのリンクを解除",
+    "relink": "別のスマホをリンク",
+    "cancel": "キャンセル",
+    "yourPhone": "あなたのスマホ",
+    "autostartLabel": "ログイン時に CamLooper を起動",
+    "autostartDesc": "スマホからいつでも届くように、トレイに隠れた状態で起動します。",
+    "trayHint": "スマホがリンクされている間は、ウィンドウを閉じても CamLooper はトレイで動き続けます。",
+    "toastLinkedTitle": "{{phone}} とリンクしました",
+    "toastLinkedDesc": "CamLooper はログイン時に起動し、スマホから送られる会議に備えてトレイで待機します。",
+    "toastAutostartFailed": "リンクしましたが、ログイン時の起動を有効にできませんでした。「詳細設定 → スマホリモコン」でオンにできます。",
+    "openingMeeting": "{{phone}} からの {{app}} 会議を開いています",
+    "openFailedTitle": "会議リンクを開けませんでした",
+    "noLoopHintTitle": "ループが読み込まれていません",
+    "noLoopHintDesc": "会議が届いたときに CamLooper がカメラをオンにできるよう、クリップを録画または読み込んでください。",
+    "rejectedTitle": "スマホからのリンクを無視しました",
+    "rejectedDesc": "受け付けるのは Zoom・Microsoft Teams・Google Meet への https リンクだけです。",
+    "unlinkedByPhoneTitle": "スマホのリンクが解除されました",
+    "unlinkedByPhoneDesc": "このパソコンはスマホとリンクされなくなり、インターネットへの接続を停止しました。",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "ビデオ"
+    }
+  },
+  "tray": {
+    "show": "CamLooper を表示",
+    "link": "スマホをリンク…",
+    "autostart": "ログイン時に起動",
+    "quit": "終了"
+  }
 }

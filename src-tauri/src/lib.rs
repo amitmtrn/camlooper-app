@@ -7,11 +7,14 @@ mod video_processor;
 mod video_upload;
 mod camera_capture;
 mod installer_language;
+mod remote;
+mod tray;
 #[cfg(target_os = "windows")]
 mod softcam_register;
 #[cfg(target_os = "windows")]
 mod windows_virtual_camera;
 
+use tauri::Emitter;
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
 use video_processor::{VideoInfo, StreamStatus, PerformanceMetrics, LoopSettings};
 
@@ -206,6 +209,18 @@ async fn upload_and_load_video(filename: String, file_data: String) -> Result<Vi
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin (its docs). A second launch — e.g. the user clicking the
+        // desktop shortcut while the app waits in the tray — focuses this instance instead.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !argv.iter().any(|a| a == tray::HIDDEN_FLAG) {
+                tray::show_main_window(app);
+            }
+        }))
+        // "Start at login" for the phone remote; launches with --hidden so only the tray shows.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![tray::HIDDEN_FLAG]),
+        ))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler({
             #[cfg(target_os = "windows")]
@@ -241,6 +256,16 @@ pub fn run() {
                     camera_capture::get_camera_preview_frame,
                     camera_capture::get_recorded_video_base64,
                     installer_language::installer_language,
+                    // Phone remote + tray
+                    remote::remote_get_state,
+                    remote::remote_link,
+                    remote::remote_unlink,
+                    remote::remote_take_pending_command,
+                    remote::remote_ack_command,
+                    remote::remote_set_autostart,
+                    remote::remote_get_autostart,
+                    tray::get_startup_mode,
+                    tray::set_tray_labels,
                 ]
             }
             #[cfg(not(target_os = "windows"))]
@@ -276,7 +301,28 @@ pub fn run() {
                     camera_capture::get_camera_preview_frame,
                     camera_capture::get_recorded_video_base64,
                     installer_language::installer_language,
+                    // Phone remote + tray
+                    remote::remote_get_state,
+                    remote::remote_link,
+                    remote::remote_unlink,
+                    remote::remote_take_pending_command,
+                    remote::remote_ack_command,
+                    remote::remote_set_autostart,
+                    remote::remote_get_autostart,
+                    tray::get_startup_mode,
+                    tray::set_tray_labels,
                 ]
+            }
+        })
+        // While a phone is linked, closing the window hides to the tray so the phone can
+        // still reach this computer. Unlinked, close quits as before.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if remote::is_linked() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let _ = window.emit("app://hidden", ());
+                }
             }
         })
         .setup(|app| {
@@ -285,6 +331,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 video_processor::init_video_processor(app_handle).await;
             });
+
+            // Phone remote: loads remote.json and parks (no network) unless a phone is linked.
+            // Then the tray, which also decides whether the (hidden-by-default) window shows.
+            remote::init(app.handle().clone());
+            tray::init(app)?;
             
             // The softcam DirectShow driver is now bundled with the app and registered
             // by the installer (or on first use via `ensure_softcam_registered`), so there
@@ -292,6 +343,14 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon while the window is hidden brings it back.
+            // (`Reopen` only exists on macOS.)
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                tray::show_main_window(_app);
+            }
+        });
 }

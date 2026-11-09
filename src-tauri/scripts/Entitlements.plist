@@ -8,6 +8,10 @@
 	<!-- Allow loading of system extensions (Virtual Camera) -->
 	<key>com.apple.developer.system-extension.install</key>
 	<true/>
+	<!-- Phone remote (src/remote): outbound HTTPS/WSS to api.camlooper.com. Only used after
+	     the user links a phone; the sandbox blocks all sockets without this entitlement. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
 	<!-- NOTE: when wiring the app<->extension XPC (Stage C2), add the shared App Group here:
 	     <key>com.apple.security.application-groups</key>
 	     <array><string>group.com.camlooper.shared</string></array>

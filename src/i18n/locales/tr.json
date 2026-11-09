@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - Görünür kalın, gizliliğinizi koruyun" },
-  "topbar": { "tagline": "Gizliliğinizi korurken derste varmış gibi görünün — kısa bir klip kaydedin ve kameranız olarak döngüde oynatın." },
-  "language": { "label": "Dil" },
-  "stepper": { "golive": "Yayına geç", "record": "Kaydet", "loop": "Döngü" },
+  "app": {
+    "title": "CamLooper - Görünür kalın, gizliliğinizi koruyun"
+  },
+  "topbar": {
+    "tagline": "Gizliliğinizi korurken derste varmış gibi görünün — kısa bir klip kaydedin ve kameranız olarak döngüde oynatın."
+  },
+  "language": {
+    "label": "Dil"
+  },
+  "stepper": {
+    "golive": "Yayına geç",
+    "record": "Kaydet",
+    "loop": "Döngü"
+  },
   "stage": {
     "startingCamera": "Kamera başlatılıyor…",
     "altLive": "Canlı kamera",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "Desteklenmeyen video biçimi. Lütfen bir MP4, MOV, WebM, MKV veya AVI dosyası seçin.",
     "uploadFailed": "Video yüklenemedi. Lütfen tekrar deneyin."
   },
-  "ad": { "title": "Reklam", "dismiss": "Reklamı kapat" }
+  "ad": {
+    "title": "Reklam",
+    "dismiss": "Reklamı kapat"
+  },
+  "remote": {
+    "title": "Telefon kumandası",
+    "badgeConnected": "Bağlı",
+    "badgeOffline": "Çevrimdışı",
+    "badgeLinking": "Bağlanıyor…",
+    "networkNote": "CamLooper yalnızca bir telefon bağladıktan sonra internete bağlanır.",
+    "unlinkedDesc": "Her yerden bu bilgisayarda bir Zoom, Teams veya Meet görüşmesi başlatmak için telefonunuzu bağlayın: CamLooper toplantıyı açar ve döngünüzü etkinleştirir.",
+    "codeLabel": "Telefonunuzdaki CamLooper Remote'ta gösterilen 6 haneli kodu girin",
+    "codeAria": "Eşleştirme kodu",
+    "linkButton": "Bağla",
+    "linking": "Bağlanıyor…",
+    "errors": {
+      "code_invalid": "Bu kod işe yaramadı. Kodlar beş dakika sonra geçersiz olur; telefonunuzdan yeni bir kod alın.",
+      "rate_limited": "Çok fazla deneme. Biraz bekleyip tekrar deneyin.",
+      "network": "CamLooper uzak hizmetine ulaşılamıyor. Bağlantınızı kontrol edip tekrar deneyin.",
+      "server": "Bizim tarafımızda bir sorun oluştu. Bir dakika sonra tekrar deneyin.",
+      "disabled": "Telefon kumandası bu sürümde kullanılamıyor."
+    },
+    "linkedWith": "{{phone}} ile bağlı",
+    "linkedDesc": "Telefonunuzdan bir toplantı bağlantısı gönderin, bu bilgisayar onu açsın.",
+    "unlink": "Telefonun bağlantısını kes",
+    "relink": "Başka bir telefon bağla",
+    "cancel": "İptal",
+    "yourPhone": "telefonunuz",
+    "autostartLabel": "Oturum açıldığında CamLooper'ı başlat",
+    "autostartDesc": "Telefonunuz her zaman ulaşabilsin diye tepside gizli olarak başlar.",
+    "trayHint": "Bir telefon bağlıyken pencereyi kapatmak CamLooper'ı tepside çalışır durumda tutar.",
+    "toastLinkedTitle": "{{phone}} ile bağlandı",
+    "toastLinkedDesc": "CamLooper oturum açıldığında başlayacak ve telefonunuzdan gönderilen toplantılar için tepside bekleyecek.",
+    "toastAutostartFailed": "Bağlandı, ancak oturum açılışında başlatma etkinleştirilemedi. Gelişmiş → Telefon kumandası altından açabilirsiniz.",
+    "openingMeeting": "{{phone}} tarafından gönderilen {{app}} toplantısı açılıyor",
+    "openFailedTitle": "Toplantı bağlantısı açılamadı",
+    "noLoopHintTitle": "Yüklü döngü yok",
+    "noLoopHintDesc": "Bir toplantı geldiğinde CamLooper kameranızı açabilsin diye bir klip kaydedin veya yükleyin.",
+    "rejectedTitle": "Telefonunuzdan gelen bir bağlantı yoksayıldı",
+    "rejectedDesc": "Yalnızca Zoom, Microsoft Teams veya Google Meet'e giden https bağlantıları kabul edilir.",
+    "unlinkedByPhoneTitle": "Telefon bağlantısı kesildi",
+    "unlinkedByPhoneDesc": "Bu bilgisayar artık bir telefona bağlı değil ve internete bağlanmayı durdurdu.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "görüntülü"
+    }
+  },
+  "tray": {
+    "show": "CamLooper'ı göster",
+    "link": "Telefon bağla…",
+    "autostart": "Oturum açıldığında başlat",
+    "quit": "Çıkış"
+  }
 }

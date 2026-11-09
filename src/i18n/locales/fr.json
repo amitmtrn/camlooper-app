@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - Restez présent, préservez votre vie privée" },
-  "topbar": { "tagline": "Apparaissez en cours tout en préservant votre vie privée — enregistrez un court clip, puis lisez-le en boucle comme caméra." },
-  "language": { "label": "Langue" },
-  "stepper": { "golive": "En direct", "record": "Enregistrer", "loop": "Boucle" },
+  "app": {
+    "title": "CamLooper - Restez présent, préservez votre vie privée"
+  },
+  "topbar": {
+    "tagline": "Apparaissez en cours tout en préservant votre vie privée — enregistrez un court clip, puis lisez-le en boucle comme caméra."
+  },
+  "language": {
+    "label": "Langue"
+  },
+  "stepper": {
+    "golive": "En direct",
+    "record": "Enregistrer",
+    "loop": "Boucle"
+  },
   "stage": {
     "startingCamera": "Démarrage de la caméra…",
     "altLive": "Caméra en direct",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "Format vidéo non pris en charge. Veuillez choisir un fichier MP4, MOV, WebM, MKV ou AVI.",
     "uploadFailed": "Échec du téléversement de la vidéo. Veuillez réessayer."
   },
-  "ad": { "title": "Publicité", "dismiss": "Fermer la publicité" }
+  "ad": {
+    "title": "Publicité",
+    "dismiss": "Fermer la publicité"
+  },
+  "remote": {
+    "title": "Télécommande mobile",
+    "badgeConnected": "Connecté",
+    "badgeOffline": "Hors ligne",
+    "badgeLinking": "Association…",
+    "networkNote": "CamLooper ne se connecte à Internet qu'après l'association d'un téléphone.",
+    "unlinkedDesc": "Associez votre téléphone pour lancer un appel Zoom, Teams ou Meet sur cet ordinateur depuis n'importe où : CamLooper ouvre la réunion et active votre boucle.",
+    "codeLabel": "Saisissez le code à 6 chiffres affiché dans CamLooper Remote sur votre téléphone",
+    "codeAria": "Code d'association",
+    "linkButton": "Associer",
+    "linking": "Association…",
+    "errors": {
+      "code_invalid": "Ce code n'a pas fonctionné. Les codes expirent après cinq minutes : générez-en un nouveau sur votre téléphone.",
+      "rate_limited": "Trop de tentatives. Patientez un instant puis réessayez.",
+      "network": "Impossible de joindre le service distant CamLooper. Vérifiez votre connexion et réessayez.",
+      "server": "Un problème est survenu de notre côté. Réessayez dans une minute.",
+      "disabled": "La télécommande mobile n'est pas disponible dans cette version."
+    },
+    "linkedWith": "Associé à {{phone}}",
+    "linkedDesc": "Envoyez un lien de réunion depuis votre téléphone et cet ordinateur l'ouvrira.",
+    "unlink": "Dissocier le téléphone",
+    "relink": "Associer un autre téléphone",
+    "cancel": "Annuler",
+    "yourPhone": "votre téléphone",
+    "autostartLabel": "Lancer CamLooper à l'ouverture de session",
+    "autostartDesc": "Démarre masqué dans la zone de notification pour que votre téléphone puisse toujours le joindre.",
+    "trayHint": "Tant qu'un téléphone est associé, fermer la fenêtre laisse CamLooper actif dans la zone de notification.",
+    "toastLinkedTitle": "Associé à {{phone}}",
+    "toastLinkedDesc": "CamLooper démarrera à l'ouverture de session et attendra dans la zone de notification, prêt pour les réunions envoyées depuis votre téléphone.",
+    "toastAutostartFailed": "Associé, mais le lancement automatique n'a pas pu être activé. Vous pouvez l'activer dans Avancé → Télécommande mobile.",
+    "openingMeeting": "Ouverture de la réunion {{app}} envoyée par {{phone}}",
+    "openFailedTitle": "Impossible d'ouvrir le lien de la réunion",
+    "noLoopHintTitle": "Aucune boucle chargée",
+    "noLoopHintDesc": "Enregistrez ou chargez un clip pour que CamLooper puisse allumer votre caméra à l'arrivée d'une réunion.",
+    "rejectedTitle": "Un lien de votre téléphone a été ignoré",
+    "rejectedDesc": "Seuls les liens https vers Zoom, Microsoft Teams ou Google Meet sont acceptés.",
+    "unlinkedByPhoneTitle": "Téléphone dissocié",
+    "unlinkedByPhoneDesc": "Cet ordinateur n'est plus associé à un téléphone et a cessé de se connecter à Internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "vidéo"
+    }
+  },
+  "tray": {
+    "show": "Afficher CamLooper",
+    "link": "Associer un téléphone…",
+    "autostart": "Lancer à l'ouverture de session",
+    "quit": "Quitter"
+  }
 }

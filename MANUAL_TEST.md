@@ -89,6 +89,141 @@ enable raises a single UAC prompt to register the driver; that is by design.
 
 <!-- Newest entries first. -->
 
+### Phone remote: linking with a code, and opening a meeting sent from the phone
+_Added 2026-11-08 · All · `src-tauri/src/remote/`, `src/components/RemoteCard.tsx`_
+
+The phone app ("CamLooper Remote") shows a 6-digit code; typing it into the desktop app
+links the two. Until that moment the desktop app makes **no network connection at all**
+(the ad frames are the separate, pre-existing exception). After linking, a meeting link
+sent from the phone brings the window to the front, starts the virtual camera and opens
+the link. Unlinking returns the app to silence.
+
+**Setup:** a build with network access; the CamLooper Remote app on a phone (or, for a
+local relay, `npx wrangler@4 dev --port 8787` in `../server` and the app started with
+`CAMLOOPER_API_URL=http://127.0.0.1:8787`); one short clip ready to load.
+
+**Steps:**
+1. Launch CamLooper. Open **Advanced → Debug logs** and read the first `remote:` line.
+   On Linux also run `ss -tnp | grep "pid=$(pgrep -x camlooper)"`.
+2. On the phone tap **Get a code**. On the desktop open **Advanced → Phone remote** and
+   type the six digits into the boxes.
+3. Type a deliberately wrong code (e.g. `000000`) first, then the real one.
+4. Record or load a clip so the Loop step is reached, then turn the virtual camera **off**
+   under Advanced → Virtual Camera. Minimise CamLooper.
+5. On the phone paste `https://zoom.us/j/123456789` and tap **Open on desktop**.
+6. On the phone send `http://zoom.us/j/1`, then `https://example.com/`.
+7. Click **Unlink phone** on the desktop. Repeat the `ss` command from step 1.
+8. Check the pairing file: Linux `~/.local/share/com.camlooper.app/remote.json`,
+   Windows `%APPDATA%\com.camlooper.app\remote.json`, macOS
+   `~/Library/Application Support/com.camlooper.app/remote.json`.
+
+**Expected:**
+- Step 1: the log reads `remote: idle, no network` and `ss` prints nothing (the webview's
+  ad iframe runs in a separate WebKit network process and is not listed).
+- Step 3: the wrong code shows "That code didn't work…" under the boxes and the input is
+  cleared; `ss` still prints nothing. The real code flips the card to "Linked with
+  <phone>" with a green **Connected** badge within ~2 s, two toasts appear ("Linked with
+  <phone>" and the start-at-login notice), the **Start at login** switch is on, and `ss`
+  now lists exactly one connection to the relay host. The phone's screen moves on to the
+  link field by itself.
+- Step 5: the CamLooper window comes to the front and un-minimises, the virtual-camera
+  badge turns **Active** (the Store build may raise its one-time UAC prompt first), the
+  default browser opens the Zoom link, and a toast reads "Opening Zoom meeting from
+  <phone>". The phone shows "Opened on <computer>".
+- Step 6: nothing opens on the desktop. The phone rejects both links itself; if a link
+  does get through, the desktop shows one "Ignored a link from your phone" toast.
+- Step 7: the card returns to the code boxes, the **Start at login** entry is removed,
+  `ss` prints nothing again, and the phone returns to its "Get a code" screen.
+- Step 8: the file exists after step 3 (mode `-rw-------` on Linux/macOS) and is gone
+  after step 7.
+
+**Known gotchas:**
+- Codes expire five minutes after the phone requested them; "That code didn't work" on a
+  code that looks right usually means it is old — get a new one.
+- With the network pulled the badge reads **Offline** and reconnects with growing delays
+  (1 s → 60 s). That is backoff, not a hang.
+- If no clip is loaded the meeting still opens and a "No loop is loaded" hint appears —
+  intended.
+- Debug builds only: `CAMLOOPER_REMOTE_LINK_CODE=123456` links automatically ~2 s after
+  launch, for scripted tests. Release builds ignore it.
+
+### Tray icon, close-to-tray and hidden start at login
+_Added 2026-11-08 · All · `src-tauri/src/tray.rs`, `tauri-plugin-autostart`, `tauri-plugin-single-instance`_
+
+A tray icon is always present. Closing the window hides to the tray **only while a phone
+is linked**; unlinked, close quits as before. Linking turns on "Start at login", which
+launches the app hidden (`--hidden`) so it waits in the tray.
+
+**Setup:** a release build. On GNOME the AppIndicator extension must be enabled (Ubuntu
+default) or no tray icon can be drawn.
+
+**Steps:**
+1. Launch CamLooper unlinked. Find its icon in the tray / menu bar; right-click it.
+2. Click the window's close button.
+3. Launch again, link a phone (previous section), then click the close button.
+4. Left-click the tray icon.
+5. While the window is visible, launch CamLooper a second time from the apps menu.
+6. Quit via the tray menu, then start from a terminal with the flag: `camlooper --hidden`
+   (AppImage: `./camlooper_*.AppImage --hidden`; Windows: `camlooper.exe --hidden`).
+   Wait ten seconds.
+7. Choose **Quit** from the tray menu.
+
+**Expected:** step 1 shows a menu with **Show CamLooper**, **Link phone…**, **Start at
+login** (checkbox) and **Quit**, in the app's UI language; step 2 quits the process
+(`pgrep camlooper` empty); step 3 hides the window but the process stays alive; step 4
+brings the window back at 1200×760, focused; step 5 opens no second window — the existing
+one comes to the front; step 6 shows no window and **no browser popup**, only the tray icon
+(and the Debug logs, once the window is opened, show the welcome popup did not fire until
+then); step 7 exits.
+
+**Known gotchas:** on Windows the window may only flash in the taskbar if another app
+holds the foreground — a Windows rule, not a bug, as long as clicking the taskbar entry
+shows it. On macOS the Dock icon stays; clicking it re-shows the window. `--hidden` while
+**unlinked** shows the window anyway (nothing to wait for).
+
+### Welcome page opens in the browser at launch
+_Added 2026-09-10 · All · `src/hooks/use-welcome-popup.ts`_
+
+Two seconds after the app starts, it opens `camlooper.com/ads/popup` in the default
+browser, at most once every six hours. The throttle is persisted, so restarting the
+app repeatedly does not reopen it.
+
+**Setup:** a **release** build — the hook is guarded by `import.meta.env.PROD` and
+does nothing under `npm run tauri dev`. Set the app UI language to something other
+than English (say German) under Settings before starting. Launch normally (not from
+the start-at-login entry).
+
+**Steps:**
+1. Open devtools on the running app and run
+   `localStorage.removeItem("camlooper.lastWelcomePopupShown")`, then quit.
+2. Launch CamLooper and watch the screen for the first five seconds.
+3. Read the URL in the browser's address bar and the language of the page copy.
+4. Quit the app and launch it again immediately.
+5. In devtools, run `localStorage.getItem("camlooper.lastWelcomePopupShown")`.
+6. Repeat step 1, then start the app with the network cable pulled / wifi off.
+
+**Expected:**
+- Step 2: the app window paints first, then a browser tab opens about two seconds
+  later. The app window is still running behind it, not closed or crashed.
+- Step 3: the URL is `https://camlooper.com/ads/popup?lng=de` and the heading is the
+  German welcome copy — the `lng` must match the app's UI language, including when
+  that language was auto-detected from the OS rather than picked in Settings.
+- Step 4: **no** browser tab opens.
+- Step 5: a millisecond timestamp within the last few minutes.
+- Step 6: the app starts normally and does not hang or show an error; the timestamp
+  is written anyway, so the next launch stays quiet.
+
+**Known gotchas:**
+- Nothing happens in `tauri dev` — that is the dev guard, not a broken build.
+- The page may show either an Adsterra ad or the built-in house ad; both are passes.
+  Localhost and ad blockers force the house ad.
+- The browser takes focus away from the app you just opened. That is the intended
+  behaviour of this feature, not a focus bug.
+- Six hours is a floor, not a schedule — the app never opens the page while running,
+  only at launch.
+- When the app is started hidden at login (phone remote, `--hidden`), the page does not
+  open until the window is first shown; the two-second timer starts then.
+
 ### Aspect ratio: sources are letterboxed, not stretched
 _Added 2026-09-05 · All · single-ffmpeg pipeline_
 
@@ -233,6 +368,76 @@ anyway; test on a floating desktop (GNOME, KDE, XFCE).
 
 <!-- Newest entries first. -->
 
+### Start at login (direct, Store NSIS and MSIX) for the phone remote
+_Added 2026-11-08 · Windows · `tauri-plugin-autostart`, `windows/hooks.nsh`, `windows/hooks-store.nsh`_
+
+Linking a phone writes an HKCU Run entry; unlinking or uninstalling removes it.
+
+**Setup:** a clean VM (see VIRTUALBOX_WINDOWS_TESTING.md) with the direct installer, the
+Store installer and the `.msix` from `npm run package:msix`.
+
+**Steps (repeat per channel):**
+1. Install, launch, link a phone (All platforms section).
+2. In PowerShell: `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v camlooper`.
+3. Open Task Manager → **Startup apps**; find CamLooper.
+4. Sign out and back in. Wait 15 s. Run `Get-Process camlooper`.
+5. Turn **Start at login** off under Advanced → Phone remote; repeat step 2. Turn it on again.
+6. Click **Unlink phone**; repeat step 2.
+7. Link again, then uninstall; repeat step 2.
+
+**Expected:** step 2 prints the exe path followed by ` --hidden` (direct:
+`C:\Program Files\CamLooper\camlooper.exe --hidden`; Store NSIS: a path under
+`%LOCALAPPDATA%`); step 3 shows CamLooper **Enabled**; step 4: no window, tray icon
+present, one `camlooper` process, no browser popup; steps 5, 6 and 7: the value is gone
+(step 7 via the `NSIS_HOOK_POSTUNINSTALL` hook).
+
+**Known gotchas:** on the **MSIX** build step 2 may print "unable to find the specified
+registry key" even though the card's switch is on — registry virtualization. That is the
+signal to add `RegistryWriteVirtualization=disabled` in `scripts/package-msix.ps1` (or a
+`windows.startupTask` extension) and retest. Disabling the entry in Task Manager flips
+the switch off at the next launch; that is the plugin honouring the user.
+
+### Thank-you page opens when the installer finishes
+_Added 2026-09-10 · Windows · `src-tauri/windows/hooks.nsh`, `windows/hooks-store.nsh`_
+
+The NSIS installer opens `camlooper.com/thank-you` in the default browser at the end
+of a normal install. It must open as the logged-in user even though the direct
+installer is elevated, and must stay quiet during a silent (`/S`) install.
+
+**Setup:** a clean Windows VM and both installers — `camlooper_<v>_x64-setup.exe`
+(direct) and `camlooper_<v>_x64-store-setup.exe` (Store).
+
+**Steps:**
+1. Run the direct installer. In the language dialog pick **Hebrew**, then finish the
+   install.
+2. When the browser opens, open Task Manager → **Details**, add the **Elevated**
+   column, and find the browser process.
+3. Read the address bar and the page copy.
+4. Uninstall, then run `camlooper_<v>_x64-setup.exe /S` from an elevated
+   `cmd`. Wait for it to finish (`Get-Process msiexec,camlooper -ErrorAction Ignore`
+   is not the signal; just wait ~30 s and check `C:\Program Files\CamLooper`).
+5. Uninstall, then run the **Store** installer by double-clicking it (not `/S`).
+
+**Expected:**
+- Step 2: the browser's **Elevated** column reads **No**. A `Yes` here is a failure —
+  the installer is running as Administrator and must hand the URL to `explorer.exe`.
+- Step 3: the URL is `https://camlooper.com/thank-you?ch=direct&lcid=1037`, and the
+  page is in Hebrew, right-to-left. `CamLooper Virtual Camera` stays on one line —
+  it must not split or reorder mid-phrase.
+- Step 4: the app installs but **no** browser window opens. Store policy 10.2.9.2
+  requires a silent install to stay silent, so this must hold.
+- Step 5: the page opens with `ch=store` in the URL.
+
+**Known gotchas:**
+- In the real Microsoft Store flow the Store runs the installer with `/S`, so the
+  thank-you page never appears for Store users. That is deliberate — do not "fix"
+  it by removing the `IfSilent` guard.
+- The page opens *before* the installer's finish page, so the browser appears while
+  the installer is still on screen. Tauri v2 exposes no finish-page hook.
+- An unrecognised or missing `lcid` falls back to English copy; that is the intended
+  fallback, not a mapping failure. Only a *wrong* language for a supported LCID is.
+- The page is `noindex` and not in the sitemap, so it will never appear in search.
+
 ### Virtual camera frame rate, and the output resolution picker
 _Added 2026-09-05 · Windows (resolution picker: All) · unreleased_
 
@@ -296,13 +501,49 @@ builds them).
 
 <!-- Newest entries first. -->
 
-_No feature-specific entries yet._
+### Start at login via XDG autostart (deb and AppImage) for the phone remote
+_Added 2026-11-08 · Linux · `tauri-plugin-autostart`_
+
+**Setup:** a GNOME or KDE session; the `.deb` and, separately, the AppImage.
+
+**Steps:**
+1. Install/launch, link a phone (All platforms section).
+2. `cat ~/.config/autostart/camlooper.desktop`.
+3. Log out and in; wait 15 s; `pgrep -a camlooper`.
+4. Click **Unlink phone**; `ls ~/.config/autostart/`.
+
+**Expected:** step 2 shows `Exec=/usr/bin/camlooper --hidden` for the deb and
+`Exec=/path/to/camlooper_<v>_amd64.AppImage --hidden` for the AppImage (a mount path under
+`/tmp/.mount_…` is a failure); step 3 lists one process started with `--hidden`, no window,
+tray icon visible; step 4 shows no `camlooper.desktop`.
+
+**Known gotchas:** moving the AppImage after linking leaves a stale `Exec=` — toggle the
+switch off and on to rewrite it. Fedora/vanilla GNOME has no tray without the
+AppIndicator extension; the deb/rpm now depend on the appindicator runtime library.
 
 ---
 
 ## macOS
 
 <!-- Newest entries first. -->
+
+### Start at login via LaunchAgent for the phone remote
+_Added 2026-11-08 · macOS · `tauri-plugin-autostart` (LaunchAgent mode)_
+
+**Setup:** any build (unsigned is fine for this test).
+
+**Steps:**
+1. Launch, link a phone (All platforms section).
+2. `plutil -p ~/Library/LaunchAgents/camlooper.plist`.
+3. Log out and in; wait 15 s; check the menu bar and `pgrep -a camlooper`.
+4. Click **Unlink phone**; `ls ~/Library/LaunchAgents/`.
+
+**Expected:** step 2 shows `RunAtLoad => 1` and `ProgramArguments` ending in `--hidden`;
+step 3: no window, menu-bar icon present; step 4: the plist is gone.
+
+**Known gotchas:** System Settings → General → Login Items lists it under "Allow in the
+Background", not "Open at Login". The virtual camera itself is still unavailable on macOS
+(next section), so a meeting sent from the phone opens without a working camera.
 
 ### The virtual camera reports itself unavailable
 _Added 2026-09-05 · macOS · sink restructure_

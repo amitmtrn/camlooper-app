@@ -138,5 +138,56 @@
       "loadedTitle": "CamLooper virtual camera ready",
       "loadedDesc": "You may need to restart Zoom, Meet or OBS for “CamLooper Virtual Camera” to appear in the camera list."
     }
+  },
+  "remote": {
+    "title": "Phone remote",
+    "badgeConnected": "Connected",
+    "badgeOffline": "Offline",
+    "badgeLinking": "Linking…",
+    "networkNote": "CamLooper connects to the internet only after you link a phone.",
+    "unlinkedDesc": "Link your phone to start a Zoom, Teams or Meet call on this computer from anywhere: CamLooper opens the meeting and switches your loop on.",
+    "codeLabel": "Enter the 6-digit code shown in CamLooper Remote on your phone",
+    "codeAria": "Pairing code",
+    "linkButton": "Link",
+    "linking": "Linking…",
+    "errors": {
+      "code_invalid": "That code didn't work. Codes expire after five minutes — get a new one on your phone.",
+      "rate_limited": "Too many attempts. Wait a moment and try again.",
+      "network": "Can't reach the CamLooper remote service. Check your connection and try again.",
+      "server": "Something went wrong on our side. Try again in a minute.",
+      "disabled": "The phone remote isn't available in this build."
+    },
+    "linkedWith": "Linked with {{phone}}",
+    "linkedDesc": "Send a meeting link from your phone and this computer opens it.",
+    "unlink": "Unlink phone",
+    "relink": "Link a different phone",
+    "cancel": "Cancel",
+    "yourPhone": "your phone",
+    "autostartLabel": "Start CamLooper at login",
+    "autostartDesc": "Starts hidden in the tray so your phone can always reach it.",
+    "trayHint": "While a phone is linked, closing the window keeps CamLooper running in the tray.",
+    "toastLinkedTitle": "Linked with {{phone}}",
+    "toastLinkedDesc": "CamLooper will start at login and wait in the tray, ready for meetings sent from your phone.",
+    "toastAutostartFailed": "Linked, but start at login could not be enabled. You can turn it on under Advanced → Phone remote.",
+    "openingMeeting": "Opening {{app}} meeting from {{phone}}",
+    "openFailedTitle": "Couldn't open the meeting link",
+    "noLoopHintTitle": "No loop is loaded",
+    "noLoopHintDesc": "Record or load a clip so CamLooper can turn your camera on when a meeting arrives.",
+    "rejectedTitle": "Ignored a link from your phone",
+    "rejectedDesc": "Only https links to Zoom, Microsoft Teams or Google Meet are accepted.",
+    "unlinkedByPhoneTitle": "Phone unlinked",
+    "unlinkedByPhoneDesc": "This computer is no longer linked to a phone and has stopped connecting to the internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "video"
+    }
+  },
+  "tray": {
+    "show": "Show CamLooper",
+    "link": "Link phone…",
+    "autostart": "Start at login",
+    "quit": "Quit"
   }
 }

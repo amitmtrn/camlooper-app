@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - Luôn hiện diện, giữ quyền riêng tư" },
-  "topbar": { "tagline": "Trông như đang có mặt trong lớp mà vẫn giữ quyền riêng tư — quay một đoạn ngắn rồi phát lặp lại làm camera của bạn." },
-  "language": { "label": "Ngôn ngữ" },
-  "stepper": { "golive": "Phát trực tiếp", "record": "Quay", "loop": "Lặp" },
+  "app": {
+    "title": "CamLooper - Luôn hiện diện, giữ quyền riêng tư"
+  },
+  "topbar": {
+    "tagline": "Trông như đang có mặt trong lớp mà vẫn giữ quyền riêng tư — quay một đoạn ngắn rồi phát lặp lại làm camera của bạn."
+  },
+  "language": {
+    "label": "Ngôn ngữ"
+  },
+  "stepper": {
+    "golive": "Phát trực tiếp",
+    "record": "Quay",
+    "loop": "Lặp"
+  },
   "stage": {
     "startingCamera": "Đang khởi động camera…",
     "altLive": "Camera trực tiếp",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "Định dạng video không được hỗ trợ. Vui lòng chọn tệp MP4, MOV, WebM, MKV hoặc AVI.",
     "uploadFailed": "Tải video lên thất bại. Vui lòng thử lại."
   },
-  "ad": { "title": "Quảng cáo", "dismiss": "Đóng quảng cáo" }
+  "ad": {
+    "title": "Quảng cáo",
+    "dismiss": "Đóng quảng cáo"
+  },
+  "remote": {
+    "title": "Điều khiển từ điện thoại",
+    "badgeConnected": "Đã kết nối",
+    "badgeOffline": "Ngoại tuyến",
+    "badgeLinking": "Đang liên kết…",
+    "networkNote": "CamLooper chỉ kết nối internet sau khi bạn liên kết điện thoại.",
+    "unlinkedDesc": "Liên kết điện thoại để bắt đầu cuộc gọi Zoom, Teams hoặc Meet trên máy tính này từ bất cứ đâu: CamLooper sẽ mở cuộc họp và bật vòng lặp của bạn.",
+    "codeLabel": "Nhập mã 6 chữ số hiển thị trong CamLooper Remote trên điện thoại",
+    "codeAria": "Mã ghép nối",
+    "linkButton": "Liên kết",
+    "linking": "Đang liên kết…",
+    "errors": {
+      "code_invalid": "Mã đó không hoạt động. Mã hết hạn sau năm phút — hãy lấy mã mới trên điện thoại.",
+      "rate_limited": "Quá nhiều lần thử. Hãy đợi một lát rồi thử lại.",
+      "network": "Không thể kết nối tới dịch vụ điều khiển từ xa của CamLooper. Kiểm tra kết nối rồi thử lại.",
+      "server": "Đã xảy ra lỗi ở phía chúng tôi. Hãy thử lại sau một phút.",
+      "disabled": "Điều khiển từ điện thoại không khả dụng trong bản dựng này."
+    },
+    "linkedWith": "Đã liên kết với {{phone}}",
+    "linkedDesc": "Gửi liên kết cuộc họp từ điện thoại và máy tính này sẽ mở nó.",
+    "unlink": "Hủy liên kết điện thoại",
+    "relink": "Liên kết điện thoại khác",
+    "cancel": "Hủy",
+    "yourPhone": "điện thoại của bạn",
+    "autostartLabel": "Khởi động CamLooper khi đăng nhập",
+    "autostartDesc": "Khởi động ẩn trong khay hệ thống để điện thoại luôn có thể kết nối.",
+    "trayHint": "Khi điện thoại đang được liên kết, đóng cửa sổ sẽ giữ CamLooper chạy trong khay hệ thống.",
+    "toastLinkedTitle": "Đã liên kết với {{phone}}",
+    "toastLinkedDesc": "CamLooper sẽ khởi động khi đăng nhập và chờ trong khay hệ thống, sẵn sàng cho các cuộc họp gửi từ điện thoại.",
+    "toastAutostartFailed": "Đã liên kết, nhưng không bật được khởi động khi đăng nhập. Bạn có thể bật trong Nâng cao → Điều khiển từ điện thoại.",
+    "openingMeeting": "Đang mở cuộc họp {{app}} từ {{phone}}",
+    "openFailedTitle": "Không thể mở liên kết cuộc họp",
+    "noLoopHintTitle": "Chưa tải vòng lặp nào",
+    "noLoopHintDesc": "Ghi hoặc tải một đoạn clip để CamLooper có thể bật camera khi có cuộc họp.",
+    "rejectedTitle": "Đã bỏ qua một liên kết từ điện thoại",
+    "rejectedDesc": "Chỉ chấp nhận liên kết https tới Zoom, Microsoft Teams hoặc Google Meet.",
+    "unlinkedByPhoneTitle": "Đã hủy liên kết điện thoại",
+    "unlinkedByPhoneDesc": "Máy tính này không còn liên kết với điện thoại và đã ngừng kết nối internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "video"
+    }
+  },
+  "tray": {
+    "show": "Hiện CamLooper",
+    "link": "Liên kết điện thoại…",
+    "autostart": "Khởi động khi đăng nhập",
+    "quit": "Thoát"
+  }
 }

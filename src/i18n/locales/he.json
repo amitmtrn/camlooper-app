@@ -111,5 +111,56 @@
   "ad": {
     "title": "פרסומת",
     "dismiss": "סגור פרסומת"
+  },
+  "remote": {
+    "title": "שלט מהטלפון",
+    "badgeConnected": "מחובר",
+    "badgeOffline": "לא מחובר",
+    "badgeLinking": "מקשר…",
+    "networkNote": "CamLooper מתחבר לאינטרנט רק אחרי שמקשרים טלפון.",
+    "unlinkedDesc": "קשרו את הטלפון כדי להתחיל שיחת Zoom, Teams או Meet במחשב הזה מכל מקום: CamLooper יפתח את הפגישה וידליק את הלופ.",
+    "codeLabel": "הזינו את הקוד בן 6 הספרות שמוצג ב‑CamLooper Remote בטלפון",
+    "codeAria": "קוד קישור",
+    "linkButton": "קשר",
+    "linking": "מקשר…",
+    "errors": {
+      "code_invalid": "הקוד הזה לא עבד. קודים פגים אחרי חמש דקות — קבלו קוד חדש בטלפון.",
+      "rate_limited": "יותר מדי ניסיונות. המתינו רגע ונסו שוב.",
+      "network": "אין גישה לשירות המרוחק של CamLooper. בדקו את החיבור ונסו שוב.",
+      "server": "משהו השתבש אצלנו. נסו שוב בעוד דקה.",
+      "disabled": "השלט מהטלפון אינו זמין בגרסה זו."
+    },
+    "linkedWith": "מקושר ל‑{{phone}}",
+    "linkedDesc": "שלחו קישור לפגישה מהטלפון והמחשב הזה יפתח אותו.",
+    "unlink": "נתק טלפון",
+    "relink": "קשר טלפון אחר",
+    "cancel": "ביטול",
+    "yourPhone": "הטלפון שלך",
+    "autostartLabel": "הפעל את CamLooper בכניסה למערכת",
+    "autostartDesc": "מופעל מוסתר במגש המערכת כדי שהטלפון תמיד יוכל להגיע אליו.",
+    "trayHint": "כל עוד טלפון מקושר, סגירת החלון משאירה את CamLooper פועל במגש המערכת.",
+    "toastLinkedTitle": "קושר ל‑{{phone}}",
+    "toastLinkedDesc": "CamLooper יופעל בכניסה למערכת וימתין במגש, מוכן לפגישות שנשלחות מהטלפון.",
+    "toastAutostartFailed": "קושר, אך לא ניתן היה להפעיל הפעלה בכניסה למערכת. אפשר להפעיל זאת תחת מתקדם ← שלט מהטלפון.",
+    "openingMeeting": "פותח פגישת {{app}} מ‑{{phone}}",
+    "openFailedTitle": "לא ניתן לפתוח את קישור הפגישה",
+    "noLoopHintTitle": "לא נטען לופ",
+    "noLoopHintDesc": "הקליטו או טענו קליפ כדי ש‑CamLooper יוכל להדליק את המצלמה כשמגיעה פגישה.",
+    "rejectedTitle": "קישור מהטלפון התעלם",
+    "rejectedDesc": "מתקבלים רק קישורי https ל‑Zoom, Microsoft Teams או Google Meet.",
+    "unlinkedByPhoneTitle": "הטלפון נותק",
+    "unlinkedByPhoneDesc": "המחשב הזה כבר אינו מקושר לטלפון והפסיק להתחבר לאינטרנט.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "וידאו"
+    }
+  },
+  "tray": {
+    "show": "הצג את CamLooper",
+    "link": "קשר טלפון…",
+    "autostart": "הפעל בכניסה למערכת",
+    "quit": "יציאה"
   }
 }
