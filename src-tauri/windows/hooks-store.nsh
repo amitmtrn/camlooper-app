@@ -22,3 +22,11 @@
   IfSilent +2
   Exec '"$WINDIR\explorer.exe" "https://camlooper.com/thank-you?ch=store&lcid=$LANGUAGE"'
 !macroend
+
+; "Start at login" (phone remote) is a per-user HKCU Run entry written at runtime by
+; tauri-plugin-autostart. The installer never creates it, but the uninstaller must remove
+; it or Windows keeps trying to launch a deleted exe at every logon.
+!macro NSIS_HOOK_POSTUNINSTALL
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "camlooper"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "camlooper"
+!macroend

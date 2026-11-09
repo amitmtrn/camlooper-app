@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - 保持在线，守护隐私" },
-  "topbar": { "tagline": "在课堂上显得在场，同时保护隐私——录制一小段视频，然后循环播放作为你的摄像头。" },
-  "language": { "label": "语言" },
-  "stepper": { "golive": "开启直播", "record": "录制", "loop": "循环" },
+  "app": {
+    "title": "CamLooper - 保持在线，守护隐私"
+  },
+  "topbar": {
+    "tagline": "在课堂上显得在场，同时保护隐私——录制一小段视频，然后循环播放作为你的摄像头。"
+  },
+  "language": {
+    "label": "语言"
+  },
+  "stepper": {
+    "golive": "开启直播",
+    "record": "录制",
+    "loop": "循环"
+  },
   "stage": {
     "startingCamera": "正在启动摄像头…",
     "altLive": "实时摄像头",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "不支持的视频格式。请选择 MP4、MOV、WebM、MKV 或 AVI 文件。",
     "uploadFailed": "视频上传失败。请重试。"
   },
-  "ad": { "title": "广告", "dismiss": "关闭广告" }
+  "ad": {
+    "title": "广告",
+    "dismiss": "关闭广告"
+  },
+  "remote": {
+    "title": "手机遥控",
+    "badgeConnected": "已连接",
+    "badgeOffline": "离线",
+    "badgeLinking": "正在关联…",
+    "networkNote": "只有在你关联手机之后，CamLooper 才会连接互联网。",
+    "unlinkedDesc": "关联手机后，你可以随时随地在这台电脑上开始 Zoom、Teams 或 Meet 通话：CamLooper 会打开会议并启动你的循环。",
+    "codeLabel": "输入手机上 CamLooper Remote 显示的 6 位代码",
+    "codeAria": "配对代码",
+    "linkButton": "关联",
+    "linking": "正在关联…",
+    "errors": {
+      "code_invalid": "该代码无效。代码五分钟后过期，请在手机上获取新代码。",
+      "rate_limited": "尝试次数过多。请稍候再试。",
+      "network": "无法连接 CamLooper 远程服务。请检查网络连接后重试。",
+      "server": "我们这边出了点问题。请一分钟后重试。",
+      "disabled": "此版本不提供手机遥控功能。"
+    },
+    "linkedWith": "已与 {{phone}} 关联",
+    "linkedDesc": "从手机发送会议链接，这台电脑就会打开它。",
+    "unlink": "取消关联手机",
+    "relink": "关联另一部手机",
+    "cancel": "取消",
+    "yourPhone": "你的手机",
+    "autostartLabel": "登录时启动 CamLooper",
+    "autostartDesc": "在系统托盘中隐藏启动，确保手机随时能连上它。",
+    "trayHint": "手机处于关联状态时，关闭窗口后 CamLooper 会继续在系统托盘中运行。",
+    "toastLinkedTitle": "已与 {{phone}} 关联",
+    "toastLinkedDesc": "CamLooper 将在登录时启动并在托盘中待命，随时接收手机发来的会议。",
+    "toastAutostartFailed": "已关联，但无法启用登录时启动。你可以在“高级 → 手机遥控”中开启。",
+    "openingMeeting": "正在打开 {{phone}} 发来的 {{app}} 会议",
+    "openFailedTitle": "无法打开会议链接",
+    "noLoopHintTitle": "尚未加载循环",
+    "noLoopHintDesc": "录制或加载一段片段，这样有会议到来时 CamLooper 才能打开你的摄像头。",
+    "rejectedTitle": "已忽略来自手机的链接",
+    "rejectedDesc": "只接受指向 Zoom、Microsoft Teams 或 Google Meet 的 https 链接。",
+    "unlinkedByPhoneTitle": "手机已取消关联",
+    "unlinkedByPhoneDesc": "这台电脑不再与手机关联，并已停止连接互联网。",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "视频"
+    }
+  },
+  "tray": {
+    "show": "显示 CamLooper",
+    "link": "关联手机…",
+    "autostart": "登录时启动",
+    "quit": "退出"
+  }
 }

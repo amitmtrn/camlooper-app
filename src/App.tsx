@@ -39,6 +39,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTranslation, Trans } from "react-i18next";
 import { AdBanner } from "./components/AdBanner";
 import { useWelcomePopup } from "./hooks/use-welcome-popup";
+import { useWindowShown } from "./hooks/use-window-shown";
+import { useRemote, useRemoteCommands, type OpenMeetingCommand } from "./hooks/use-remote";
+import { RemoteCard, type RemoteCardHandle } from "./components/RemoteCard";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Stepper } from "./components/flow/Stepper";
 import { SUPPORTED_LANGUAGES, loadLanguage } from "./i18n";
 import { cn } from "@/lib/utils";
@@ -188,7 +192,9 @@ class SimpleFrameHolder {
 function CamLooper() {
   const { t, i18n } = useTranslation();
 
-  useWelcomePopup();
+  // False while started hidden by "start at login" (tray only); gates the popup and the banner.
+  const windowShown = useWindowShown();
+  useWelcomePopup(windowShown);
 
   // Keep the document title in sync with the active language.
   useEffect(() => {
@@ -267,6 +273,11 @@ function CamLooper() {
   type FlowStep = 'live' | 'record' | 'review' | 'loop';
   const [step, setStep] = useState<FlowStep>('live');
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Phone remote (Advanced → Phone remote). Networking lives in Rust: src-tauri/src/remote.
+  const remote = useRemote();
+  const remoteCardRef = React.useRef<RemoteCardHandle>(null);
+  const [linkingRequest, setLinkingRequest] = useState(0);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [recordingPreviewUrl, setRecordingPreviewUrl] = useState<string | null>(null);
 
@@ -795,6 +806,86 @@ function CamLooper() {
     }
   };
 
+  // A meeting link arrived from the linked phone. Rust already validated the URL against the
+  // allow-list and brought the window to the front. Here: get the loop onto the virtual camera
+  // (same path as the buttons, prompts and all), open the link, then ack so the server stops
+  // re-sending it.
+  const handleOpenMeeting = async (cmd: OpenMeetingCommand) => {
+    const phone = cmd.mobileDeviceName ?? remote.state.mobileDeviceName ?? t('remote.yourPhone');
+    const app = t(`remote.provider.${cmd.provider}`);
+    try {
+      if (videoInfo) {
+        if (!isPlaying) await startLoopPlayback();
+        else if (!isVirtualCamActive) await startVirtualCamera();
+      } else if (isLiveCamera && !isVirtualCamActive) {
+        await startVirtualCamera();
+      }
+    } catch (error) {
+      console.error('remote: could not start the camera before opening the meeting:', error);
+    }
+    try {
+      if (cmd.url.startsWith('https://')) await openUrl(cmd.url);
+      toast.success(t('remote.openingMeeting', { app, phone }));
+      if (!videoInfo && !isLiveCamera) {
+        toast.info(t('remote.noLoopHintTitle'), { description: t('remote.noLoopHintDesc') });
+      }
+    } catch (error) {
+      console.error('remote: could not open the meeting link:', error);
+      toast.error(t('remote.openFailedTitle'), { description: String(error) });
+    } finally {
+      try {
+        await invoke('remote_ack_command', { commandId: cmd.commandId });
+      } catch (error) {
+        console.error('remote: ack failed:', error);
+      }
+    }
+  };
+
+  useRemoteCommands({
+    onOpenMeeting: handleOpenMeeting,
+    onShowLinking: () => {
+      setShowAdvanced(true);
+      setLinkingRequest((n) => n + 1);
+    },
+    onLinked: ({ mobileDeviceName, autostartEnabled }) => {
+      toast.success(t('remote.toastLinkedTitle', { phone: mobileDeviceName ?? t('remote.yourPhone') }), {
+        description: t(autostartEnabled ? 'remote.toastLinkedDesc' : 'remote.toastAutostartFailed'),
+      });
+    },
+    onUnlinkedByPhone: () => {
+      toast.info(t('remote.unlinkedByPhoneTitle'), { description: t('remote.unlinkedByPhoneDesc') });
+    },
+    onRejected: () => {
+      toast.warning(t('remote.rejectedTitle'), { description: t('remote.rejectedDesc') });
+    },
+  });
+
+  // Tray "Link phone…": once Advanced is open, scroll the card into view and focus the code field.
+  useEffect(() => {
+    if (!linkingRequest) return;
+    const id = window.setTimeout(() => {
+      remoteCardRef.current?.scrollIntoView();
+      remoteCardRef.current?.focusCode();
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [linkingRequest, showAdvanced]);
+
+  // Keep the tray menu in the UI language.
+  useEffect(() => {
+    const push = () => {
+      void invoke('set_tray_labels', {
+        labels: { show: t('tray.show'), link: t('tray.link'), autostart: t('tray.autostart'), quit: t('tray.quit') },
+      }).catch(() => {
+        /* no tray (e.g. GNOME without the AppIndicator extension) — nothing to label */
+      });
+    };
+    push();
+    i18n.on('languageChanged', push);
+    return () => {
+      i18n.off('languageChanged', push);
+    };
+  }, [t, i18n]);
+
   // Initialize virtual camera status
   React.useEffect(() => {
     updateVirtualCameraStatus();
@@ -810,6 +901,9 @@ function CamLooper() {
 
   React.useEffect(() => {
     if (!navigator.userAgent.includes('Mac')) return;
+    // A hidden start at login must not pop System Settings with no window on screen;
+    // run the check once the window is actually shown (`windowShown` latches true).
+    if (!windowShown) return;
     let cancelled = false;
     invoke<string>('ensure_macos_camera_extension')
       .then(outcome => {
@@ -825,7 +919,7 @@ function CamLooper() {
       })
       .catch(error => console.error('Camera extension check failed:', error));
     return () => { cancelled = true; };
-  }, []);
+  }, [windowShown]);
 
   React.useEffect(() => {
     if (!macExtensionPending) return;
@@ -1140,7 +1234,8 @@ function CamLooper() {
           </Card>
         </div>
       )}
-      <AdBanner />
+      {/* Not mounted while hidden in the tray: an autostart launch is not an app open. */}
+      {windowShown && <AdBanner />}
       <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
         {/* Top bar: brand + tagline on the left, step indicator on the right */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -1517,6 +1612,16 @@ function CamLooper() {
                   </div>
                 </div>
               </Card>
+
+              {/* Phone remote */}
+              <RemoteCard
+                ref={remoteCardRef}
+                state={remote.state}
+                busy={remote.busy}
+                onLink={remote.link}
+                onUnlink={remote.unlink}
+                onToggleAutostart={remote.setAutostart}
+              />
 
               {/* Loop settings */}
               <Card className="p-4">

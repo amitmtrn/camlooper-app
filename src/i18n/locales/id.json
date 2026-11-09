@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - Tetap hadir, jaga privasi Anda" },
-  "topbar": { "tagline": "Tampil hadir di kelas sambil menjaga privasi — rekam klip singkat, lalu putar berulang sebagai kamera Anda." },
-  "language": { "label": "Bahasa" },
-  "stepper": { "golive": "Mulai siaran", "record": "Rekam", "loop": "Ulang" },
+  "app": {
+    "title": "CamLooper - Tetap hadir, jaga privasi Anda"
+  },
+  "topbar": {
+    "tagline": "Tampil hadir di kelas sambil menjaga privasi — rekam klip singkat, lalu putar berulang sebagai kamera Anda."
+  },
+  "language": {
+    "label": "Bahasa"
+  },
+  "stepper": {
+    "golive": "Mulai siaran",
+    "record": "Rekam",
+    "loop": "Ulang"
+  },
   "stage": {
     "startingCamera": "Memulai kamera…",
     "altLive": "Kamera langsung",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "Format video tidak didukung. Silakan pilih file MP4, MOV, WebM, MKV, atau AVI.",
     "uploadFailed": "Gagal mengunggah video. Silakan coba lagi."
   },
-  "ad": { "title": "Iklan", "dismiss": "Tutup iklan" }
+  "ad": {
+    "title": "Iklan",
+    "dismiss": "Tutup iklan"
+  },
+  "remote": {
+    "title": "Remote ponsel",
+    "badgeConnected": "Terhubung",
+    "badgeOffline": "Offline",
+    "badgeLinking": "Menautkan…",
+    "networkNote": "CamLooper hanya terhubung ke internet setelah Anda menautkan ponsel.",
+    "unlinkedDesc": "Tautkan ponsel Anda untuk memulai panggilan Zoom, Teams, atau Meet di komputer ini dari mana saja: CamLooper membuka rapat dan menyalakan loop Anda.",
+    "codeLabel": "Masukkan kode 6 digit yang ditampilkan di CamLooper Remote pada ponsel Anda",
+    "codeAria": "Kode penautan",
+    "linkButton": "Tautkan",
+    "linking": "Menautkan…",
+    "errors": {
+      "code_invalid": "Kode itu tidak berfungsi. Kode kedaluwarsa setelah lima menit; buat yang baru di ponsel Anda.",
+      "rate_limited": "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi.",
+      "network": "Tidak dapat menghubungi layanan remote CamLooper. Periksa koneksi Anda dan coba lagi.",
+      "server": "Terjadi kesalahan di pihak kami. Coba lagi dalam satu menit.",
+      "disabled": "Remote ponsel tidak tersedia di build ini."
+    },
+    "linkedWith": "Tertaut dengan {{phone}}",
+    "linkedDesc": "Kirim tautan rapat dari ponsel Anda dan komputer ini akan membukanya.",
+    "unlink": "Putuskan tautan ponsel",
+    "relink": "Tautkan ponsel lain",
+    "cancel": "Batal",
+    "yourPhone": "ponsel Anda",
+    "autostartLabel": "Jalankan CamLooper saat login",
+    "autostartDesc": "Berjalan tersembunyi di tray agar ponsel Anda selalu dapat menjangkaunya.",
+    "trayHint": "Selama ponsel tertaut, menutup jendela membuat CamLooper tetap berjalan di tray.",
+    "toastLinkedTitle": "Tertaut dengan {{phone}}",
+    "toastLinkedDesc": "CamLooper akan berjalan saat login dan menunggu di tray, siap untuk rapat yang dikirim dari ponsel Anda.",
+    "toastAutostartFailed": "Tertaut, tetapi jalankan saat login tidak dapat diaktifkan. Anda dapat mengaktifkannya di Lanjutan → Remote ponsel.",
+    "openingMeeting": "Membuka rapat {{app}} dari {{phone}}",
+    "openFailedTitle": "Tidak dapat membuka tautan rapat",
+    "noLoopHintTitle": "Tidak ada loop yang dimuat",
+    "noLoopHintDesc": "Rekam atau muat klip agar CamLooper dapat menyalakan kamera Anda saat rapat tiba.",
+    "rejectedTitle": "Tautan dari ponsel Anda diabaikan",
+    "rejectedDesc": "Hanya tautan https ke Zoom, Microsoft Teams, atau Google Meet yang diterima.",
+    "unlinkedByPhoneTitle": "Tautan ponsel diputus",
+    "unlinkedByPhoneDesc": "Komputer ini tidak lagi tertaut ke ponsel dan telah berhenti terhubung ke internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "video"
+    }
+  },
+  "tray": {
+    "show": "Tampilkan CamLooper",
+    "link": "Tautkan ponsel…",
+    "autostart": "Jalankan saat login",
+    "quit": "Keluar"
+  }
 }

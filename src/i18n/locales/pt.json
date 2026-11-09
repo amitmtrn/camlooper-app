@@ -109,5 +109,56 @@
   "ad": {
     "title": "Anúncio",
     "dismiss": "Fechar anúncio"
+  },
+  "remote": {
+    "title": "Controle pelo celular",
+    "badgeConnected": "Conectado",
+    "badgeOffline": "Offline",
+    "badgeLinking": "Vinculando…",
+    "networkNote": "O CamLooper só se conecta à internet depois que você vincula um celular.",
+    "unlinkedDesc": "Vincule seu celular para iniciar uma chamada do Zoom, Teams ou Meet neste computador de qualquer lugar: o CamLooper abre a reunião e liga seu loop.",
+    "codeLabel": "Digite o código de 6 dígitos mostrado no CamLooper Remote no seu celular",
+    "codeAria": "Código de pareamento",
+    "linkButton": "Vincular",
+    "linking": "Vinculando…",
+    "errors": {
+      "code_invalid": "Esse código não funcionou. Os códigos expiram em cinco minutos: gere um novo no seu celular.",
+      "rate_limited": "Muitas tentativas. Aguarde um momento e tente novamente.",
+      "network": "Não foi possível acessar o serviço remoto do CamLooper. Verifique sua conexão e tente novamente.",
+      "server": "Algo deu errado do nosso lado. Tente novamente em um minuto.",
+      "disabled": "O controle pelo celular não está disponível nesta versão."
+    },
+    "linkedWith": "Vinculado a {{phone}}",
+    "linkedDesc": "Envie um link de reunião pelo celular e este computador o abrirá.",
+    "unlink": "Desvincular celular",
+    "relink": "Vincular outro celular",
+    "cancel": "Cancelar",
+    "yourPhone": "seu celular",
+    "autostartLabel": "Iniciar o CamLooper ao fazer login",
+    "autostartDesc": "Inicia oculto na bandeja para que seu celular sempre consiga alcançá-lo.",
+    "trayHint": "Enquanto houver um celular vinculado, fechar a janela mantém o CamLooper na bandeja.",
+    "toastLinkedTitle": "Vinculado a {{phone}}",
+    "toastLinkedDesc": "O CamLooper iniciará ao fazer login e aguardará na bandeja, pronto para reuniões enviadas pelo seu celular.",
+    "toastAutostartFailed": "Vinculado, mas não foi possível ativar o início automático. Você pode ativá-lo em Avançado → Controle pelo celular.",
+    "openingMeeting": "Abrindo reunião do {{app}} enviada por {{phone}}",
+    "openFailedTitle": "Não foi possível abrir o link da reunião",
+    "noLoopHintTitle": "Nenhum loop carregado",
+    "noLoopHintDesc": "Grave ou carregue um clipe para que o CamLooper possa ligar sua câmera quando uma reunião chegar.",
+    "rejectedTitle": "Um link do seu celular foi ignorado",
+    "rejectedDesc": "Só são aceitos links https do Zoom, Microsoft Teams ou Google Meet.",
+    "unlinkedByPhoneTitle": "Celular desvinculado",
+    "unlinkedByPhoneDesc": "Este computador não está mais vinculado a um celular e parou de se conectar à internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "de vídeo"
+    }
+  },
+  "tray": {
+    "show": "Mostrar CamLooper",
+    "link": "Vincular celular…",
+    "autostart": "Iniciar ao fazer login",
+    "quit": "Sair"
   }
 }

@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "_source": "COPY of camlooper.com/server/test/meeting-url-vectors.json (the relay server lives in the private workspace repo). Keep the two files identical; the server is the canonical source. canonical cross-language test vectors for the meeting-URL allowlist shared by the server (TS), the mobile app (TS) and the desktop app (Rust). Rules, in order, first failure wins: length (1..maxLength) -> charset (printable ASCII 0x21-0x7E, no backslash) -> scheme (literal https:// prefix, case-insensitive) -> parse (WHATWG URL) -> userinfo (must be empty) -> port (must be empty) -> host (exact match, or *.suffix on a label boundary; no trailing dot). Boundary-length cases are generated in test code from maxLength.",
+  "maxLength": 2048,
+  "allowedExactHosts": [
+    "zoom.us",
+    "teams.microsoft.com",
+    "teams.live.com",
+    "meet.google.com"
+  ],
+  "allowedSuffixHosts": [
+    "zoom.us"
+  ],
+  "vectors": [
+    {
+      "url": "https://zoom.us/j/1234567890",
+      "valid": true,
+      "note": "bare zoom.us"
+    },
+    {
+      "url": "https://us02web.zoom.us/j/1234567890?pwd=AbC123dEf456",
+      "valid": true,
+      "note": "subdomain + passcode"
+    },
+    {
+      "url": "https://us05web.zoom.us/wc/join/1234567890",
+      "valid": true,
+      "note": "web client join"
+    },
+    {
+      "url": "https://ZOOM.US/j/1234567890",
+      "valid": true,
+      "note": "uppercase host normalised"
+    },
+    {
+      "url": "HTTPS://zoom.us/j/1234567890",
+      "valid": true,
+      "note": "uppercase scheme normalised"
+    },
+    {
+      "url": "https://zoom.us:443/j/1234567890",
+      "valid": true,
+      "note": "default port dropped by parser"
+    },
+    {
+      "url": "https://zoom.us/j/1234567890#success",
+      "valid": true,
+      "note": "fragment allowed"
+    },
+    {
+      "url": "https://zoom.us/",
+      "valid": true,
+      "note": "host-only is allowed in v1 (no path rules)"
+    },
+    {
+      "url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_NjAxZTI0ZTktMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAw%40thread.v2/0?context=%7b%22Tid%22%3a%2200000000-0000-0000-0000-000000000000%22%2c%22Oid%22%3a%2200000000-0000-0000-0000-000000000000%22%7d",
+      "valid": true,
+      "note": "Teams meetup-join"
+    },
+    {
+      "url": "https://teams.live.com/meet/9312345678901?p=AbCdEfGh12345678",
+      "valid": true,
+      "note": "Teams personal"
+    },
+    {
+      "url": "https://meet.google.com/abc-defg-hij",
+      "valid": true,
+      "note": "Meet"
+    },
+    {
+      "url": "https://meet.google.com/abc-defg-hij?authuser=1&hs=122",
+      "valid": true,
+      "note": "Meet with query"
+    },
+    {
+      "url": "https://meet.google.com/lookup/abcdefghij",
+      "valid": true,
+      "note": "Meet lookup"
+    },
+    {
+      "url": "http://zoom.us/j/1234567890",
+      "valid": false,
+      "reason": "scheme"
+    },
+    {
+      "url": "javascript:alert(1)",
+      "valid": false,
+      "reason": "scheme"
+    },
+    {
+      "url": "zoom.us/j/1234567890",
+      "valid": false,
+      "reason": "scheme"
+    },
+    {
+      "url": "//zoom.us/j/1234567890",
+      "valid": false,
+      "reason": "scheme"
+    },
+    {
+      "url": "https:zoom.us/j/1234567890",
+      "valid": false,
+      "reason": "scheme",
+      "note": "WHATWG would parse this; rejected by the literal https:// prefix rule"
+    },
+    {
+      "url": "ftp://zoom.us/j/1",
+      "valid": false,
+      "reason": "scheme"
+    },
+    {
+      "url": "https://zoom.us.evil.com/j/1234567890",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "https://evilzoom.us/j/1234567890",
+      "valid": false,
+      "reason": "host",
+      "note": "suffix must sit on a label boundary"
+    },
+    {
+      "url": "https://zoom.us@evil.com/j/1234567890",
+      "valid": false,
+      "reason": "userinfo"
+    },
+    {
+      "url": "https://user:pw@us02web.zoom.us/j/1234567890",
+      "valid": false,
+      "reason": "userinfo"
+    },
+    {
+      "url": "https://evil.com/?u=https://zoom.us/j/1",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "https://evil.com/https://zoom.us/j/1",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "https://teams.microsoft.com.evil.com/l/meetup-join/x",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "https://sub.teams.microsoft.com/l/meetup-join/x",
+      "valid": false,
+      "reason": "host",
+      "note": "Teams/Meet are exact-match only"
+    },
+    {
+      "url": "https://sub.meet.google.com/abc-defg-hij",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "https://zoom.us./j/1234567890",
+      "valid": false,
+      "reason": "host",
+      "note": "trailing dot"
+    },
+    {
+      "url": "https://zoom.com/j/1234567890",
+      "valid": false,
+      "reason": "host",
+      "note": "not in v1 allowlist"
+    },
+    {
+      "url": "https://zoomgov.com/j/1234567890",
+      "valid": false,
+      "reason": "host",
+      "note": "not in v1 allowlist"
+    },
+    {
+      "url": "https://zoom.us:8443/j/1234567890",
+      "valid": false,
+      "reason": "port"
+    },
+    {
+      "url": "https://127.0.0.1/j/1234567890",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "https://[::1]/j/1234567890",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "https://zoom.us\\@evil.com/j/1",
+      "valid": false,
+      "reason": "charset",
+      "note": "backslash rejected before parsing"
+    },
+    {
+      "url": " https://zoom.us/j/1234567890",
+      "valid": false,
+      "reason": "charset",
+      "note": "leading space"
+    },
+    {
+      "url": "https://zoom.us/j/1234567890 ",
+      "valid": false,
+      "reason": "charset",
+      "note": "trailing space"
+    },
+    {
+      "url": "https://zoom.us/j/123 456",
+      "valid": false,
+      "reason": "charset",
+      "note": "inner space (parser would %20 it)"
+    },
+    {
+      "url": "https://zoom.us/j/1234567890\n",
+      "valid": false,
+      "reason": "charset"
+    },
+    {
+      "url": "https://zoom.us/j/1234567890\u0000",
+      "valid": false,
+      "reason": "charset"
+    },
+    {
+      "url": "https://ｚｏｏｍ.us/j/1234567890",
+      "valid": false,
+      "reason": "charset",
+      "note": "fullwidth homoglyph; IDNA would map it to zoom.us"
+    },
+    {
+      "url": "https://zoom.üs/j/1234567890",
+      "valid": false,
+      "reason": "charset"
+    },
+    {
+      "url": "https://xn--zom-dua.us/j/1",
+      "valid": false,
+      "reason": "host"
+    },
+    {
+      "url": "",
+      "valid": false,
+      "reason": "length"
+    },
+    {
+      "url": "https://",
+      "valid": false,
+      "reason": "parse"
+    },
+    {
+      "url": "https:///j/1",
+      "valid": false,
+      "reason": "host",
+      "note": "WHATWG ignores extra slashes and parses host 'j'"
+    }
+  ]
+}

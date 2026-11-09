@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - Resta presente, proteggi la tua privacy" },
-  "topbar": { "tagline": "Appari in classe proteggendo la tua privacy: registra una breve clip e riproducila in loop come videocamera." },
-  "language": { "label": "Lingua" },
-  "stepper": { "golive": "In diretta", "record": "Registra", "loop": "Loop" },
+  "app": {
+    "title": "CamLooper - Resta presente, proteggi la tua privacy"
+  },
+  "topbar": {
+    "tagline": "Appari in classe proteggendo la tua privacy: registra una breve clip e riproducila in loop come videocamera."
+  },
+  "language": {
+    "label": "Lingua"
+  },
+  "stepper": {
+    "golive": "In diretta",
+    "record": "Registra",
+    "loop": "Loop"
+  },
   "stage": {
     "startingCamera": "Avvio della videocamera…",
     "altLive": "Videocamera in diretta",
@@ -96,5 +106,59 @@
     "unsupportedFormat": "Formato video non supportato. Scegli un file MP4, MOV, WebM, MKV o AVI.",
     "uploadFailed": "Caricamento del video non riuscito. Riprova."
   },
-  "ad": { "title": "Pubblicità", "dismiss": "Chiudi pubblicità" }
+  "ad": {
+    "title": "Pubblicità",
+    "dismiss": "Chiudi pubblicità"
+  },
+  "remote": {
+    "title": "Controllo da telefono",
+    "badgeConnected": "Connesso",
+    "badgeOffline": "Offline",
+    "badgeLinking": "Collegamento…",
+    "networkNote": "CamLooper si connette a internet solo dopo che hai collegato un telefono.",
+    "unlinkedDesc": "Collega il telefono per avviare una chiamata Zoom, Teams o Meet su questo computer da ovunque: CamLooper apre la riunione e attiva il tuo loop.",
+    "codeLabel": "Inserisci il codice a 6 cifre mostrato in CamLooper Remote sul telefono",
+    "codeAria": "Codice di associazione",
+    "linkButton": "Collega",
+    "linking": "Collegamento…",
+    "errors": {
+      "code_invalid": "Questo codice non ha funzionato. I codici scadono dopo cinque minuti: generane uno nuovo sul telefono.",
+      "rate_limited": "Troppi tentativi. Attendi un momento e riprova.",
+      "network": "Impossibile raggiungere il servizio remoto di CamLooper. Controlla la connessione e riprova.",
+      "server": "Qualcosa è andato storto dalla nostra parte. Riprova tra un minuto.",
+      "disabled": "Il controllo da telefono non è disponibile in questa versione."
+    },
+    "linkedWith": "Collegato a {{phone}}",
+    "linkedDesc": "Invia un link di riunione dal telefono e questo computer lo aprirà.",
+    "unlink": "Scollega telefono",
+    "relink": "Collega un altro telefono",
+    "cancel": "Annulla",
+    "yourPhone": "il tuo telefono",
+    "autostartLabel": "Avvia CamLooper all'accesso",
+    "autostartDesc": "Si avvia nascosto nell'area di notifica così il telefono può sempre raggiungerlo.",
+    "trayHint": "Finché un telefono è collegato, chiudere la finestra lascia CamLooper attivo nell'area di notifica.",
+    "toastLinkedTitle": "Collegato a {{phone}}",
+    "toastLinkedDesc": "CamLooper si avvierà all'accesso e resterà in attesa nell'area di notifica, pronto per le riunioni inviate dal telefono.",
+    "toastAutostartFailed": "Collegato, ma non è stato possibile attivare l'avvio automatico. Puoi attivarlo in Avanzate → Controllo da telefono.",
+    "openingMeeting": "Apertura della riunione {{app}} inviata da {{phone}}",
+    "openFailedTitle": "Impossibile aprire il link della riunione",
+    "noLoopHintTitle": "Nessun loop caricato",
+    "noLoopHintDesc": "Registra o carica una clip così CamLooper potrà accendere la fotocamera all'arrivo di una riunione.",
+    "rejectedTitle": "Un link dal telefono è stato ignorato",
+    "rejectedDesc": "Sono accettati solo link https a Zoom, Microsoft Teams o Google Meet.",
+    "unlinkedByPhoneTitle": "Telefono scollegato",
+    "unlinkedByPhoneDesc": "Questo computer non è più collegato a un telefono e ha smesso di connettersi a internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "video"
+    }
+  },
+  "tray": {
+    "show": "Mostra CamLooper",
+    "link": "Collega telefono…",
+    "autostart": "Avvia all'accesso",
+    "quit": "Esci"
+  }
 }

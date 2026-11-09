@@ -174,6 +174,46 @@ Platform-specific virtual camera implementation with automatic frame resizing.
 - High-quality scaling for consistent output resolution
 - Platform-optimized frame processing (Windows DirectShow, Linux V4L2, macOS AVFoundation)
 
+#### Phone Remote (`remote/`)
+
+Lets the companion mobile app ("CamLooper Remote") push a Zoom / Teams / Meet link to this
+computer through the relay at `api.camlooper.com` (a Cloudflare Worker that lives in the
+private camlooper.com workspace repo, not in this codebase).
+
+- **Network-silent by default.** `remote/client.rs` builds no HTTP client and opens no socket
+  until the user types the 6-digit code shown by the phone (`remote_link`). That claim is the
+  app's first network call. Unlinking (from either side) deletes `<app_data_dir>/remote.json`,
+  disables start-at-login and parks the task again.
+- **One actor task** (`run_task`) owns the WebSocket (`tokio-tungstenite` + rustls/ring — pure
+  Rust so the cargo-xwin Windows cross-build works), reconnecting with jittered exponential
+  backoff (1 s → 60 s), a 30 s `{"type":"ping"}` keepalive and a 90 s read-idle timeout.
+- **Commands:** `remote_get_state`, `remote_link`, `remote_unlink`, `remote_take_pending_command`,
+  `remote_ack_command`, `remote_set_autostart`, `remote_get_autostart`. **Events to the webview:**
+  `remote://status`, `remote://open-meeting`, `remote://linked`, `remote://unlinked-by-phone`,
+  `remote://command-rejected`, `remote://show-linking`.
+- **Startup race.** The server flushes a queued command as soon as the socket connects, often
+  before React has registered listeners. Rust keeps it as `pending` until the frontend acks, and
+  `use-remote.ts` calls `remote_take_pending_command` on mount. Duplicates are dropped by
+  `commandId`; commands whose `createdAt` is older than 10 minutes are acked and ignored.
+- **Allow-list** (`remote/meeting_url.rs`): https only, printable ASCII, no userinfo/port, hosts
+  `zoom.us` / `*.zoom.us`, `teams.microsoft.com`, `teams.live.com`, `meet.google.com`. The server
+  validates first; this is defence in depth. Shared vectors: `tests/fixtures/meeting-url-vectors.json`
+  (a copy of the server's canonical file — keep them identical).
+- **Dev:** `CAMLOOPER_API_URL=http://127.0.0.1:8787` targets a local relay (`wrangler dev`); debug
+  builds also honour `CAMLOOPER_REMOTE_LINK_CODE=123456` to link without touching the UI.
+
+#### Tray & lifecycle (`tray.rs`)
+
+An always-present tray icon (Show CamLooper / Link phone… / Start at login / Quit, labels pushed
+from the frontend in the UI language). While a phone is linked, closing the window hides to the
+tray so the phone can still reach the computer; unlinked, close quits as before.
+`tauri-plugin-single-instance` focuses the running instance on a second launch.
+`tauri-plugin-autostart` registers `camlooper --hidden` at login once a phone is linked; the
+window is created with `visible: false` and `tray::init` shows it unless `--hidden` was passed
+(and a phone is linked). The frontend gates the welcome popup and the ad banner on
+`app://shown` / `get_startup_mode`, so a hidden login launch neither opens a browser nor counts
+as an app open in analytics.
+
 ## Data Flow
 
 ### Video Upload Flow
@@ -355,7 +395,7 @@ pub async fn load_video(&mut self, file_path: PathBuf) -> Result<VideoInfo> {
 
 ### Data Privacy
 - **Local Processing**: All video processing happens on the user's device
-- **No Network Transfer**: Videos never leave the local system
+- **No Network Transfer**: Videos never leave the local system. The optional phone remote exchanges only pairing metadata and meeting URLs over TLS, and only after the user links a phone (see Phone Remote above)
 - **Temporary File Security**: Secure temporary file handling with automatic cleanup
 - **Memory Protection**: Sensitive data cleared from memory after use
 

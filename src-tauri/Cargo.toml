@@ -28,8 +28,22 @@ cc = "1"
 # `cfg(any(debug_assertions, feature = "devtools"))`, so `tauri dev` keeps its
 # inspector either way. Naming the feature here is what forced it into release
 # builds as well.
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
+# Phone remote (src/remote, src/tray.rs). The two plugins are pinned with "=" because
+# their newer releases require tauri >= 2.8 / 2.12 while this repo locks tauri 2.6.2;
+# a caret range would let `cargo update` silently pull a tauri bump. Revisit when tauri
+# itself is bumped.
+tauri-plugin-autostart = "=2.5.0"
+tauri-plugin-single-instance = "=2.3.0"
+# Networking for the phone remote must be pure Rust: the Windows build is cross-compiled
+# from Linux with cargo-xwin, so OpenSSL/native-tls and aws-lc-rs (cmake + nasm) are out.
+# ring is the rustls crypto provider on every target.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+url = "2"
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

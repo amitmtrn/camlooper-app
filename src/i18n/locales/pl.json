@@ -1,8 +1,18 @@
 {
-  "app": { "title": "CamLooper - Bądź obecny, chroń swoją prywatność" },
-  "topbar": { "tagline": "Bądź obecny na zajęciach, chroniąc prywatność — nagraj krótki klip i odtwarzaj go w pętli jako kamerę." },
-  "language": { "label": "Język" },
-  "stepper": { "golive": "Na żywo", "record": "Nagrywaj", "loop": "Pętla" },
+  "app": {
+    "title": "CamLooper - Bądź obecny, chroń swoją prywatność"
+  },
+  "topbar": {
+    "tagline": "Bądź obecny na zajęciach, chroniąc prywatność — nagraj krótki klip i odtwarzaj go w pętli jako kamerę."
+  },
+  "language": {
+    "label": "Język"
+  },
+  "stepper": {
+    "golive": "Na żywo",
+    "record": "Nagrywaj",
+    "loop": "Pętla"
+  },
   "stage": {
     "startingCamera": "Uruchamianie kamery…",
     "altLive": "Kamera na żywo",
@@ -98,5 +108,59 @@
     "unsupportedFormat": "Nieobsługiwany format wideo. Wybierz plik MP4, MOV, WebM, MKV lub AVI.",
     "uploadFailed": "Nie udało się przesłać wideo. Spróbuj ponownie."
   },
-  "ad": { "title": "Reklama", "dismiss": "Zamknij reklamę" }
+  "ad": {
+    "title": "Reklama",
+    "dismiss": "Zamknij reklamę"
+  },
+  "remote": {
+    "title": "Pilot w telefonie",
+    "badgeConnected": "Połączono",
+    "badgeOffline": "Offline",
+    "badgeLinking": "Łączenie…",
+    "networkNote": "CamLooper łączy się z internetem dopiero po powiązaniu telefonu.",
+    "unlinkedDesc": "Powiąż telefon, aby z dowolnego miejsca rozpocząć rozmowę Zoom, Teams lub Meet na tym komputerze: CamLooper otworzy spotkanie i włączy twoją pętlę.",
+    "codeLabel": "Wpisz 6-cyfrowy kod wyświetlany w CamLooper Remote na telefonie",
+    "codeAria": "Kod parowania",
+    "linkButton": "Powiąż",
+    "linking": "Łączenie…",
+    "errors": {
+      "code_invalid": "Ten kod nie zadziałał. Kody wygasają po pięciu minutach – wygeneruj nowy na telefonie.",
+      "rate_limited": "Zbyt wiele prób. Odczekaj chwilę i spróbuj ponownie.",
+      "network": "Nie można połączyć się z usługą zdalną CamLooper. Sprawdź połączenie i spróbuj ponownie.",
+      "server": "Coś poszło nie tak po naszej stronie. Spróbuj ponownie za minutę.",
+      "disabled": "Pilot w telefonie nie jest dostępny w tej wersji."
+    },
+    "linkedWith": "Powiązano z {{phone}}",
+    "linkedDesc": "Wyślij link do spotkania z telefonu, a ten komputer go otworzy.",
+    "unlink": "Odłącz telefon",
+    "relink": "Powiąż inny telefon",
+    "cancel": "Anuluj",
+    "yourPhone": "twój telefon",
+    "autostartLabel": "Uruchamiaj CamLooper przy logowaniu",
+    "autostartDesc": "Uruchamia się ukryty w zasobniku, aby telefon zawsze mógł się z nim połączyć.",
+    "trayHint": "Dopóki telefon jest powiązany, zamknięcie okna pozostawia CamLooper działający w zasobniku.",
+    "toastLinkedTitle": "Powiązano z {{phone}}",
+    "toastLinkedDesc": "CamLooper będzie uruchamiał się przy logowaniu i czekał w zasobniku na spotkania wysłane z telefonu.",
+    "toastAutostartFailed": "Powiązano, ale nie udało się włączyć autostartu. Możesz go włączyć w Zaawansowane → Pilot w telefonie.",
+    "openingMeeting": "Otwieranie spotkania {{app}} z {{phone}}",
+    "openFailedTitle": "Nie udało się otworzyć linku do spotkania",
+    "noLoopHintTitle": "Nie załadowano pętli",
+    "noLoopHintDesc": "Nagraj lub wczytaj klip, aby CamLooper mógł włączyć kamerę, gdy nadejdzie spotkanie.",
+    "rejectedTitle": "Zignorowano link z telefonu",
+    "rejectedDesc": "Akceptowane są tylko linki https do Zoom, Microsoft Teams lub Google Meet.",
+    "unlinkedByPhoneTitle": "Telefon odłączony",
+    "unlinkedByPhoneDesc": "Ten komputer nie jest już powiązany z telefonem i przestał łączyć się z internetem.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "wideo"
+    }
+  },
+  "tray": {
+    "show": "Pokaż CamLooper",
+    "link": "Powiąż telefon…",
+    "autostart": "Uruchamiaj przy logowaniu",
+    "quit": "Zakończ"
+  }
 }

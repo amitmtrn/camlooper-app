@@ -109,5 +109,56 @@
   "ad": {
     "title": "Anuncio",
     "dismiss": "Cerrar anuncio"
+  },
+  "remote": {
+    "title": "Control desde el móvil",
+    "badgeConnected": "Conectado",
+    "badgeOffline": "Sin conexión",
+    "badgeLinking": "Vinculando…",
+    "networkNote": "CamLooper solo se conecta a internet después de vincular un móvil.",
+    "unlinkedDesc": "Vincula tu móvil para iniciar una llamada de Zoom, Teams o Meet en este ordenador desde cualquier lugar: CamLooper abre la reunión y activa tu bucle.",
+    "codeLabel": "Introduce el código de 6 dígitos que muestra CamLooper Remote en tu móvil",
+    "codeAria": "Código de vinculación",
+    "linkButton": "Vincular",
+    "linking": "Vinculando…",
+    "errors": {
+      "code_invalid": "Ese código no funcionó. Los códigos caducan a los cinco minutos: genera uno nuevo en tu móvil.",
+      "rate_limited": "Demasiados intentos. Espera un momento y vuelve a intentarlo.",
+      "network": "No se puede conectar con el servicio remoto de CamLooper. Comprueba tu conexión e inténtalo de nuevo.",
+      "server": "Algo falló por nuestra parte. Inténtalo de nuevo en un minuto.",
+      "disabled": "El control desde el móvil no está disponible en esta versión."
+    },
+    "linkedWith": "Vinculado con {{phone}}",
+    "linkedDesc": "Envía un enlace de reunión desde tu móvil y este ordenador lo abrirá.",
+    "unlink": "Desvincular móvil",
+    "relink": "Vincular otro móvil",
+    "cancel": "Cancelar",
+    "yourPhone": "tu móvil",
+    "autostartLabel": "Iniciar CamLooper al iniciar sesión",
+    "autostartDesc": "Se inicia oculto en la bandeja para que tu móvil siempre pueda alcanzarlo.",
+    "trayHint": "Mientras haya un móvil vinculado, cerrar la ventana mantiene CamLooper en la bandeja.",
+    "toastLinkedTitle": "Vinculado con {{phone}}",
+    "toastLinkedDesc": "CamLooper se iniciará al iniciar sesión y esperará en la bandeja, listo para las reuniones enviadas desde tu móvil.",
+    "toastAutostartFailed": "Vinculado, pero no se pudo activar el inicio automático. Puedes activarlo en Avanzado → Control desde el móvil.",
+    "openingMeeting": "Abriendo reunión de {{app}} desde {{phone}}",
+    "openFailedTitle": "No se pudo abrir el enlace de la reunión",
+    "noLoopHintTitle": "No hay ningún bucle cargado",
+    "noLoopHintDesc": "Graba o carga un clip para que CamLooper pueda encender tu cámara cuando llegue una reunión.",
+    "rejectedTitle": "Se ignoró un enlace de tu móvil",
+    "rejectedDesc": "Solo se aceptan enlaces https de Zoom, Microsoft Teams o Google Meet.",
+    "unlinkedByPhoneTitle": "Móvil desvinculado",
+    "unlinkedByPhoneDesc": "Este ordenador ya no está vinculado a ningún móvil y ha dejado de conectarse a internet.",
+    "provider": {
+      "zoom": "Zoom",
+      "teams": "Microsoft Teams",
+      "meet": "Google Meet",
+      "generic": "de vídeo"
+    }
+  },
+  "tray": {
+    "show": "Mostrar CamLooper",
+    "link": "Vincular móvil…",
+    "autostart": "Iniciar al iniciar sesión",
+    "quit": "Salir"
   }
 }
