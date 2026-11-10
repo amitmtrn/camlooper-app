@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "video"
+    },
+    "autoJoin": {
+      "label": "Partecipa alle riunioni automaticamente",
+      "desc": "Apre la riunione in una finestra {{browser}} separata controllata da CamLooper, consente fotocamera e microfono e fa clic su Partecipa per te.",
+      "noBrowser": "Richiede Google Chrome, Microsoft Edge o Brave su questo computer.",
+      "noBrowserTitle": "Aperto nel browser predefinito",
+      "nameLabel": "Il tuo nome nelle riunioni (se non hai eseguito l'accesso)",
+      "namePlaceholder": "Il tuo nome",
+      "openBrowser": "Apri il browser delle riunioni",
+      "openBrowserHint": "Accedi lì una volta a Google, Microsoft o Zoom perché le riunioni si uniscano direttamente, e scegli la fotocamera CamLooper nelle impostazioni di ogni servizio.",
+      "joining": "Partecipazione alla riunione {{app}} da {{phone}} in {{browser}}…",
+      "joinedTitle": "Riunione {{app}} avviata",
+      "admissionTitle": "In attesa di essere ammesso",
+      "admissionDesc": "L'organizzatore deve farti entrare. Accedi una volta tramite «Apri il browser delle riunioni» perché le tue riunioni si uniscano direttamente.",
+      "blockedTitle": "{{app}} non ha fatto entrare CamLooper",
+      "timeoutTitle": "Impossibile fare clic su Partecipa automaticamente",
+      "timeoutDesc": "La pagina della riunione è aperta nella finestra del browser CamLooper; partecipa da lì.",
+      "failedTitle": "Partecipazione automatica non riuscita"
     }
   },
   "tray": {

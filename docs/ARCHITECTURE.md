@@ -202,6 +202,35 @@ private camlooper.com workspace repo, not in this codebase).
 - **Dev:** `CAMLOOPER_API_URL=http://127.0.0.1:8787` targets a local relay (`wrangler dev`); debug
   builds also honour `CAMLOOPER_REMOTE_LINK_CODE=123456` to link without touching the UI.
 
+#### Auto-join (`meeting/`)
+
+When a meeting link arrives and "Join meetings automatically" is on, `meeting_open` launches a
+Chromium browser that CamLooper controls instead of handing the URL to the default browser.
+
+- **Browser discovery** (`meeting/browser.rs`): Chrome → Edge → Brave → Chromium, by well-known
+  paths on Windows/macOS and `PATH` on Linux. None found → `mode: "unavailable"` and the frontend
+  falls back to the opener plugin.
+- **Dedicated profile** `<app_data_dir>/meeting-browser`, launched with `--remote-debugging-port=0`
+  (the port lands in `DevToolsActivePort`), `--use-fake-ui-for-media-stream` (camera/mic prompts
+  are accepted by the browser itself) and `--new-window <url>`. A second launch hands the URL to
+  the running instance. Chrome ≥ 136 refuses remote debugging on the default profile, so the
+  separate profile is mandatory; it also keeps the user's Google / Microsoft / Zoom sign-ins
+  apart from their normal browser ("Open meeting browser" exists for that one-time sign-in).
+- **DevTools client** (`meeting/cdp.rs`): `GET /json/list` on 127.0.0.1 to pick the newest page
+  whose host matches the provider, then `Runtime.evaluate` over its WebSocket. Loopback only;
+  nothing here talks to api.camlooper.com.
+- **Join scripts** (`meeting/scripts/*.js`, embedded with `include_str!`): one per provider,
+  idempotent, evaluated once a second for up to 3 minutes; each returns `{status}` out of
+  `waiting`, `clicked_allow`, `clicked_web`, `clicked_join`, `waiting_admission`, `joined`,
+  `blocked`. Teams uses its `data-tid` hooks, Meet its `jsname` attributes with multilingual text
+  fallbacks, Zoom the web client (`/j/<id>` links are rewritten to `app.zoom.us/wc/<id>/join`).
+  On timeout `dump.js` logs the visible controls so a renamed selector can be fixed from a
+  user's Debug log.
+- **Commands:** `meeting_browser_info`, `meeting_open`, `meeting_open_profile`. **Event:**
+  `meeting://status` (`launching` → `joining` → optional `waiting_admission` → `joined` |
+  `blocked` | `timeout` | `failed`). The two preferences (switch, guest display name) live in the
+  webview's localStorage.
+
 #### Tray & lifecycle (`tray.rs`)
 
 An always-present tray icon (Show CamLooper / Link phone… / Start at login / Quit, labels pushed

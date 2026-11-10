@@ -155,6 +155,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "וידאו"
+    },
+    "autoJoin": {
+      "label": "הצטרפות אוטומטית לפגישות",
+      "desc": "פותח את הפגישה בחלון {{browser}} נפרד ש-CamLooper שולט בו, מאשר מצלמה ומיקרופון ולוחץ על «הצטרפות» בשבילך.",
+      "noBrowser": "נדרש Google Chrome, Microsoft Edge או Brave במחשב הזה.",
+      "noBrowserTitle": "נפתח בדפדפן ברירת המחדל",
+      "nameLabel": "השם שלך בפגישות (כשלא מחוברים לחשבון)",
+      "namePlaceholder": "השם שלך",
+      "openBrowser": "פתיחת דפדפן הפגישות",
+      "openBrowserHint": "התחברו שם פעם אחת ל-Google, Microsoft או Zoom כדי שהפגישות יצטרפו ישירות, ובחרו את מצלמת CamLooper בהגדרות של כל שירות.",
+      "joining": "מצטרף לפגישת {{app}} מ-{{phone}} ב-{{browser}}…",
+      "joinedTitle": "הצטרפת לפגישת {{app}}",
+      "admissionTitle": "ממתין לאישור כניסה",
+      "admissionDesc": "מארח הפגישה צריך להכניס אותך. התחברו פעם אחת דרך «פתיחת דפדפן הפגישות» כדי שהפגישות שלכם יצטרפו ישירות.",
+      "blockedTitle": "{{app}} לא הכניס את CamLooper",
+      "timeoutTitle": "לא ניתן היה ללחוץ על «הצטרפות» אוטומטית",
+      "timeoutDesc": "דף הפגישה פתוח בחלון הדפדפן של CamLooper; הצטרפו משם.",
+      "failedTitle": "ההצטרפות האוטומטית נכשלה"
     }
   },
   "tray": {

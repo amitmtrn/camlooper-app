@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "ビデオ"
+    },
+    "autoJoin": {
+      "label": "会議に自動で参加",
+      "desc": "CamLooper が制御する別の {{browser}} ウィンドウで会議を開き、カメラとマイクを許可して「参加」をクリックします。",
+      "noBrowser": "このコンピューターに Google Chrome、Microsoft Edge または Brave が必要です。",
+      "noBrowserTitle": "既定のブラウザーで開きました",
+      "nameLabel": "会議での表示名（サインインしていないときに使用）",
+      "namePlaceholder": "あなたの名前",
+      "openBrowser": "会議ブラウザーを開く",
+      "openBrowserHint": "そこで一度 Google、Microsoft、Zoom にサインインすると会議に直接参加できます。各サービスの設定で CamLooper カメラを選んでください。",
+      "joining": "{{phone}} から送られた {{app}} 会議に {{browser}} で参加しています…",
+      "joinedTitle": "{{app}} 会議に参加しました",
+      "admissionTitle": "入室の許可を待っています",
+      "admissionDesc": "主催者の許可が必要です。「会議ブラウザーを開く」から一度サインインすると、自分の会議には直接参加できます。",
+      "blockedTitle": "{{app}} が CamLooper の入室を許可しませんでした",
+      "timeoutTitle": "「参加」を自動でクリックできませんでした",
+      "timeoutDesc": "会議ページは CamLooper のブラウザーウィンドウで開いています。そこから参加してください。",
+      "failedTitle": "自動参加に失敗しました"
     }
   },
   "tray": {

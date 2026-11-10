@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "video"
+    },
+    "autoJoin": {
+      "label": "Tự động tham gia cuộc họp",
+      "desc": "Mở cuộc họp trong một cửa sổ {{browser}} riêng do CamLooper điều khiển, cho phép camera và micrô rồi bấm Tham gia thay bạn.",
+      "noBrowser": "Cần Google Chrome, Microsoft Edge hoặc Brave trên máy tính này.",
+      "noBrowserTitle": "Đã mở trong trình duyệt mặc định",
+      "nameLabel": "Tên của bạn trong cuộc họp (dùng khi chưa đăng nhập)",
+      "namePlaceholder": "Tên của bạn",
+      "openBrowser": "Mở trình duyệt cuộc họp",
+      "openBrowserHint": "Đăng nhập Google, Microsoft hoặc Zoom ở đó một lần để cuộc họp tham gia trực tiếp, và chọn camera CamLooper trong cài đặt của từng dịch vụ.",
+      "joining": "Đang tham gia cuộc họp {{app}} từ {{phone}} trong {{browser}}…",
+      "joinedTitle": "Đã tham gia cuộc họp {{app}}",
+      "admissionTitle": "Đang chờ được cho vào",
+      "admissionDesc": "Người chủ trì phải cho bạn vào. Đăng nhập một lần qua “Mở trình duyệt cuộc họp” để các cuộc họp của bạn tham gia trực tiếp.",
+      "blockedTitle": "{{app}} không cho CamLooper vào",
+      "timeoutTitle": "Không thể tự động bấm Tham gia",
+      "timeoutDesc": "Trang cuộc họp đang mở trong cửa sổ trình duyệt CamLooper; hãy tham gia từ đó.",
+      "failedTitle": "Tự động tham gia thất bại"
     }
   },
   "tray": {

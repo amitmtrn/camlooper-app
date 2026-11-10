@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "video"
+    },
+    "autoJoin": {
+      "label": "Gabung rapat secara otomatis",
+      "desc": "Membuka rapat di jendela {{browser}} terpisah yang dikendalikan CamLooper, mengizinkan kamera dan mikrofon, lalu mengeklik Gabung untuk Anda.",
+      "noBrowser": "Memerlukan Google Chrome, Microsoft Edge, atau Brave di komputer ini.",
+      "noBrowserTitle": "Dibuka di browser default Anda",
+      "nameLabel": "Nama Anda di rapat (dipakai saat belum masuk akun)",
+      "namePlaceholder": "Nama Anda",
+      "openBrowser": "Buka browser rapat",
+      "openBrowserHint": "Masuk sekali di sana ke Google, Microsoft, atau Zoom agar rapat langsung bergabung, dan pilih kamera CamLooper di pengaturan tiap layanan.",
+      "joining": "Bergabung ke rapat {{app}} dari {{phone}} di {{browser}}…",
+      "joinedTitle": "Bergabung ke rapat {{app}}",
+      "admissionTitle": "Menunggu diizinkan masuk",
+      "admissionDesc": "Penyelenggara harus mengizinkan Anda masuk. Masuk sekali lewat “Buka browser rapat” agar rapat Anda sendiri langsung bergabung.",
+      "blockedTitle": "{{app}} tidak mengizinkan CamLooper masuk",
+      "timeoutTitle": "Tidak dapat mengeklik Gabung secara otomatis",
+      "timeoutDesc": "Halaman rapat terbuka di jendela browser CamLooper; bergabunglah dari sana.",
+      "failedTitle": "Gabung otomatis gagal"
     }
   },
   "tray": {

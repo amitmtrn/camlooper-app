@@ -89,6 +89,61 @@ enable raises a single UAC prompt to register the driver; that is by design.
 
 <!-- Newest entries first. -->
 
+### Auto-join: CamLooper opens the meeting in its own browser window and clicks Join
+_Added 2026-11-09 · All · `src-tauri/src/meeting/`, `src/hooks/use-meeting.ts`, `src/components/RemoteCard.tsx`_
+
+With a phone linked, a meeting link sent from the phone no longer just opens in the default
+browser. CamLooper launches Google Chrome, Microsoft Edge, Brave or Chromium (the first one
+found, in that order) with its **own profile** (`<app data>/meeting-browser`), lets the
+browser grant camera and microphone by itself, and clicks through the pre-join screen
+(guest name, camera on, "Join now"). The join is driven over the browser's DevTools port on
+127.0.0.1; nothing new is sent to api.camlooper.com.
+
+**Setup:** a linked phone (next section); Chrome, Edge or Brave installed; a real meeting you
+can host from another device or your normal browser (Google Meet is the quickest). Phone-free
+alternative on a debug build:
+`CAMLOOPER_TEST_OPEN_MEETING='https://teams.microsoft.com/l/meetup-join/…' npm run tauri dev`
+drives the join 3 s after startup.
+
+**Steps:**
+1. Open **Advanced → Phone remote** (linked). Read the **Join meetings automatically** block.
+2. Toggle the switch off and on. Type a name under "Your name in meetings". Restart the app.
+3. Click **Open meeting browser**.
+4. Close that window. Start a Meet meeting in your normal browser and, from the phone, send its
+   link with **Open on desktop**.
+5. In the host's browser, admit the guest when asked.
+6. Send the same link again while the CamLooper browser window is still open.
+7. Send a link to a meeting that does not exist (e.g. `https://meet.google.com/abc-defg-hij`).
+8. Turn the switch **off** and send a link.
+9. With the switch on, make the browser unavailable (rename the binary, or test on a machine
+   without Chrome/Edge/Brave) and send a link.
+10. Open **Advanced → Debug logs** after each send.
+
+**Expected:**
+- Step 1: the block names the browser found ("…separate Google Chrome window…"); the switch
+  is on by default.
+- Step 2: both preferences survive the restart (stored on this computer only).
+- Step 3: a browser window opens with three tabs (Meet, Teams, Zoom sign-in) in a profile that
+  has none of your regular browser's sign-ins. Signing in there is remembered for later joins.
+- Step 4: toast "Joining Google Meet meeting from <phone> in Google Chrome…". A browser window
+  opens on the meeting; the camera/microphone prompt is **not** shown; the name field is filled
+  with your name; "Ask to join" (or "Join now" when signed in) is clicked without you touching
+  anything. Toast "Waiting to be admitted" while the host has to let you in, then "Joined the
+  Google Meet meeting" once you are in.
+- Step 5: you are in the call with the camera on. Pick the CamLooper camera once in Meet's
+  settings; the profile remembers it.
+- Step 6: the link opens as a new tab in the existing CamLooper browser window (no second
+  window) and is driven the same way.
+- Step 7: toast "Google Meet didn't let CamLooper in" with the page's message; no retry loop.
+- Step 8: the link opens in your default browser as before; nothing is clicked for you.
+- Step 9: toast "Opened in your default browser" with "Needs Google Chrome, Microsoft Edge or
+  Brave…"; the switch is disabled with the same note.
+- Step 10: `meeting: opening <provider> meeting in <browser> (new|running instance)`, then
+  `meeting: <provider> join step: waiting / clicked_join / joined` (or `blocked`). If the join
+  gives up after 3 minutes, toast "Couldn't click Join automatically" and the log ends with
+  `meeting: gave up … visible controls: …` listing the page's buttons — keep that line for the
+  bug report, it is what fixes a renamed selector.
+
 ### Phone remote: linking with a code, and opening a meeting sent from the phone
 _Added 2026-11-08 · All · `src-tauri/src/remote/`, `src/components/RemoteCard.tsx`_
 

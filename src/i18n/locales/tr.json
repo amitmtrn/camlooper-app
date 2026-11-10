@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "görüntülü"
+    },
+    "autoJoin": {
+      "label": "Toplantılara otomatik katıl",
+      "desc": "Toplantıyı CamLooper'ın kontrol ettiği ayrı bir {{browser}} penceresinde açar, kameraya ve mikrofona izin verir ve sizin yerinize Katıl'a tıklar.",
+      "noBrowser": "Bu bilgisayarda Google Chrome, Microsoft Edge veya Brave gerekir.",
+      "noBrowserTitle": "Varsayılan tarayıcıda açıldı",
+      "nameLabel": "Toplantılardaki adınız (oturum açmadığınızda kullanılır)",
+      "namePlaceholder": "Adınız",
+      "openBrowser": "Toplantı tarayıcısını aç",
+      "openBrowserHint": "Toplantılara doğrudan katılmak için orada Google, Microsoft veya Zoom'da bir kez oturum açın ve her hizmetin ayarlarında CamLooper kamerasını seçin.",
+      "joining": "{{phone}} cihazından gelen {{app}} toplantısına {{browser}} içinde katılınıyor…",
+      "joinedTitle": "{{app}} toplantısına katıldınız",
+      "admissionTitle": "Kabul bekleniyor",
+      "admissionDesc": "Toplantı sahibinin sizi içeri alması gerekiyor. Kendi toplantılarınıza doğrudan katılmak için „Toplantı tarayıcısını aç“ ile bir kez oturum açın.",
+      "blockedTitle": "{{app}} CamLooper'ı içeri almadı",
+      "timeoutTitle": "Katıl otomatik olarak tıklanamadı",
+      "timeoutDesc": "Toplantı sayfası CamLooper tarayıcı penceresinde açık; oradan katılın.",
+      "failedTitle": "Otomatik katılım başarısız oldu"
     }
   },
   "tray": {

@@ -9,6 +9,7 @@ mod camera_capture;
 mod installer_language;
 #[cfg(target_os = "macos")]
 mod macos_virtual_camera;
+mod meeting;
 mod remote;
 mod tray;
 #[cfg(target_os = "windows")]
@@ -313,6 +314,10 @@ pub fn run() {
                     remote::remote_get_autostart,
                     tray::get_startup_mode,
                     tray::set_tray_labels,
+                    // Auto-join (CamLooper-driven browser)
+                    meeting::meeting_browser_info,
+                    meeting::meeting_open,
+                    meeting::meeting_open_profile,
                 ]
             }
             #[cfg(not(target_os = "windows"))]
@@ -362,6 +367,10 @@ pub fn run() {
                     remote::remote_get_autostart,
                     tray::get_startup_mode,
                     tray::set_tray_labels,
+                    // Auto-join (CamLooper-driven browser)
+                    meeting::meeting_browser_info,
+                    meeting::meeting_open,
+                    meeting::meeting_open_profile,
                 ]
             }
         })
@@ -386,6 +395,7 @@ pub fn run() {
             // Phone remote: loads remote.json and parks (no network) unless a phone is linked.
             // Then the tray, which also decides whether the (hidden-by-default) window shows.
             remote::init(app.handle().clone());
+            meeting::init(app.handle().clone());
             tray::init(app)?;
             
             // The softcam DirectShow driver is now bundled with the app and registered

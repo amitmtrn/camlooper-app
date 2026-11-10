@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "Video"
+    },
+    "autoJoin": {
+      "label": "Meetings automatisch beitreten",
+      "desc": "Öffnet das Meeting in einem separaten {{browser}}-Fenster, das CamLooper steuert, erlaubt Kamera und Mikrofon und klickt für dich auf „Teilnehmen“.",
+      "noBrowser": "Benötigt Google Chrome, Microsoft Edge oder Brave auf diesem Computer.",
+      "noBrowserTitle": "Im Standardbrowser geöffnet",
+      "nameLabel": "Dein Name in Meetings (wenn du nicht angemeldet bist)",
+      "namePlaceholder": "Dein Name",
+      "openBrowser": "Meeting-Browser öffnen",
+      "openBrowserHint": "Melde dich dort einmal bei Google, Microsoft oder Zoom an, damit Meetings direkt beitreten, und wähle in den Einstellungen jedes Dienstes die CamLooper-Kamera.",
+      "joining": "{{app}}-Meeting von {{phone}} wird in {{browser}} beigetreten…",
+      "joinedTitle": "{{app}}-Meeting beigetreten",
+      "admissionTitle": "Warte auf Einlass",
+      "admissionDesc": "Der Organisator muss dich hereinlassen. Melde dich einmal über „Meeting-Browser öffnen“ an, damit deine eigenen Meetings direkt beitreten.",
+      "blockedTitle": "{{app}} hat CamLooper nicht hereingelassen",
+      "timeoutTitle": "„Teilnehmen“ konnte nicht automatisch geklickt werden",
+      "timeoutDesc": "Die Meeting-Seite ist im CamLooper-Browserfenster geöffnet; tritt dort bei.",
+      "failedTitle": "Automatischer Beitritt fehlgeschlagen"
     }
   },
   "tray": {
