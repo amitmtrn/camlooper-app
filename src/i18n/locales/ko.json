@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "영상"
+    },
+    "autoJoin": {
+      "label": "회의에 자동으로 참여",
+      "desc": "CamLooper가 제어하는 별도의 {{browser}} 창에서 회의를 열고 카메라와 마이크를 허용한 뒤 참여 버튼을 대신 눌러 줍니다.",
+      "noBrowser": "이 컴퓨터에 Google Chrome, Microsoft Edge 또는 Brave가 필요합니다.",
+      "noBrowserTitle": "기본 브라우저에서 열었습니다",
+      "nameLabel": "회의에서 표시할 이름 (로그인하지 않았을 때 사용)",
+      "namePlaceholder": "이름",
+      "openBrowser": "회의 브라우저 열기",
+      "openBrowserHint": "거기서 Google, Microsoft 또는 Zoom에 한 번 로그인하면 회의에 바로 참여하며, 각 서비스 설정에서 CamLooper 카메라를 선택하세요.",
+      "joining": "{{phone}}에서 보낸 {{app}} 회의에 {{browser}}로 참여하는 중…",
+      "joinedTitle": "{{app}} 회의에 참여했습니다",
+      "admissionTitle": "입장 승인을 기다리는 중",
+      "admissionDesc": "주최자가 입장을 허용해야 합니다. “회의 브라우저 열기”에서 한 번 로그인하면 내 회의에는 바로 참여합니다.",
+      "blockedTitle": "{{app}}이(가) CamLooper의 입장을 허용하지 않았습니다",
+      "timeoutTitle": "참여 버튼을 자동으로 누르지 못했습니다",
+      "timeoutDesc": "회의 페이지가 CamLooper 브라우저 창에 열려 있습니다. 거기서 참여하세요.",
+      "failedTitle": "자동 참여 실패"
     }
   },
   "tray": {

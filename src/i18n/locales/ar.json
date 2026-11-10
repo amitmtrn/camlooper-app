@@ -157,6 +157,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "فيديو"
+    },
+    "autoJoin": {
+      "label": "الانضمام إلى الاجتماعات تلقائيًا",
+      "desc": "يفتح الاجتماع في نافذة {{browser}} منفصلة يتحكم بها CamLooper، ويسمح بالكاميرا والميكروفون، وينقر على «انضمام» نيابةً عنك.",
+      "noBrowser": "يتطلب Google Chrome أو Microsoft Edge أو Brave على هذا الكمبيوتر.",
+      "noBrowserTitle": "تم الفتح في متصفحك الافتراضي",
+      "nameLabel": "اسمك في الاجتماعات (يُستخدم عندما لا تكون مسجّل الدخول)",
+      "namePlaceholder": "اسمك",
+      "openBrowser": "فتح متصفح الاجتماعات",
+      "openBrowserHint": "سجّل الدخول هناك مرة واحدة إلى Google أو Microsoft أو Zoom لتنضم الاجتماعات مباشرة، واختر كاميرا CamLooper في إعدادات كل خدمة.",
+      "joining": "جارٍ الانضمام إلى اجتماع {{app}} من {{phone}} في {{browser}}…",
+      "joinedTitle": "تم الانضمام إلى اجتماع {{app}}",
+      "admissionTitle": "في انتظار السماح بالدخول",
+      "admissionDesc": "على مضيف الاجتماع السماح لك بالدخول. سجّل الدخول مرة واحدة عبر «فتح متصفح الاجتماعات» لتنضم اجتماعاتك مباشرة.",
+      "blockedTitle": "لم يسمح {{app}} لـ CamLooper بالدخول",
+      "timeoutTitle": "تعذّر النقر على «انضمام» تلقائيًا",
+      "timeoutDesc": "صفحة الاجتماع مفتوحة في نافذة متصفح CamLooper؛ انضم من هناك.",
+      "failedTitle": "فشل الانضمام التلقائي"
     }
   },
   "tray": {

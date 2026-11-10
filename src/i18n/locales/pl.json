@@ -155,6 +155,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "wideo"
+    },
+    "autoJoin": {
+      "label": "Dołączaj do spotkań automatycznie",
+      "desc": "Otwiera spotkanie w osobnym oknie {{browser}} sterowanym przez CamLooper, zezwala na kamerę i mikrofon i klika Dołącz za Ciebie.",
+      "noBrowser": "Wymaga Google Chrome, Microsoft Edge lub Brave na tym komputerze.",
+      "noBrowserTitle": "Otwarto w domyślnej przeglądarce",
+      "nameLabel": "Twoje imię na spotkaniach (gdy nie jesteś zalogowany)",
+      "namePlaceholder": "Twoje imię",
+      "openBrowser": "Otwórz przeglądarkę spotkań",
+      "openBrowserHint": "Zaloguj się tam raz do Google, Microsoft lub Zoom, aby spotkania dołączały bezpośrednio, i wybierz kamerę CamLooper w ustawieniach każdej usługi.",
+      "joining": "Dołączanie do spotkania {{app}} z {{phone}} w {{browser}}…",
+      "joinedTitle": "Dołączono do spotkania {{app}}",
+      "admissionTitle": "Oczekiwanie na wpuszczenie",
+      "admissionDesc": "Organizator musi Cię wpuścić. Zaloguj się raz przez „Otwórz przeglądarkę spotkań”, aby Twoje własne spotkania dołączały bezpośrednio.",
+      "blockedTitle": "{{app}} nie wpuścił CamLooper",
+      "timeoutTitle": "Nie udało się automatycznie kliknąć Dołącz",
+      "timeoutDesc": "Strona spotkania jest otwarta w oknie przeglądarki CamLooper; dołącz stamtąd.",
+      "failedTitle": "Automatyczne dołączanie nie powiodło się"
     }
   },
   "tray": {

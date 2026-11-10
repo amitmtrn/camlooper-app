@@ -42,7 +42,7 @@ import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { useWindowShown } from "./hooks/use-window-shown";
 import { useRemote, useRemoteCommands, type OpenMeetingCommand } from "./hooks/use-remote";
 import { RemoteCard, type RemoteCardHandle } from "./components/RemoteCard";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { useMeeting, useMeetingStatus } from "@/hooks/use-meeting";
 import { Stepper } from "./components/flow/Stepper";
 import { SUPPORTED_LANGUAGES, loadLanguage } from "./i18n";
 import { cn } from "@/lib/utils";
@@ -276,6 +276,7 @@ function CamLooper() {
 
   // Phone remote (Advanced → Phone remote). Networking lives in Rust: src-tauri/src/remote.
   const remote = useRemote();
+  const meeting = useMeeting();
   const remoteCardRef = React.useRef<RemoteCardHandle>(null);
   const [linkingRequest, setLinkingRequest] = useState(0);
   const [recordSeconds, setRecordSeconds] = useState(0);
@@ -824,8 +825,16 @@ function CamLooper() {
       console.error('remote: could not start the camera before opening the meeting:', error);
     }
     try {
-      if (cmd.url.startsWith('https://')) await openUrl(cmd.url);
-      toast.success(t('remote.openingMeeting', { app, phone }));
+      if (!cmd.url.startsWith('https://')) throw new Error('not an https link');
+      const opened = await meeting.open(cmd.url);
+      if (opened.mode === 'auto') {
+        toast.success(t('remote.autoJoin.joining', { app, phone, browser: opened.browser ?? '' }));
+      } else {
+        toast.success(t('remote.openingMeeting', { app, phone }));
+        if (opened.mode === 'unavailable') {
+          toast.info(t('remote.autoJoin.noBrowserTitle'), { description: t('remote.autoJoin.noBrowser') });
+        }
+      }
       if (!videoInfo && !isLiveCamera) {
         toast.info(t('remote.noLoopHintTitle'), { description: t('remote.noLoopHintDesc') });
       }
@@ -859,6 +868,39 @@ function CamLooper() {
       toast.warning(t('remote.rejectedTitle'), { description: t('remote.rejectedDesc') });
     },
   });
+
+  // Progress of a driven join (Rust clicks through the pre-join screen in the CamLooper browser).
+  useMeetingStatus((status) => {
+    const app = t(`remote.provider.${status.provider}`);
+    switch (status.phase) {
+      case 'joined':
+        toast.success(t('remote.autoJoin.joinedTitle', { app }));
+        break;
+      case 'waiting_admission':
+        toast.info(t('remote.autoJoin.admissionTitle'), { description: t('remote.autoJoin.admissionDesc') });
+        break;
+      case 'blocked':
+        toast.warning(t('remote.autoJoin.blockedTitle', { app }), { description: status.detail ?? undefined });
+        break;
+      case 'timeout':
+        toast.warning(t('remote.autoJoin.timeoutTitle'), { description: t('remote.autoJoin.timeoutDesc') });
+        break;
+      case 'failed':
+        toast.error(t('remote.autoJoin.failedTitle'), { description: status.detail ?? undefined });
+        break;
+      default:
+        break;
+    }
+  });
+
+  const handleOpenMeetingBrowser = async () => {
+    try {
+      await meeting.openProfile();
+    } catch (error) {
+      console.error('meeting: could not open the meeting browser:', error);
+      toast.error(t('remote.autoJoin.failedTitle'), { description: String(error) });
+    }
+  };
 
   // Tray "Link phone…": once Advanced is open, scroll the card into view and focus the code field.
   useEffect(() => {
@@ -1538,6 +1580,10 @@ function CamLooper() {
                 onLink={remote.link}
                 onUnlink={remote.unlink}
                 onToggleAutostart={remote.setAutostart}
+                meeting={{ browserName: meeting.browser.name, autoJoin: meeting.autoJoin, displayName: meeting.displayName }}
+                onToggleAutoJoin={meeting.setAutoJoin}
+                onChangeDisplayName={meeting.setDisplayName}
+                onOpenMeetingBrowser={handleOpenMeetingBrowser}
               />
 
               {/* Loop settings */}

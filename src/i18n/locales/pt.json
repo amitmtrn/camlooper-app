@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "de vídeo"
+    },
+    "autoJoin": {
+      "label": "Entrar nas reuniões automaticamente",
+      "desc": "Abre a reunião numa janela separada do {{browser}} controlada pelo CamLooper, permite câmara e microfone e clica em Entrar por si.",
+      "noBrowser": "Requer Google Chrome, Microsoft Edge ou Brave neste computador.",
+      "noBrowserTitle": "Aberto no seu navegador predefinido",
+      "nameLabel": "O seu nome nas reuniões (quando não tem sessão iniciada)",
+      "namePlaceholder": "O seu nome",
+      "openBrowser": "Abrir navegador de reuniões",
+      "openBrowserHint": "Inicie sessão aí uma vez no Google, Microsoft ou Zoom para que as reuniões entrem diretamente, e escolha a câmara CamLooper nas definições de cada serviço.",
+      "joining": "A entrar na reunião {{app}} enviada por {{phone}} no {{browser}}…",
+      "joinedTitle": "Entrou na reunião {{app}}",
+      "admissionTitle": "À espera de admissão",
+      "admissionDesc": "O anfitrião tem de o deixar entrar. Inicie sessão uma vez em «Abrir navegador de reuniões» para que as suas reuniões entrem diretamente.",
+      "blockedTitle": "O {{app}} não deixou o CamLooper entrar",
+      "timeoutTitle": "Não foi possível clicar em Entrar automaticamente",
+      "timeoutDesc": "A página da reunião está aberta na janela do navegador CamLooper; entre a partir daí.",
+      "failedTitle": "A entrada automática falhou"
     }
   },
   "tray": {

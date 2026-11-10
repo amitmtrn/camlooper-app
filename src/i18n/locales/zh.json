@@ -153,6 +153,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "视频"
+    },
+    "autoJoin": {
+      "label": "自动加入会议",
+      "desc": "在 CamLooper 控制的独立 {{browser}} 窗口中打开会议，允许摄像头和麦克风，并替您点击“加入”。",
+      "noBrowser": "需要这台电脑上安装 Google Chrome、Microsoft Edge 或 Brave。",
+      "noBrowserTitle": "已在默认浏览器中打开",
+      "nameLabel": "会议中显示的名字（未登录时使用）",
+      "namePlaceholder": "您的名字",
+      "openBrowser": "打开会议浏览器",
+      "openBrowserHint": "在那里登录一次 Google、Microsoft 或 Zoom，会议即可直接加入；并在各服务的设置中选择 CamLooper 摄像头。",
+      "joining": "正在 {{browser}} 中加入来自 {{phone}} 的 {{app}} 会议…",
+      "joinedTitle": "已加入 {{app}} 会议",
+      "admissionTitle": "等待主持人准入",
+      "admissionDesc": "需要主持人允许您进入。通过“打开会议浏览器”登录一次，您自己的会议就能直接加入。",
+      "blockedTitle": "{{app}} 未让 CamLooper 进入",
+      "timeoutTitle": "无法自动点击“加入”",
+      "timeoutDesc": "会议页面已在 CamLooper 浏览器窗口中打开，请从那里加入。",
+      "failedTitle": "自动加入失败"
     }
   },
   "tray": {

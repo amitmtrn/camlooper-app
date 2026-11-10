@@ -182,6 +182,24 @@
       "teams": "Microsoft Teams",
       "meet": "Google Meet",
       "generic": "video"
+    },
+    "autoJoin": {
+      "label": "Join meetings automatically",
+      "desc": "Opens the meeting in a separate {{browser}} window that CamLooper controls, allows the camera and microphone, and clicks Join for you.",
+      "noBrowser": "Needs Google Chrome, Microsoft Edge or Brave on this computer.",
+      "noBrowserTitle": "Opened in your default browser",
+      "nameLabel": "Your name in meetings (used when you're not signed in)",
+      "namePlaceholder": "Your name",
+      "openBrowser": "Open meeting browser",
+      "openBrowserHint": "Sign in to Google, Microsoft or Zoom there once so meetings join directly, and pick the CamLooper camera in each service's settings.",
+      "joining": "Joining {{app}} meeting from {{phone}} in {{browser}}…",
+      "joinedTitle": "Joined the {{app}} meeting",
+      "admissionTitle": "Waiting to be admitted",
+      "admissionDesc": "The meeting host has to let you in. Sign in once via “Open meeting browser” so your own meetings join directly.",
+      "blockedTitle": "{{app}} didn't let CamLooper in",
+      "timeoutTitle": "Couldn't click Join automatically",
+      "timeoutDesc": "The meeting page is open in the CamLooper browser window; join from there.",
+      "failedTitle": "Auto-join failed"
     }
   },
   "tray": {

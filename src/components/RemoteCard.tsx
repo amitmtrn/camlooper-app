@@ -19,6 +19,11 @@ interface RemoteCardProps {
   onLink: (code: string) => Promise<RemoteErrorCode | null>;
   onUnlink: () => Promise<void>;
   onToggleAutostart: (enabled: boolean) => Promise<boolean>;
+  /** Auto-join (CamLooper-driven browser); `browserName` is null when none is installed. */
+  meeting: { browserName: string | null; autoJoin: boolean; displayName: string };
+  onToggleAutoJoin: (enabled: boolean) => void;
+  onChangeDisplayName: (name: string) => void;
+  onOpenMeetingBrowser: () => Promise<void>;
 }
 
 const CODE_LENGTH = 6;
@@ -29,7 +34,7 @@ const CODE_LENGTH = 6;
  * app to that state.
  */
 export const RemoteCard = forwardRef<RemoteCardHandle, RemoteCardProps>(function RemoteCard(
-  { state, busy, onLink, onUnlink, onToggleAutostart },
+  { state, busy, onLink, onUnlink, onToggleAutostart, meeting, onToggleAutoJoin, onChangeDisplayName, onOpenMeetingBrowser },
   ref,
 ) {
   const { t } = useTranslation();
@@ -116,6 +121,45 @@ export const RemoteCard = forwardRef<RemoteCardHandle, RemoteCardProps>(function
                 disabled={pendingAutostart !== null}
                 aria-label={t("remote.autostartLabel")}
               />
+            </div>
+
+            <div className="space-y-2 border-t border-border/60 pt-3">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <span className="text-sm">{t("remote.autoJoin.label")}</span>
+                  <p className="text-xs text-muted-foreground">
+                    {meeting.browserName
+                      ? t("remote.autoJoin.desc", { browser: meeting.browserName })
+                      : t("remote.autoJoin.noBrowser")}
+                  </p>
+                </div>
+                <Switch
+                  checked={meeting.autoJoin && meeting.browserName !== null}
+                  onCheckedChange={onToggleAutoJoin}
+                  disabled={meeting.browserName === null}
+                  aria-label={t("remote.autoJoin.label")}
+                />
+              </div>
+              {meeting.autoJoin && meeting.browserName !== null && (
+                <>
+                  <label className="block space-y-1">
+                    <span className="text-xs text-muted-foreground">{t("remote.autoJoin.nameLabel")}</span>
+                    <input
+                      value={meeting.displayName}
+                      onChange={(e) => onChangeDisplayName(e.target.value)}
+                      placeholder={t("remote.autoJoin.namePlaceholder")}
+                      maxLength={64}
+                      className="w-full h-8 rounded-md border border-border bg-background/40 px-2 text-sm"
+                    />
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button variant="outline" size="sm" onClick={() => void onOpenMeetingBrowser()}>
+                      {t("remote.autoJoin.openBrowser")}
+                    </Button>
+                    <p className="text-xs text-muted-foreground flex-1 min-w-[12rem]">{t("remote.autoJoin.openBrowserHint")}</p>
+                  </div>
+                </>
+              )}
             </div>
 
             <p className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">{t("remote.trayHint")}</p>
