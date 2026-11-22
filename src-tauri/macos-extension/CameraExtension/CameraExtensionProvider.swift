@@ -3,32 +3,51 @@ import CoreMediaIO
 import IOKit.audio
 import os.log
 
-// A CMIO Camera Extension that publishes one virtual camera device with one stream.
-// Until real frames arrive over XPC (see FrameReceiver / Stage C2), it emits a moving
-// test pattern so the CMIO plumbing can be validated first (Stage C1).
+// A CMIO Camera Extension that publishes one virtual camera device with two streams:
 //
-// Structure mirrors Apple's "Creating a camera extension" sample: a ProviderSource owns
-// one DeviceSource, which owns one StreamSource. The DeviceSource drives a timer that
-// fills CVPixelBuffers from a pool and hands them to the stream as CMSampleBuffers.
+//   source — what Zoom / Meet / Photo Booth read.
+//   sink   — what the CamLooper app writes into (CoreMediaIO's C API, see
+//            src-tauri/macos/camera_bridge.m).
+//
+// Frames the app enqueues on the sink are forwarded straight to the source. A sink stream
+// is the transport on purpose: CoreMediaIO already carries IOSurface-backed sample buffers
+// across the sandbox boundary, so the app needs no XPC service, no shared App Group and no
+// second copy of each frame.
+//
+// While the app is not feeding the sink, the source emits a quiet placeholder so the camera
+// is still a valid, visibly live device rather than a frozen or failing one.
 
 let kFrameRate = Shared.frameRate
 let kWidth = Shared.width
 let kHeight = Shared.height
 private let logger = Logger(subsystem: Shared.extensionBundleID, category: "Extension")
 
-// MARK: - Stream Source
+/// How long after the last app frame the placeholder takes over again.
+private let kSinkStaleAfterNanos: UInt64 = 500_000_000
+
+private func hostTimeNanos() -> UInt64 {
+    UInt64(CMClockGetTime(CMClockGetHostTimeClock()).seconds * Double(NSEC_PER_SEC))
+}
+
+// MARK: - Stream Source (source and sink share everything but direction)
 
 class CameraExtensionStreamSource: NSObject, CMIOExtensionStreamSource {
 
     private(set) var stream: CMIOExtensionStream!
     let device: CMIOExtensionDevice
+    let direction: CMIOExtensionStream.Direction
     private let _streamFormat: CMIOExtensionStreamFormat
+    /// The app process currently writing to the sink. Only meaningful for the sink stream.
+    private(set) var client: CMIOExtensionClient?
 
-    init(localizedName: String, streamID: UUID, streamFormat: CMIOExtensionStreamFormat, device: CMIOExtensionDevice) {
+    init(localizedName: String, streamID: UUID, direction: CMIOExtensionStream.Direction,
+         streamFormat: CMIOExtensionStreamFormat, device: CMIOExtensionDevice) {
         self.device = device
+        self.direction = direction
         self._streamFormat = streamFormat
         super.init()
-        self.stream = CMIOExtensionStream(localizedName: localizedName, streamID: streamID, direction: .source, clockType: .hostTime, source: self)
+        self.stream = CMIOExtensionStream(localizedName: localizedName, streamID: streamID,
+                                          direction: direction, clockType: .hostTime, source: self)
     }
 
     var formats: [CMIOExtensionStreamFormat] { [_streamFormat] }
@@ -38,7 +57,12 @@ class CameraExtensionStreamSource: NSObject, CMIOExtensionStreamSource {
     }
 
     var availableProperties: Set<CMIOExtensionProperty> {
-        [.streamActiveFormatIndex, .streamFrameDuration]
+        var p: Set<CMIOExtensionProperty> = [.streamActiveFormatIndex, .streamFrameDuration]
+        if direction == .sink {
+            p.formUnion([.streamSinkBufferQueueSize, .streamSinkBuffersRequiredForStartup,
+                         .streamSinkBufferUnderrunCount, .streamSinkEndOfData])
+        }
+        return p
     }
 
     func streamProperties(forProperties properties: Set<CMIOExtensionProperty>) throws -> CMIOExtensionStreamProperties {
@@ -49,6 +73,20 @@ class CameraExtensionStreamSource: NSObject, CMIOExtensionStreamSource {
         if properties.contains(.streamFrameDuration) {
             p.frameDuration = CMTime(value: 1, timescale: Int32(kFrameRate))
         }
+        if direction == .sink {
+            if properties.contains(.streamSinkBufferQueueSize) {
+                p.sinkBufferQueueSize = 1
+            }
+            if properties.contains(.streamSinkBuffersRequiredForStartup) {
+                p.sinkBuffersRequiredForStartup = 1
+            }
+            if properties.contains(.streamSinkBufferUnderrunCount) {
+                p.sinkBufferUnderrunCount = 0
+            }
+            if properties.contains(.streamSinkEndOfData) {
+                p.sinkEndOfData = 0
+            }
+        }
         return p
     }
 
@@ -58,20 +96,34 @@ class CameraExtensionStreamSource: NSObject, CMIOExtensionStreamSource {
         }
     }
 
-    func authorizedToStartStream(for client: CMIOExtensionClient) -> Bool { true }
+    func authorizedToStartStream(for client: CMIOExtensionClient) -> Bool {
+        if direction == .sink {
+            self.client = client
+        }
+        return true
+    }
 
     func startStream() throws {
         guard let deviceSource = device.source as? CameraExtensionDeviceSource else {
             fatalError("Unexpected device source type")
         }
-        deviceSource.startStreaming()
+        if direction == .sink {
+            guard let client = client else { return }
+            deviceSource.startSink(client: client)
+        } else {
+            deviceSource.startStreaming()
+        }
     }
 
     func stopStream() throws {
         guard let deviceSource = device.source as? CameraExtensionDeviceSource else {
             fatalError("Unexpected device source type")
         }
-        deviceSource.stopStreaming()
+        if direction == .sink {
+            deviceSource.stopSink()
+        } else {
+            deviceSource.stopStreaming()
+        }
     }
 }
 
@@ -81,7 +133,7 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
 
     private(set) var device: CMIOExtensionDevice!
     private var _streamSource: CameraExtensionStreamSource!
-    private var _streamingCounter: UInt32 = 0
+    private var _streamSink: CameraExtensionStreamSource!
     private var _timer: DispatchSourceTimer?
     private let _timerQueue = DispatchQueue(label: "timerQueue", qos: .userInteractive)
     private var _videoDescription: CMFormatDescription!
@@ -89,9 +141,15 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
     private var _bufferAuxAttributes: NSDictionary!
     private var _frameCounter: UInt64 = 0
 
+    // Shared between the timer queue and CoreMediaIO's callback queues.
+    private let _lock = NSLock()
+    private var _streamingCounter: UInt32 = 0
+    private var _sinkStarted = false
+    private var _lastSinkFrameNanos: UInt64 = 0
+
     init(localizedName: String) {
         super.init()
-        let deviceID = UUID()
+        let deviceID = Shared.deviceID
         self.device = CMIOExtensionDevice(localizedName: localizedName, deviceID: deviceID, legacyDeviceID: deviceID.uuidString, source: self)
 
         let dims = CMVideoDimensions(width: Int32(kWidth), height: Int32(kHeight))
@@ -116,10 +174,15 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
             validFrameDurations: nil)
         _bufferAuxAttributes = [kCVPixelBufferPoolAllocationThresholdKey: 5]
 
-        let streamID = UUID()
-        _streamSource = CameraExtensionStreamSource(localizedName: "\(localizedName).stream", streamID: streamID, streamFormat: videoStreamFormat, device: device)
+        _streamSource = CameraExtensionStreamSource(
+            localizedName: "\(localizedName).source", streamID: Shared.sourceStreamID,
+            direction: .source, streamFormat: videoStreamFormat, device: device)
+        _streamSink = CameraExtensionStreamSource(
+            localizedName: "\(localizedName).sink", streamID: Shared.sinkStreamID,
+            direction: .sink, streamFormat: videoStreamFormat, device: device)
         do {
             try device.addStream(_streamSource.stream)
+            try device.addStream(_streamSink.stream)
         } catch {
             fatalError("Failed to add stream: \(error.localizedDescription)")
         }
@@ -135,7 +198,7 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
             p.transportType = kIOAudioDeviceTransportTypeVirtual
         }
         if properties.contains(.deviceModel) {
-            p.model = "CamLooper Model"
+            p.model = "CamLooper Virtual Camera"
         }
         return p
     }
@@ -144,18 +207,30 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
         // No writable device properties.
     }
 
+    // MARK: Source side (a conferencing app is reading)
+
     func startStreaming() {
         guard let _ = _bufferPool else { return }
+        _lock.lock()
         _streamingCounter += 1
-        _timer = DispatchSource.makeTimerSource(flags: .strict, queue: _timerQueue)
-        _timer!.schedule(deadline: .now(), repeating: 1.0 / Double(kFrameRate), leeway: .seconds(0))
-        _timer!.setEventHandler { [weak self] in
-            self?.emitFrame()
+        let alreadyRunning = _timer != nil
+        _lock.unlock()
+        if alreadyRunning { return }
+
+        let timer = DispatchSource.makeTimerSource(flags: .strict, queue: _timerQueue)
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(kFrameRate), leeway: .seconds(0))
+        timer.setEventHandler { [weak self] in
+            self?.emitPlaceholderIfIdle()
         }
-        _timer!.resume()
+        _lock.lock()
+        _timer = timer
+        _lock.unlock()
+        timer.resume()
     }
 
     func stopStreaming() {
+        _lock.lock()
+        defer { _lock.unlock() }
         if _streamingCounter > 1 {
             _streamingCounter -= 1
         } else {
@@ -165,9 +240,65 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
         }
     }
 
-    // Produces one frame. If FrameReceiver has a fresh app frame, it is used; otherwise a
-    // moving test pattern is drawn so the device is verifiable without the app (Stage C1).
-    private func emitFrame() {
+    // MARK: Sink side (the CamLooper app is writing)
+
+    func startSink(client: CMIOExtensionClient) {
+        _lock.lock()
+        _sinkStarted = true
+        _lock.unlock()
+        logger.log("Sink started: the app is feeding frames")
+        consumeBuffer(client)
+    }
+
+    func stopSink() {
+        _lock.lock()
+        _sinkStarted = false
+        _lastSinkFrameNanos = 0
+        _lock.unlock()
+        logger.log("Sink stopped: back to the placeholder")
+    }
+
+    private func consumeBuffer(_ client: CMIOExtensionClient) {
+        _lock.lock()
+        let started = _sinkStarted
+        _lock.unlock()
+        guard started else { return }
+
+        _streamSink.stream.consumeSampleBuffer(from: client) { [weak self] sbuf, seq, _, _, _ in
+            guard let self = self else { return }
+            guard let sbuf = sbuf else {
+                // Nothing queued yet. Ask again shortly rather than spinning.
+                self._timerQueue.asyncAfter(deadline: .now() + .milliseconds(4)) {
+                    self.consumeBuffer(client)
+                }
+                return
+            }
+            let now = hostTimeNanos()
+            self._lock.lock()
+            self._lastSinkFrameNanos = now
+            let hasReaders = self._streamingCounter > 0
+            self._lock.unlock()
+
+            if hasReaders {
+                self._streamSource.stream.send(sbuf, discontinuity: [], hostTimeInNanoseconds: now)
+            }
+            let output = CMIOExtensionScheduledOutput(sequenceNumber: seq, hostTimeInNanoseconds: now)
+            self._streamSink.stream.notifyScheduledOutputChanged(output)
+            self.consumeBuffer(client)
+        }
+    }
+
+    // MARK: Placeholder
+
+    /// Runs at the frame rate while someone is reading. Does nothing while the app is
+    /// feeding the sink, so the two never interleave.
+    private func emitPlaceholderIfIdle() {
+        let now = hostTimeNanos()
+        _lock.lock()
+        let last = _lastSinkFrameNanos
+        _lock.unlock()
+        if last != 0 && now &- last < kSinkStaleAfterNanos { return }
+
         var pixelBuffer: CVPixelBuffer?
         let err = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, _bufferPool, _bufferAuxAttributes, &pixelBuffer)
         guard err == kCVReturnSuccess, let pb = pixelBuffer else {
@@ -176,17 +307,7 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
         }
 
         CVPixelBufferLockBaseAddress(pb, [])
-        if let latest = FrameReceiver.shared.copyLatestBGRA(width: kWidth, height: kHeight),
-           let base = CVPixelBufferGetBaseAddress(pb) {
-            let stride = CVPixelBufferGetBytesPerRow(pb)
-            latest.withUnsafeBytes { src in
-                for row in 0..<kHeight {
-                    memcpy(base.advanced(by: row * stride), src.baseAddress!.advanced(by: row * kWidth * 4), kWidth * 4)
-                }
-            }
-        } else {
-            drawTestPattern(into: pb)
-        }
+        drawPlaceholder(into: pb)
         CVPixelBufferUnlockBaseAddress(pb, [])
 
         var sbuf: CMSampleBuffer?
@@ -196,29 +317,42 @@ class CameraExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
             decodeTimeStamp: .invalid)
         var formatDesc: CMFormatDescription?
         CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: pb, formatDescriptionOut: &formatDesc)
+        guard let fd = formatDesc else { return }
         CMSampleBufferCreateForImageBuffer(
             allocator: kCFAllocatorDefault, imageBuffer: pb, dataReady: true,
-            makeDataReadyCallback: nil, refcon: nil, formatDescription: formatDesc!,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: fd,
             sampleTiming: &timing, sampleBufferOut: &sbuf)
 
         if let sb = sbuf {
-            _streamSource.stream.send(sb, discontinuity: [], hostTimeInNanoseconds: UInt64(timing.presentationTimeStamp.seconds * Double(NSEC_PER_SEC)))
+            _streamSource.stream.send(sb, discontinuity: [], hostTimeInNanoseconds: now)
         }
         _frameCounter += 1
     }
 
-    private func drawTestPattern(into pb: CVPixelBuffer) {
+    /// A dark slate with a slow purple bar: obviously "CamLooper is idle", obviously live,
+    /// and not something that embarrasses anyone if it flashes up in a meeting.
+    private func drawPlaceholder(into pb: CVPixelBuffer) {
         guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
         let stride = CVPixelBufferGetBytesPerRow(pb)
-        let t = Int(_frameCounter)
         let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+        // BGRA 0x15, 0x10, 0x10 — the app's near-black background.
+        var pixel: UInt32 = 0xFF10_1015
         for y in 0..<kHeight {
-            for x in 0..<kWidth {
-                let o = y * stride + x * 4
-                ptr[o + 0] = UInt8((x + t) & 0xFF)          // B
-                ptr[o + 1] = UInt8((y + t) & 0xFF)          // G
-                ptr[o + 2] = UInt8((x ^ y) & 0xFF)          // R
-                ptr[o + 3] = 255                            // A
+            memset_pattern4(ptr + y * stride, &pixel, kWidth * 4)
+        }
+
+        let barWidth = 160
+        let barHeight = 6
+        let travel = kWidth + barWidth
+        let x0 = Int(_frameCounter * 4 % UInt64(travel)) - barWidth
+        let y0 = kHeight / 2 - barHeight / 2
+        var bar: UInt32 = 0xFFA8_55F7 // purple, as BGRA bytes F7 55 A8 FF
+        let from = max(0, x0)
+        let to = min(kWidth, x0 + barWidth)
+        if to > from {
+            for y in y0..<(y0 + barHeight) {
+                memset_pattern4(ptr + y * stride + from * 4, &bar, (to - from) * 4)
             }
         }
     }
@@ -240,7 +374,6 @@ class CameraExtensionProviderSource: NSObject, CMIOExtensionProviderSource {
         } catch {
             fatalError("Failed to add device: \(error.localizedDescription)")
         }
-        FrameReceiver.shared.start()
     }
 
     func connect(to client: CMIOExtensionClient) throws {}

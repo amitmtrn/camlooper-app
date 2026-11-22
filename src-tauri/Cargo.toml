@@ -20,6 +20,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Compiles macos/camera_bridge.m. Only used when the target is macOS (see build.rs).
+cc = "1"
 
 [dependencies]
 # No "devtools" feature: every devtools API is already gated on

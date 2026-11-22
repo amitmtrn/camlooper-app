@@ -137,6 +137,19 @@
       "failedDesc": "Loading the v4l2loopback driver failed. Try running sudo modprobe v4l2loopback in a terminal, or reinstall CamLooper.",
       "loadedTitle": "CamLooper virtual camera ready",
       "loadedDesc": "You may need to restart Zoom, Meet or OBS for “CamLooper Virtual Camera” to appear in the camera list."
+    },
+    "mac": {
+      "failedTitle": "Could not install the CamLooper camera",
+      "failedDesc": "macOS refused the camera extension. Make sure CamLooper is in the Applications folder, then reopen it.",
+      "approvedTitle": "CamLooper camera approved",
+      "approvedDesc": "Restart Zoom, Meet or OBS if they were open, so “CamLooper Virtual Camera” appears in their camera list.",
+      "gateTitle": "Allow the CamLooper camera",
+      "gateDesc": "macOS needs your approval before CamLooper can appear as a camera in Zoom, Meet and other apps. System Settings has been opened for you.",
+      "gateStep1": "In System Settings, go to General → Login Items & Extensions.",
+      "gateStep2": "Under Extensions, click the ⓘ next to Camera Extensions.",
+      "gateStep3": "Switch on CamLooper and confirm with your password or Touch ID.",
+      "gateOpenSettings": "Open System Settings",
+      "gateWaiting": "Waiting for your approval — this screen closes by itself."
     }
   }
 }

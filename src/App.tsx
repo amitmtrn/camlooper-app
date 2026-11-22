@@ -800,6 +800,50 @@ function CamLooper() {
     updateVirtualCameraStatus();
   }, []);
 
+  // --- macOS: Camera Extension approval gate ---
+  //
+  // macOS will not load the virtual camera until the user switches it on in System
+  // Settings. On launch we ask macOS to install it (which opens that Settings pane) and
+  // hold the whole app behind an overlay until the approval lands, because nothing the app
+  // does is useful to another application before then.
+  const [macExtensionPending, setMacExtensionPending] = useState(false);
+
+  React.useEffect(() => {
+    if (!navigator.userAgent.includes('Mac')) return;
+    let cancelled = false;
+    invoke<string>('ensure_macos_camera_extension')
+      .then(outcome => {
+        if (cancelled) return;
+        if (outcome === 'needsApproval') {
+          setMacExtensionPending(true);
+        } else if (outcome === 'failed') {
+          toast.error(t('vcam.mac.failedTitle', 'Could not install the CamLooper camera'), {
+            description: t('vcam.mac.failedDesc', 'macOS refused the camera extension. Make sure CamLooper is in the Applications folder, then reopen it.'),
+          });
+        }
+        // 'ready' and 'unavailable' (a dev build with no extension) need no gate.
+      })
+      .catch(error => console.error('Camera extension check failed:', error));
+    return () => { cancelled = true; };
+  }, []);
+
+  React.useEffect(() => {
+    if (!macExtensionPending) return;
+    const id = setInterval(async () => {
+      try {
+        if (await invoke<boolean>('macos_camera_extension_approved')) {
+          setMacExtensionPending(false);
+          toast.success(t('vcam.mac.approvedTitle', 'CamLooper camera approved'), {
+            description: t('vcam.mac.approvedDesc', 'Restart Zoom, Meet or OBS if they were open, so “CamLooper Virtual Camera” appears in their camera list.'),
+          });
+        }
+      } catch (error) {
+        console.error('Camera extension poll failed:', error);
+      }
+    }, 1500);
+    return () => clearInterval(id);
+  }, [macExtensionPending]);
+
   // --- Live camera passthrough (camera -> app -> virtual camera -> Zoom) ---
 
   // Enumerate physical camera devices, excluding the CamLooper virtual/loopback
@@ -1060,6 +1104,42 @@ function CamLooper() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      {macExtensionPending && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 backdrop-blur-sm p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mac-extension-gate-title"
+        >
+          <Card className="max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <ShieldCheck className="h-6 w-6 text-primary shrink-0" />
+              <h2 id="mac-extension-gate-title" className="text-lg font-semibold">
+                {t('vcam.mac.gateTitle', 'Allow the CamLooper camera')}
+              </h2>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t('vcam.mac.gateDesc', 'macOS needs your approval before CamLooper can appear as a camera in Zoom, Meet and other apps. System Settings has been opened for you.')}
+            </p>
+            <ol className="text-sm space-y-2 list-decimal list-inside">
+              <li>{t('vcam.mac.gateStep1', 'In System Settings, go to General → Login Items & Extensions.')}</li>
+              <li>{t('vcam.mac.gateStep2', 'Under Extensions, click the ⓘ next to Camera Extensions.')}</li>
+              <li>{t('vcam.mac.gateStep3', 'Switch on CamLooper and confirm with your password or Touch ID.')}</li>
+            </ol>
+            <Button
+              variant="hero"
+              className="w-full"
+              onClick={() => invoke('open_macos_extension_settings').catch(console.error)}
+            >
+              {t('vcam.mac.gateOpenSettings', 'Open System Settings')}
+            </Button>
+            <p className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {t('vcam.mac.gateWaiting', 'Waiting for your approval — this screen closes by itself.')}
+            </p>
+          </Card>
+        </div>
+      )}
       <AdBanner />
       <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
         {/* Top bar: brand + tagline on the left, step indicator on the right */}

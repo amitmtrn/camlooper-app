@@ -21,8 +21,17 @@ same FFmpeg version and the app keeps working. The build used is BtbN's **LGPL**
 (no GPL-only components such as libx264), and its source is available from
 <https://github.com/BtbN/FFmpeg-Builds>.
 
-On **Linux and macOS** FFmpeg is not bundled at all — it is a system dependency (the `.deb`
-and `.rpm` declare it, macOS uses Homebrew), so the installers ship no FFmpeg code.
+On **macOS** the app bundles FFmpeg 7.1 compiled from unmodified upstream source by
+`scripts/build-macos-ffmpeg.sh`, in FFmpeg's default **LGPL-2.1-or-later** configuration
+(no `--enable-gpl`, no `--enable-nonfree`; the script refuses a build that has either). It
+is shipped the same way as on Windows: separate shared libraries in `Contents/Frameworks`
+and a standalone `Contents/MacOS/ffmpeg`, so a user can replace them. The exact configure
+line is shipped as `Contents/Resources/ffmpeg/BUILDCONF.txt` beside the license texts.
+[libvpx](https://github.com/webmproject/libvpx) (BSD-3-Clause) is linked into `libavcodec`
+for VP9 recording.
+
+On **Linux** FFmpeg is not bundled at all — it is a system dependency declared by the
+`.deb` and `.rpm`, so those installers ship no FFmpeg code.
 
 ## Build-time and runtime dependencies
 

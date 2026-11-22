@@ -1,28 +1,52 @@
 # XcodeGen spec for the CamLooper Camera Extension.
-#   brew install xcodegen && xcodegen generate  ->  CameraExtension.xcodeproj
-# Then build with build.sh or Xcode. Set DEVELOPMENT_TEAM to your Team ID (or via env).
+#   brew install xcodegen
+#   DEVELOPMENT_TEAM=<your 10-char Team ID> ./dev-install.sh
+# DEVELOPMENT_TEAM is read from the environment so no team is baked into the repo.
 name: CameraExtension
 options:
   bundleIdPrefix: com.camlooper.app
   deploymentTarget:
     macOS: "13.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    ENABLE_HARDENED_RUNTIME: YES
 targets:
   CameraExtension:
     type: system-extension
     platform: macOS
     sources:
       - path: CameraExtension
-    info:
-      path: CameraExtension/Info.plist
-    entitlements:
-      path: CameraExtension/CameraExtension.entitlements
+        excludes: ["Info.plist", "*.entitlements"]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.camlooper.app.CameraExtension
-        PRODUCT_NAME: CameraExtension
-        SWIFT_VERSION: "5.0"
-        ENABLE_HARDENED_RUNTIME: YES
-        # Replace with your Apple Developer Team ID (or pass via xcodebuild DEVELOPMENT_TEAM=...).
-        DEVELOPMENT_TEAM: TEAMID
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: "Developer ID Application"
+        # A system extension's bundle is named after its bundle id.
+        PRODUCT_NAME: com.camlooper.app.CameraExtension
+        INFOPLIST_FILE: CameraExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: CameraExtension/CameraExtension.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+  # Never shipped: lets Xcode provision a profile for the Tauri app's bundle id.
+  SigningHost:
+    type: application
+    platform: macOS
+    sources:
+      - path: SigningHost
+        excludes: ["Info.plist", "*.entitlements"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.camlooper.app
+        PRODUCT_NAME: SigningHost
+        INFOPLIST_FILE: SigningHost/Info.plist
+        CODE_SIGN_ENTITLEMENTS: SigningHost/SigningHost.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+schemes:
+  # Builds both targets for "My Mac". dev-install.sh uses a scheme + destination rather
+  # than bare targets so xcodebuild knows which device to register with the team.
+  DevInstall:
+    build:
+      targets:
+        CameraExtension: all
+        SigningHost: all

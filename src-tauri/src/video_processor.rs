@@ -444,7 +444,11 @@ impl VideoProcessor {
             crate::camera_capture::resolve_ffmpeg_path(app)
                 .map_err(|e| anyhow!("Failed to locate ffmpeg: {e}"))?
         } else {
-            std::path::PathBuf::from("ffmpeg")
+            // No app handle (tests): the same lookup the app does off Windows.
+            #[cfg(not(target_os = "windows"))]
+            { crate::camera_capture::system_ffmpeg() }
+            #[cfg(target_os = "windows")]
+            { std::path::PathBuf::from("ffmpeg") }
         };
 
         self.is_streaming.store(true, Ordering::Relaxed);
@@ -657,7 +661,7 @@ impl VideoProcessor {
             Some(size) => {
                 let mut buf = vec![0u8; size];
                 let mut frames = 0u64;
-                let mut preview = PreviewEncoder::new(&geometry, PreviewSpec::default());
+                let mut preview = PreviewEncoder::new(&geometry, PreviewSpec::default()).for_sink(&sink);
 
                 loop {
                     if !is_streaming.load(Ordering::Relaxed) {
@@ -1222,7 +1226,7 @@ impl VideoProcessor {
             match sink.frame_bytes(&geometry) {
                 Some(size) => {
                     let mut buf = vec![0u8; size];
-                    let mut preview = PreviewEncoder::new(&geometry, PreviewSpec::default());
+                    let mut preview = PreviewEncoder::new(&geometry, PreviewSpec::default()).for_sink(&sink);
                     while is_streaming.load(Ordering::Relaxed) {
                         if stdout.read_exact(&mut buf).await.is_err() {
                             break;
@@ -1492,6 +1496,49 @@ mod tests {
             .expect("failed to run ffmpeg");
         assert!(status.success(), "ffmpeg could not build the fixture");
         path
+    }
+
+    /// Step 3 against real hardware, without the UI: a recorded clip (VP9 WebM, what
+    /// Step 2 produces) loops into the virtual camera and keeps going past its own end.
+    ///
+    ///   cargo test --lib -- --ignored --nocapture a_recorded_clip_loops_into_the_virtual_camera
+    ///
+    /// Needs the CamLooper camera extension installed and approved. No physical camera.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs the installed camera extension"]
+    async fn a_recorded_clip_loops_into_the_virtual_camera() {
+        use std::time::Duration;
+        let ffmpeg = crate::camera_capture::system_ffmpeg();
+        let clip = std::env::temp_dir().join("camlooper-loop-fixture.webm");
+        // 2 s, so an 8 s run must wrap several times.
+        let status = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                   "-i", "testsrc=size=640x480:rate=30:duration=2",
+                   "-c:v", "libvpx-vp9", "-b:v", "1M", "-deadline", "realtime", "-cpu-used", "8"])
+            .arg(&clip)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success(), "could not build the fixture clip");
+
+        crate::virtual_camera::start_virtual_camera_with(None, None).await.expect("start the virtual camera");
+        let info = load_video_file(clip.to_string_lossy().to_string()).await.expect("load the clip");
+        println!("clip: {:.2}s", info.duration);
+        start_video_stream().await.expect("start playback");
+
+        tokio::time::sleep(Duration::from_secs(2)).await; // start-up
+        let before = crate::virtual_camera::get_virtual_camera_status().await.frame_count;
+        tokio::time::sleep(Duration::from_secs(6)).await; // three clip lengths
+        let after = crate::virtual_camera::get_virtual_camera_status().await.frame_count;
+        let status = get_video_stream_status().await;
+        println!("looping: {} camera frames in 6s, playing: {}, loop: {}", after - before, status.is_playing, status.current_loop);
+
+        stop_video_stream().await.unwrap();
+        crate::virtual_camera::stop_virtual_camera().await.unwrap();
+        let _ = std::fs::remove_file(&clip);
+
+        assert!(status.is_playing, "playback stopped instead of looping");
+        assert!(after - before > 150, "expected ~180 frames over three loops, got {}", after - before);
     }
 
     #[tokio::test]

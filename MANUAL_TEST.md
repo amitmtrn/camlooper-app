@@ -304,26 +304,254 @@ _No feature-specific entries yet._
 
 <!-- Newest entries first. -->
 
-### The virtual camera reports itself unavailable
-_Added 2026-09-05 · macOS · sink restructure_
+### The notarised DMG installs and runs on a clean Mac
+_Added 2026-11-19 · macOS · uncommitted (Developer ID DMG) · signing and launch verified; **camera through the notarised extension not yet verified**_
 
-macOS has no working virtual camera: the CMIO Camera Extension cannot load until
-the app is signed and notarised, and its frame receiver is still a stub. The app
-used to accept the toggle anyway — it logged every frame and slept — so the UI
-showed a running camera that no application could ever see.
+`scripts/macos-dmg-build.sh` produces `src-tauri/target/dmg/CamLooper-<version>.dmg`:
+Developer ID signed, hardened runtime, notarised and stapled. The script itself fails if
+notarisation is not accepted or Gatekeeper rejects the result, so those are not repeated
+here.
 
-**Setup:** an unsigned macOS build.
+**Setup:** an Apple Silicon Mac on macOS 13 or later that has never had CamLooper
+installed (or run `systemextensionsctl list` and confirm no `com.camlooper.app` line).
+Copy the DMG to it by AirDrop or a download, so it carries the quarantine flag a real
+user's copy would.
 
 **Steps:**
-1. Load any video.
-2. Turn on the virtual camera.
-3. Open Zoom or Photo Booth and look at the camera list.
+1. Double-click the DMG and drag CamLooper to Applications. Open it from Applications.
+2. Approve the camera extension when the app asks (System Settings opens by itself).
+3. Click **Start camera**, allow camera access, record ten seconds, continue to Step 3.
+4. Open Photo Booth or QuickTime Player → New Movie Recording and pick
+   **CamLooper Virtual Camera**.
 
-**Expected:** an error appears saying the virtual camera is not available on this
-platform and that macOS needs a signed, notarised build. The toggle does not stay
-on. "CamLooper Virtual Camera" does not appear in the camera list — which was
-already true, but the app now says so instead of implying otherwise.
+**Expected:**
+- Step 1: the app opens with no "unidentified developer" or "damaged" warning; at most the
+  standard "downloaded from the Internet" confirmation.
+- Step 2: after approval `systemextensionsctl list` shows
+  `com.camlooper.app.CameraExtension ... [activated enabled]`.
+- Step 3: live preview moves and keeps moving while recording.
+- Step 4: the other app shows the looping clip.
+- `spctl -a -vv /Applications/CamLooper.app` prints `source=Notarized Developer ID`.
 
-**Known gotchas:** this is a deliberate change from silently pretending to work.
-Video loading, playback and the in-app preview are unaffected; only the camera
-output is refused. Recording still works.
+**Known gotchas:**
+- Updating over an older install: macOS only swaps the camera extension when its
+  `CFBundleVersion` (in `macos-extension/CameraExtension/Info.plist`) is higher than the
+  installed one. With the same number the old extension stays, silently.
+- After such a swap the old extension shows as `[terminated waiting to uninstall on
+  reboot]`, and on the Mac this was developed on the virtual camera disappeared from the
+  camera list until a restart. If the camera is missing after an update, restart before
+  investigating.
+- Intel Macs cannot run this build; the bundled FFmpeg is arm64 only.
+
+### The app works inside the App Sandbox
+_Added 2026-11-19 · macOS · uncommitted (sandboxed build) · backend automated; **UI not yet seen sandboxed**_
+
+`dev-install.sh` now signs the app with the App Sandbox (camera + outbound network) and
+the bundled `ffmpeg` as a sandbox-inheriting helper, as the Mac App Store requires.
+
+**Automated:** `scripts/macos-sandbox-test.sh` runs the real-hardware backend tests inside
+the sandbox (virtual camera feed, live preview, recording, resume, and a recorded clip
+looping into the camera for three passes) and fails unless the recording landed in the
+sandbox container. The looping check alone, unsandboxed:
+`cd src-tauri && cargo test --lib -- --ignored --nocapture a_recorded_clip_loops_into_the_virtual_camera`. Needs a camera and the approved extension.
+
+**Setup:** `/Applications/camlooper.app` installed by `dev-install.sh`, extension approved.
+
+**Steps (what the script cannot see):**
+1. Run `codesign -d --entitlements - /Applications/camlooper.app | grep app-sandbox`.
+2. Open the app. Click **Start camera**, record ten seconds, stop, and continue to Step 3
+   so the recorded clip loops as the camera.
+3. In Step 1, load a video file from disk with the upload control and press play.
+4. Open Zoom (restart it if it was open) and select **CamLooper Virtual Camera**.
+
+**Expected:** step 1 prints the `app-sandbox` key. Steps 2–3 behave exactly as before
+sandboxing: live preview moves, the recording plays back, the uploaded video plays. Step 4
+shows the same picture as the app's preview. `ls ~/Library/Containers/com.camlooper.app`
+exists, and recordings are under its `Data/tmp/`, not under `$TMPDIR`.
+
+**Known gotchas:**
+- The first sandboxed launch asks macOS to activate the extension again, because the
+  "already activated" note moved into the container. It should pass without a new approval.
+- The ad banner needs the network; if it is blank, check Console for `Sandbox: camlooper
+  deny` lines before assuming an ad-server problem.
+- macOS asks for camera permission again the first time: the sandboxed app is a new
+  client as far as the permission system is concerned.
+
+### The installed app runs without Homebrew
+_Added 2026-11-19 · macOS · uncommitted (bundled LGPL FFmpeg)_
+
+The app used to link Homebrew's FFmpeg libraries and run Homebrew's `ffmpeg`, so it only
+worked on a developer's Mac. It now ships its own. `dev-install.sh` already fails the
+install if any Homebrew path is linked; these steps check the app actually uses its copy.
+
+**Setup:** `/Applications/camlooper.app` installed by `dev-install.sh`.
+
+**Steps:**
+1. Run `otool -L /Applications/camlooper.app/Contents/MacOS/camlooper /Applications/camlooper.app/Contents/MacOS/ffmpeg | grep -E "homebrew|usr/local"`.
+2. Run `/Applications/camlooper.app/Contents/MacOS/ffmpeg -hide_banner -buildconf`.
+3. Launch the app with Homebrew hidden: `env PATH=/usr/bin:/bin open -n /Applications/camlooper.app`,
+   load a video and press play; then use **Start camera** in Step 1.
+
+**Expected:** step 1 prints nothing. Step 2 lists `--enable-libvpx` and neither
+`--enable-gpl` nor `--enable-nonfree`. Step 3: the video plays in the preview and the live
+camera preview appears, exactly as with Homebrew present.
+
+**Known gotchas:** a Mac with Homebrew ffmpeg installed can mask a missing bundled copy,
+because the app falls back to `/opt/homebrew/bin/ffmpeg`. Check
+`ls /Applications/camlooper.app/Contents/MacOS` shows both `camlooper` and `ffmpeg`.
+
+### Step 1 camera picker lists the Mac's real cameras
+_Added 2026-11-19 · macOS · uncommitted (AVFoundation capture)_
+
+The picker used to show a single entry reading "Virtual camera not supported on this
+platform", and Start camera then tried to open `/dev/video0` through V4L2, which does not
+exist on macOS. Cameras are now listed and opened through ffmpeg's AVFoundation input.
+The parsing and argument building are covered by `cargo test --lib`
+(`camera_capture::tests::avfoundation_*`); the steps below cover what needs a real camera.
+
+**Setup:** a Mac with a built-in or USB camera. Run `scripts/build-macos-ffmpeg.sh` once,
+then `npm run tauri:dev` from a terminal. Compare against
+`ffmpeg -hide_banner -f avfoundation -list_devices true -i ""`.
+
+**Steps:**
+1. Launch the app and stay on **Step 1 · Go live**.
+2. Open the **Camera** dropdown.
+3. Pick the built-in camera and click **Start camera**.
+4. Click **Next**, record a few seconds, and stop the recording.
+
+**Expected:** the dropdown has one entry per camera in the "AVFoundation video devices"
+section of the ffmpeg listing, shown by name (`MacBook Pro Camera`). No "Capture screen N"
+entries, no microphones, no "CamLooper Virtual Camera" and no "not supported" entry. After **Start camera** the camera's
+green indicator light comes on, the live preview shows the camera within about two seconds,
+and the terminal prints `Spawning ffmpeg (...) with args: ["-f", "avfoundation", ... "-i",
+"MacBook Pro Camera:none", ...]`. During step 4 the preview keeps moving for the whole
+recording (wave at the camera; the REC timer and the picture must both advance), and a new
+`recording_*.webm` appears in `$(getconf DARWIN_USER_TEMP_DIR)`. The recording plays back
+in the app.
+
+**Automated equivalent (needs this Mac's camera, so not run in CI):**
+`cd src-tauri && cargo test --lib -- --ignored --nocapture live_preview_keeps_moving_while_recording`
+runs virtual camera → preview → record → stop → preview against the real backend and
+asserts ~30 fps reaches the camera in every phase, the preview image keeps changing, and
+the recording file is non-trivial. Prefer it to steps 3–4 unless you need to see the UI.
+
+**Known gotchas:**
+- Run step 4 with the virtual camera extension installed and approved as well. macOS moves
+  "CamLooper Virtual Camera" to the front of its device list once it is streaming, and a
+  preview that freezes the moment recording starts means cameras are being opened by
+  position again instead of by name.
+- Without the camera extension installed (any `tauri dev` run on a Mac that has never had
+  the signed build), clicking Start camera also shows a "Could not start the virtual
+  camera" toast. The preview and recording work regardless.
+- The first run shows a macOS camera permission prompt. Under `tauri dev` it names your
+  terminal app, not CamLooper. If it was denied earlier the preview stays empty and the
+  terminal shows an ffmpeg "Input/output error" — re-enable it under System Settings →
+  Privacy & Security → Camera.
+- Run `scripts/build-macos-ffmpeg.sh` once before building: the app links and bundles the
+  FFmpeg it produces. Without it the build falls back to Homebrew's, and Homebrew's
+  FFmpeg 9 does not compile with the `ffmpeg-next` crate.
+- Not yet verified in a bundled `.app`: it adds `NSCameraUsageDescription` via
+  `src-tauri/Info.plist`, but the bundle's sandbox entitlement may still block spawning
+  Homebrew ffmpeg.
+
+### Dock icon is the CamLooper logo
+_Added 2026-11-19 · macOS · uncommitted (icon.icns regenerated)_
+
+`icons/icon.icns` still contained the stock Tauri logo (yellow and teal interlocking
+rings), so the Dock, the app switcher and the `.app` bundle showed that instead of
+CamLooper's icon.
+
+**Setup:** a macOS dev run (`npm run tauri:dev`) or a built `.app`.
+
+**Steps:**
+1. Launch the app and look at its Dock icon.
+2. Press Cmd+Tab and find the app in the switcher.
+3. Run `iconutil -c iconset src-tauri/icons/icon.icns -o /tmp/camlooper.iconset && open /tmp/camlooper.iconset`.
+
+**Expected:** a dark rounded square with a purple loop arrow around a camera lens, with
+transparent corners (no white box behind it), about the same size as neighbouring Dock
+icons. The extracted iconset holds ten PNGs, 16 px through 1024 px, all showing that logo.
+
+**Known gotchas:** macOS caches icons. For a built `.app` that still shows the old logo,
+run `killall Dock`; a dev run picks the new icon up on the next rebuild.
+
+### First launch blocks on approving the camera extension
+_Added 2026-11-19 · macOS · uncommitted (approval gate) · **overlay not yet seen on a real first run**_
+
+On launch the app asks macOS to install its Camera Extension. If macOS wants the user's
+approval, the app opens System Settings itself and covers its whole window with an overlay
+until the approval lands. The state mapping is covered by `cargo test --lib`
+(`macos_virtual_camera::tests::*`); the flow itself needs a Mac where the extension has
+never been approved.
+
+**Setup:** a development-signed install (`src-tauri/macos-extension/dev-install.sh`) on a
+Mac where `systemextensionsctl list` shows no `com.camlooper.app.CameraExtension` line, or
+shows it as `[activated waiting for user]`. To get back to that state, switch CamLooper off
+under System Settings → General → Login Items & Extensions → Camera Extensions, then run
+`defaults delete com.camlooper.app CamLooperActivatedExtensionVersion`.
+
+**Steps:**
+1. Open `/Applications/camlooper.app`.
+2. Without approving anything, try to click the app's buttons behind the overlay.
+3. Close System Settings, then click **Open System Settings** on the overlay.
+4. Under Extensions, click the ⓘ next to Camera Extensions, switch on CamLooper and
+   authenticate.
+
+**Expected:**
+- Step 1: within a few seconds System Settings opens at Login Items & Extensions, and the
+  app shows a centred card titled "Allow the CamLooper camera" with three numbered steps,
+  an **Open System Settings** button and a spinner reading "Waiting for your approval".
+- Step 2: nothing behind the overlay responds.
+- Step 3: System Settings reopens at the same pane.
+- Step 4: within about two seconds the overlay closes by itself and a toast says "CamLooper
+  camera approved". `systemextensionsctl list` shows the extension `[activated enabled]`.
+  Quitting and reopening the app shows no overlay.
+
+**Known gotchas:**
+- macOS may show its own "System Extension Blocked" alert as well; either route works.
+- On macOS 13–14 the approval is a button near the bottom of Privacy & Security instead,
+  and the overlay's numbered steps (written for macOS 15+) do not match.
+- `npm run tauri:dev` never shows the overlay: that build has no extension to approve.
+- The overlay text is English in every language for now.
+
+### The virtual camera appears in Zoom and carries the app's video
+_Added 2026-11-19 · macOS · uncommitted (CMIO sink-stream camera) · placeholder verified; app video **not yet verified**_
+
+macOS used to refuse the virtual camera outright. It is now a CMIO Camera Extension that
+the app installs and feeds through a CoreMediaIO sink stream. Message wording and frame
+sizing are covered by `cargo test --lib` (`macos_virtual_camera::tests::*`); everything
+below needs a signed build and a human.
+
+**Setup:** a development-signed install made with
+`src-tauri/macos-extension/dev-install.sh` (see that directory's README for prerequisites),
+on a Mac registered to the signing team. One short `.mp4` with recognisable motion. Zoom or
+Photo Booth, **quit** before you start.
+
+**Steps:**
+1. Open `/Applications/camlooper.app`, load the video and turn on the virtual camera.
+2. First run only: approve the extension when the app asks (see the section above).
+3. Press play.
+4. Run `systemextensionsctl list`.
+5. Open Photo Booth (or Zoom → Settings → Video) and choose **CamLooper Virtual Camera**.
+6. Pause playback in CamLooper, wait two seconds, then turn the virtual camera off.
+7. Quit CamLooper while Photo Booth still shows the camera.
+
+**Expected:**
+- Step 3: no error toast; the camera status shows `1280x720` and the frame counter climbs.
+- Step 4: a line for `com.camlooper.app.CameraExtension` ending `[activated enabled]`.
+- Step 5: the picker lists "CamLooper Virtual Camera" and shows the playing video —
+  correct colours (not blue/red swapped), upright, not mirrored beyond what the viewer
+  itself applies, with no visible stutter.
+- Steps 6–7: within about a second the picture is replaced by a near-black frame with a
+  thin purple bar sliding left to right. The camera stays in the list and does not freeze.
+
+**Known gotchas:**
+- The camera always runs at 1280x720 on macOS, whatever Resolution is set to.
+- Zoom and browsers only list cameras present when they started; restart them after the
+  first approval.
+- A camera permission prompt for CamLooper appears on first start: macOS hides every
+  camera, including ours, from apps without it.
+- Under `npm run tauri:dev` the app can feed an extension that is already installed but
+  cannot install one; with none installed the toast says "this build cannot install it".
+- After changing extension code, bump `CFBundleVersion` in
+  `macos-extension/CameraExtension/Info.plist` or macOS keeps running the old copy.

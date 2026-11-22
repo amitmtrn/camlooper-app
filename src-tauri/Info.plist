@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged into the app bundle's Info.plist by Tauri. Without this key macOS refuses
+	     camera access outright instead of prompting. -->
+	<key>NSCameraUsageDescription</key>
+	<string>CamLooper uses your camera to show a live preview and record the clip you want to loop.</string>
+</dict>
+</plist>

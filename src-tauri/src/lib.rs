@@ -7,6 +7,8 @@ mod video_processor;
 mod video_upload;
 mod camera_capture;
 mod installer_language;
+#[cfg(target_os = "macos")]
+mod macos_virtual_camera;
 #[cfg(target_os = "windows")]
 mod softcam_register;
 #[cfg(target_os = "windows")]
@@ -65,6 +67,51 @@ async fn list_video_devices() -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn ensure_v4l2loopback() -> virtual_camera::VcamSetupOutcome {
     virtual_camera::ensure_loopback_ready().await
+}
+
+/// macOS: make sure the Camera Extension is installed, asking macOS to install it and
+/// opening System Settings when the user has to approve it. Returns `ready`,
+/// `needsApproval`, `unavailable` (a build with no extension, e.g. `tauri dev`) or `failed`.
+/// Compiled for all non-Windows targets because the handler list is shared; Linux has no
+/// such step and always reports `ready`.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn ensure_macos_camera_extension() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(macos_virtual_camera::ensure_extension)
+            .await
+            .map(|state| state.as_str())
+            .unwrap_or("failed")
+            .to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "ready".to_string()
+    }
+}
+
+/// macOS: whether the user has approved the Camera Extension yet. Polled by the approval
+/// gate. Always true elsewhere.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn macos_camera_extension_approved() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos_virtual_camera::extension_approved()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// macOS: reopen the System Settings pane where the extension is approved.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn open_macos_extension_settings() {
+    #[cfg(target_os = "macos")]
+    macos_virtual_camera::open_extension_settings();
 }
 
 // Windows Softcam Management Commands
@@ -254,6 +301,10 @@ pub fn run() {
                     list_video_devices,
                     // Linux v4l2loopback module management
                     ensure_v4l2loopback,
+                    // macOS Camera Extension approval gate
+                    ensure_macos_camera_extension,
+                    macos_camera_extension_approved,
+                    open_macos_extension_settings,
                     // New Streaming Upload Commands
                     start_stream_upload,
                     upload_chunk_stream,

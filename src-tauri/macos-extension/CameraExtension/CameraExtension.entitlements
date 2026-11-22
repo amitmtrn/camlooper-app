@@ -4,11 +4,11 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<!-- Shared App Group for the XPC Mach service + IOSurface handoff with the app.
-	     Must match the app's entitlements and be created in the Apple Developer portal. -->
+	<!-- Team-prefixed (macOS-style) App Group: needs no registration in the developer
+	     portal. It exists only because CMIOExtensionMachServiceName must live under one. -->
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.com.camlooper.shared</string>
+		<string>$(TeamIdentifierPrefix)com.camlooper.app</string>
 	</array>
 </dict>
 </plist>

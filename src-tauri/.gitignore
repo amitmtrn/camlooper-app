@@ -11,3 +11,6 @@
 # not committed to keep the repo small.
 /drivers/windows/ffmpeg/
 
+# Bundled ffmpeg for macOS (LGPL shared build, ~23 MB). Compiled from source by
+# scripts/build-macos-ffmpeg.sh; not committed.
+/drivers/macos/ffmpeg/

@@ -4,25 +4,34 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>CamLooper Virtual Camera</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
-	<string>SYSX</string>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<!-- macOS only replaces an installed extension when one of these two changes. Bump
+	     CFBundleVersion for every extension change you want an existing install to pick up;
+	     the app re-submits the activation request when it sees a new value. -->
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.0</string>
+	<string>0.2.4</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>NSExtension</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>CamLooper uses this extension to appear as a camera in Zoom, Meet, Teams and other apps.</string>
+	<key>CMIOExtension</key>
 	<dict>
-		<!-- CMIO Camera Extensions register under this (legacy-named) extension point. -->
-		<key>NSExtensionPointIdentifier</key>
-		<string>com.apple.cmio-dal-assistant</string>
-		<!-- If the device fails to register, try adding NSExtensionPrincipalClass =
-		     $(PRODUCT_MODULE_NAME).CameraExtensionProviderSource here. -->
+		<!-- Must be prefixed by an App Group the extension is entitled to. -->
+		<key>CMIOExtensionMachServiceName</key>
+		<string>$(TeamIdentifierPrefix)com.camlooper.app.CameraExtension</string>
 	</dict>
 </dict>
 </plist>

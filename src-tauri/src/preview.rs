@@ -129,6 +129,8 @@ pub struct PreviewEncoder {
     /// Emit one preview per this many camera frames.
     every: u64,
     seen: u64,
+    /// Bytes per source pixel: 3 for BGR24, 4 for BGRA.
+    bpp: usize,
     scratch: Vec<u8>,
 }
 
@@ -142,11 +144,22 @@ impl PreviewEncoder {
             factor,
             every,
             seen: 0,
+            bpp: 3,
             scratch: Vec::new(),
         }
     }
 
-    /// Offer a raw BGR24 frame. Returns a JPEG only on the sampled frames.
+    /// Match the pixel layout of the sink whose frames will be sampled. Without this a
+    /// BGRA sink (macOS) is read three bytes at a time and the preview comes out as
+    /// repeated, colour-fringed stripes.
+    pub fn for_sink(mut self, sink: &crate::pipeline::CameraSink) -> Self {
+        if let Some(bpp) = sink.bytes_per_pixel() {
+            self.bpp = bpp;
+        }
+        self
+    }
+
+    /// Offer a raw BGR24 or BGRA frame. Returns a JPEG only on the sampled frames.
     pub fn sample(&mut self, bgr: &[u8]) -> Option<Vec<u8>> {
         let n = self.seen;
         self.seen += 1;
@@ -156,7 +169,7 @@ impl PreviewEncoder {
         self.encode(bgr)
     }
 
-    /// Offer a raw BGR24 frame, publishing it to the UI if it is a sampled one.
+    /// Offer a raw BGR24 or BGRA frame, publishing it to the UI if it is a sampled one.
     pub fn maybe_publish(&mut self, bgr: &[u8]) {
         if let Some(jpeg) = self.sample(bgr) {
             publish(jpeg);
@@ -164,7 +177,8 @@ impl PreviewEncoder {
     }
 
     fn encode(&mut self, bgr: &[u8]) -> Option<Vec<u8>> {
-        if bgr.len() < self.width * self.height * 3 {
+        let bpp = self.bpp;
+        if bgr.len() < self.width * self.height * bpp {
             return None;
         }
         let f = self.factor;
@@ -181,10 +195,10 @@ impl PreviewEncoder {
             for ox in 0..ow {
                 let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
                 for dy in 0..f {
-                    let row = (oy * f + dy) * self.width * 3;
+                    let row = (oy * f + dy) * self.width * bpp;
                     for dx in 0..f {
-                        let p = row + (ox * f + dx) * 3;
-                        // Source is BGR; the encoder wants RGB.
+                        let p = row + (ox * f + dx) * bpp;
+                        // Source is BGR(A); the encoder wants RGB. Alpha is ignored.
                         b += bgr[p] as u32;
                         g += bgr[p + 1] as u32;
                         r += bgr[p + 2] as u32;
@@ -321,6 +335,39 @@ mod tests {
         assert_eq!(img.dimensions(), (8, 8));
         let px = img.get_pixel(4, 4);
         assert!(px[0] > 200 && px[1] < 60 && px[2] < 60, "BGR->RGB swap wrong: {px:?}");
+    }
+
+    /// Regression: the macOS sink delivers BGRA. Read as BGR24 it produced a preview of
+    /// repeated grey stripes, so check the *position* of colour, not just that it decodes.
+    #[test]
+    fn preview_encoder_reads_bgra_frames_four_bytes_at_a_time() {
+        let geom = Geometry { width: 32, height: 32, fps: 30 };
+        let mut enc = PreviewEncoder::new(&geom, PreviewSpec { width: 8, fps: 30, quality: 7 })
+            .for_sink(&crate::pipeline::CameraSink::RawBgraStdout);
+        // Left half solid red, right half solid blue, in BGRA byte order.
+        let mut frame = Vec::with_capacity(32 * 32 * 4);
+        for _y in 0..32 {
+            for x in 0..32 {
+                frame.extend_from_slice(if x < 16 { &[0u8, 0, 255, 255] } else { &[255u8, 0, 0, 255] });
+            }
+        }
+        let jpeg = enc.encode(&frame).expect("encode");
+        let img = image::load_from_memory(&jpeg).expect("decode").to_rgb8();
+        assert_eq!(img.dimensions(), (8, 8));
+        for y in [0, 4, 7] {
+            let left = img.get_pixel(1, y);
+            let right = img.get_pixel(6, y);
+            assert!(left[0] > 200 && left[2] < 60, "left should be red at row {y}: {left:?}");
+            assert!(right[2] > 200 && right[0] < 60, "right should be blue at row {y}: {right:?}");
+        }
+    }
+
+    #[test]
+    fn preview_encoder_rejects_a_bgra_frame_that_is_only_bgr24_sized() {
+        let geom = Geometry { width: 32, height: 32, fps: 30 };
+        let mut enc = PreviewEncoder::new(&geom, PreviewSpec::default())
+            .for_sink(&crate::pipeline::CameraSink::RawBgraStdout);
+        assert!(enc.encode(&vec![0u8; 32 * 32 * 3]).is_none());
     }
 
     #[test]

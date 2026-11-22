@@ -1,106 +1,158 @@
 # macOS Virtual Camera — CMIO Camera Extension
 
 This directory contains the macOS **CMIO Camera Extension** ("CamLooper Virtual Camera")
-that makes the app's video appear as a camera in Zoom / Teams / OBS on macOS 13+.
+that makes the app's video appear as a camera in Zoom / Teams / Meet / OBS on macOS 13+.
 
-> **Status: scaffold.** These sources were authored on Linux and have **not** been compiled
-> or run. They are a concrete starting point to build, sign, and iterate on a real Mac with
-> Xcode. Treat every stage below as "build → run → fix" on-device. The rest of the app
-> (Windows/Linux) does not depend on anything in this folder.
+> **Status:** the extension, the app-side bridge and the dev install script build on a Mac.
+> The signed end-to-end path (activation, frames arriving in Zoom) has **not yet been run**:
+> see `MANUAL_TEST.md` → macOS for the acceptance steps. Distribution signing
+> (Developer ID + notarisation) is not set up.
 
 ## How the pieces fit
 
 ```
-CamLooper.app (Rust/Tauri)                 CameraExtension.systemextension (Swift)
-  produces JPEG frames                       CMIOExtensionProvider/Device/Stream
-        │  decode → BGRA                        ▲   publishes "CamLooper Virtual Camera"
-        │  wrap in IOSurface-backed             │   emits CMSampleBuffers to consumers
-        │  CVPixelBuffer                        │
-        └── XPC (Mach service, App Group) ──────┘   (Zoom/Teams/OBS read the device)
-   activates via OSSystemExtensionRequest
+camlooper.app (Rust/Tauri)                       CameraExtension.systemextension (Swift)
+  ffmpeg ─ BGRA 1280x720 ─► Rust                   one device, two streams
+        src/macos_virtual_camera.rs                  sink   ◄── the app writes here
+        macos/camera_bridge.m                        source ──► Zoom / Meet / Photo Booth
+          │  CMSampleBuffer (IOSurface)                 ▲
+          └── CoreMediaIO sink stream ──────────────────┘  sink frames are forwarded
+   activates via OSSystemExtensionRequest                  to the source unchanged
 ```
 
+- The transport is a **CoreMediaIO sink stream**, not XPC. CoreMediaIO already carries
+  IOSurface-backed sample buffers across the sandbox, so the app needs no Mach service and
+  no shared App Group.
+- While the app is not feeding the sink, the source shows a dark placeholder with a slow
+  purple bar, so the camera is always a valid device.
+- The extension advertises **one format: 1280x720 BGRA at 30 fps**. The app renders to that
+  on macOS whatever the Resolution setting says.
 - Extension bundle id **must** nest under the app id: `com.camlooper.app.CameraExtension`.
-- Frames travel app→extension over **XPC** as **IOSurface** handles (zero-copy). Until that
-  IPC is wired, the extension emits a **test pattern** so you can validate the CMIO plumbing
-  first (Stage C1).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `project.yml` | [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec → `xcodegen generate` produces `CameraExtension.xcodeproj`. (Or create a "Camera Extension" target in Xcode and drop these sources in.) |
-| `CameraExtension/main.swift` | Extension entry point (`CMIOExtensionProvider.startService`). |
-| `CameraExtension/CameraExtensionProvider.swift` | Provider + Device + Stream; test-pattern generator + hook for real frames. |
-| `CameraExtension/FrameReceiver.swift` | XPC listener that receives IOSurface frames from the app (Stage C2). |
-| `CameraExtension/Info.plist` | `NSExtensionPointIdentifier = com.apple.cmio-dal-assistant`, bundle id, versions. |
-| `CameraExtension/CameraExtension.entitlements` | app-sandbox + App Group. |
-| `build.sh` | `xcodebuild` the extension (Release, Developer ID) for CI/local. |
+| `project.yml` | [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. Reads `DEVELOPMENT_TEAM` from the environment. |
+| `CameraExtension/CameraExtensionProvider.swift` | Provider, device, source + sink streams, idle placeholder. |
+| `CameraExtension/Shared.swift` | Camera name, stable device/stream ids, geometry. |
+| `CameraExtension/Info.plist` | `CMIOExtensionMachServiceName`, versions. |
+| `CameraExtension/CameraExtension.entitlements` | App Sandbox + the team-prefixed App Group the Mach service name must live under. |
+| `SigningHost/` | A stub app with bundle id `com.camlooper.app`. Never shipped; it exists so Xcode provisions a profile carrying the System Extension capability, which `dev-install.sh` reuses for the cargo-built app. |
+| `dev-install.sh` | Build + sign the extension, build the Tauri app, embed, sign, install to `/Applications`. |
+| `../macos/camera_bridge.m` | App side: activation request + CoreMediaIO sink writer. Compiled by `build.rs`. |
+| `../src/macos_virtual_camera.rs` | Rust wrapper used by `virtual_camera.rs`. |
 
-Shared constants (bundle ids, App Group, Mach service name) live in
-`CameraExtension/Shared.swift` — **edit `TEAMID` / ids there and in the plists/entitlements**.
+## Development build (your own Mac)
 
-## Stage C0 — Apple portal prerequisites (do first, one-time)
+Prerequisites:
 
-1. Apple Developer Program membership.
-2. In the portal, create/confirm **App IDs**: `com.camlooper.app` and
-   `com.camlooper.app.CameraExtension`.
-3. Enable the **App Groups** capability on both App IDs; create App Group
-   `group.com.camlooper.shared` and assign it to both.
-4. Create **Developer ID Application** provisioning profiles for both App IDs (the extension
-   needs the **System Extension** capability). Download them.
-5. Note your **Team ID** — put it in `Shared.swift` (and anywhere `TEAMID` appears).
-
-## Stage C1 — Extension shows a test pattern (real Mac, dev mode)
+1. A paid Apple Developer Program team. Free personal teams cannot sign system extensions.
+2. Xcode signed in to that team: **Xcode → Settings → Accounts**. If `xcodebuild` reports
+   "Unable to log in with account …", the saved session has expired — sign in again there.
+3. `brew install xcodegen pkgconf`.
 
 ```bash
-brew install xcodegen                 # once
 cd src-tauri/macos-extension
-xcodegen generate                     # -> CameraExtension.xcodeproj
-# In Xcode: set your Team, select Developer ID signing, build the extension.
-systemextensionsctl developer on      # allow unsigned/dev extensions (needs SIP dev mode)
+DEVELOPMENT_TEAM=<10-char Team ID> ./dev-install.sh
 ```
-Embed the built `.systemextension` in a host app (or the CamLooper `.app`, see Stage C4),
-launch it, approve in **System Settings → Privacy & Security**, then open **Photo Booth** or
-**QuickTime → New Movie Recording → camera picker** and confirm "CamLooper Virtual Camera"
-shows the moving test pattern. Debug with:
+
+The first run also compiles the bundled FFmpeg (`scripts/build-macos-ffmpeg.sh`, a few
+minutes); later runs reuse it. The installed app contains its own `ffmpeg` and FFmpeg
+libraries and needs nothing from Homebrew.
+
+The first run registers the App IDs `com.camlooper.app` and
+`com.camlooper.app.CameraExtension` on the team, registers this Mac as a development device
+(a development profile only covers registered devices), and creates development profiles.
+
+Then open `/Applications/camlooper.app`, start the virtual camera, and approve the extension
+under **System Settings → General → Login Items & Extensions → Camera Extensions**. Start
+the camera again; "CamLooper Virtual Camera" appears in camera pickers (restart Zoom if it
+was already open).
+
+Once the extension is installed, `npm run tauri:dev` can feed it too: an unbundled dev
+binary cannot *install* the extension, but it can write to one that is already there.
+
+Notes:
+
+- **Updating the extension:** macOS only replaces an installed extension when its
+  `CFBundleVersion` / `CFBundleShortVersionString` changes. Bump `CFBundleVersion` in
+  `CameraExtension/Info.plist`, rerun `dev-install.sh`, and start the camera; the app
+  resubmits the activation request when the bundled version differs from the one it last
+  activated.
+- **Removing it:** delete `/Applications/camlooper.app`; macOS removes the extension with
+  the app. `systemextensionsctl list` shows what is installed.
+- The dev build runs in the App Sandbox (camera + outbound network; the bundled ffmpeg
+  inherits it). `scripts/macos-sandbox-test.sh` exercises the backend inside it. It is not
+  signed with the hardened runtime, which only notarised Developer ID builds need.
+
+Debugging:
+
 ```bash
 systemextensionsctl list
+log stream --predicate 'subsystem == "com.camlooper.app.CameraExtension"' --level debug
 log stream --predicate 'subsystem == "com.apple.cmio"' --level debug
 ```
 
-## Stage C2 — Real frames over XPC (real Mac)
+## Not done yet: distribution
 
-Wire `FrameReceiver.swift` (extension side) to the app. On the app side add
-`src-tauri/src/macos_camera_bridge.rs` that: decodes JPEG → BGRA, fills a pooled
-IOSurface-backed `CVPixelBuffer`, and sends the IOSurface handle over XPC to the extension's
-Mach service (`Shared.machServiceName`). Replace the stub in
-`src-tauri/src/virtual_camera.rs` (`start_platform_camera`, macOS, ~L520-545) to drive it.
-Validate the app's real video reaches Photo Booth (check BGRA order, stride, orientation, fps).
+To ship this to users the app and extension need **Developer ID Application** signing with
+hardened runtime, Developer ID provisioning profiles for both App IDs, and notarisation.
+The extension must sit at `camlooper.app/Contents/Library/SystemExtensions/` and be signed
+**before** the outer app (inside-out, no `--deep`), so CI has to take over signing from
+`tauri-action`:
 
-## Stage C3 — Activation UX (real Mac)
+1. Build and sign the extension (Developer ID + hardened runtime + its profile).
+2. `tauri build` unsigned.
+3. Copy the extension in, add the app's profile, `codesign` the outer app.
+4. Build the `.dmg`, `xcrun notarytool submit`, `xcrun stapler staple`.
 
-Use `OSSystemExtensionRequest.activationRequest` (via the `objc2`/`objc2-system-extensions`
-crate, or a tiny ObjC shim compiled with `cc` in `build.rs`) so the app installs/activates the
-extension and prompts the user to approve it in System Settings. Surface status to the React UI.
+### Direct download (the shipping route)
 
-## Stage C4 — Embed + sign + notarize in CI
+`scripts/macos-dmg-build.sh` builds the notarised `.dmg` users download: Developer ID
+signed, hardened runtime, not sandboxed, with ads as in every other build. Its header lists
+what it needs. The Developer ID profiles are kept, untracked, in `profiles/`:
 
-The extension must live at `CamLooper.app/Contents/Library/SystemExtensions/` and be signed
-**before** the outer app (signatures are inside-out). Because `tauri-action` signs the app in
-one pass, CI must **take over macOS signing**:
+```bash
+P=src-tauri/macos-extension/profiles
+DEVELOPMENT_TEAM=<Team ID> \
+APP_PROFILE=$PWD/$P/CamLooper_Developer_ID.provisionprofile \
+EXT_PROFILE=$PWD/$P/CamLooper_Camera_Extension_Developer_ID.provisionprofile \
+NOTARY_KEY_ID=<API key id> NOTARY_ISSUER=<issuer id> \
+scripts/macos-dmg-build.sh           # -> src-tauri/target/dmg/CamLooper-<version>.dmg
+```
 
-1. `build.sh` → signed `CameraExtension.systemextension` (Developer ID + hardened runtime +
-   its provisioning profile).
-2. `tauri build` **unsigned** (omit `APPLE_SIGNING_IDENTITY`).
-3. Copy the extension into `…/Contents/Library/SystemExtensions/`.
-4. `codesign` the outer `.app` (extension already signed; do **not** use `--deep`).
-5. Build the `.dmg`, `xcrun notarytool submit`, `xcrun stapler staple`.
+Raise `CFBundleVersion` in `CameraExtension/Info.plist` whenever the extension changes:
+macOS keeps the installed extension if the number is the same.
 
-Re-enable the `APPLE_*` secrets block in `.github/workflows/build-cross-platform.yml` and add
-the two provisioning profiles as base64 secrets. See that file's macOS comments.
+### Mac App Store (not used)
 
-## Stage C5 — Clean-Mac acceptance
+The App Store Connect record was removed on 2026-11-19; the store build would have had to
+drop the ads. The script is kept in case that changes.
 
-Install the notarized `.dmg` on a fresh Mac, approve the extension, confirm the camera works
-in **Zoom, Teams, and OBS**.
+`scripts/macos-appstore-build.sh` builds the Mac App Store `.pkg` (its header lists the
+certificates and profiles it needs). The two Mac App Store profiles are kept, untracked, in
+`profiles/`:
+
+```bash
+P=src-tauri/macos-extension/profiles
+DEVELOPMENT_TEAM=<Team ID> BUILD_NUMBER=<higher than the last upload> \
+APP_PROFILE=$PWD/$P/CamLooper_Mac_App_Store.provisionprofile \
+EXT_PROFILE=$PWD/$P/CamLooper_Camera_Extension_Mac_App_Store.provisionprofile \
+scripts/macos-appstore-build.sh      # -> src-tauri/target/appstore/CamLooper-<version>-<build>.pkg
+```
+
+Validate, then upload, with an App Store Connect API key (App Manager role) saved as
+`~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8`; the issuer ID is shown under
+Users and Access > Integrations:
+
+```bash
+xcrun altool --validate-app -f <pkg> -t macos --apiKey <KEY_ID> --apiIssuer <ISSUER_ID>
+xcrun altool --upload-app   -f <pkg> -t macos --apiKey <KEY_ID> --apiIssuer <ISSUER_ID>
+```
+
+Each upload needs a higher `BUILD_NUMBER` than the last one (build 2 was uploaded on 2026-11-19).
+
+A store-signed app does not launch when copied to a Mac by hand; test it through
+TestFlight. Use `dev-install.sh` for local runs. The Mac App Store additionally requires "Apple Distribution"
+signing with Mac App Store profiles, and a signed `.pkg` uploaded through App Store Connect.

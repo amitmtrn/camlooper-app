@@ -1,0 +1,7 @@
+# macOS: build ffmpeg-next against the FFmpeg that ships in the app
+# (scripts/build-macos-ffmpeg.sh) rather than whatever Homebrew has, so the binary links the
+# same libraries it is bundled with. Only a default: an explicit PKG_CONFIG_PATH wins, and
+# where this directory does not exist (Linux, or a Mac that has not run the script)
+# pkg-config simply falls through to its system search path.
+[env]
+PKG_CONFIG_PATH = { value = "drivers/macos/ffmpeg/lib/pkgconfig", relative = true }

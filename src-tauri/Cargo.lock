@@ -521,6 +521,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
+ "cc",
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",
  "ffmpeg-next",

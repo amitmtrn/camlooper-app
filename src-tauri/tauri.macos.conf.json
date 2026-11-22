@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "macOS": {
+      "frameworks": [
+        "drivers/macos/ffmpeg/lib/libavcodec.61.dylib",
+        "drivers/macos/ffmpeg/lib/libavdevice.61.dylib",
+        "drivers/macos/ffmpeg/lib/libavfilter.10.dylib",
+        "drivers/macos/ffmpeg/lib/libavformat.61.dylib",
+        "drivers/macos/ffmpeg/lib/libavutil.59.dylib",
+        "drivers/macos/ffmpeg/lib/libswresample.5.dylib",
+        "drivers/macos/ffmpeg/lib/libswscale.8.dylib"
+      ],
+      "files": {
+        "MacOS/ffmpeg": "drivers/macos/ffmpeg/bin/ffmpeg",
+        "Resources/ffmpeg/LICENSE-FFmpeg-LGPLv2.1.txt": "drivers/macos/ffmpeg/LICENSE-FFmpeg-LGPLv2.1.txt",
+        "Resources/ffmpeg/LICENSE-libvpx.txt": "drivers/macos/ffmpeg/LICENSE-libvpx.txt",
+        "Resources/ffmpeg/BUILDCONF.txt": "drivers/macos/ffmpeg/BUILDCONF.txt"
+      },
+      "minimumSystemVersion": "13.0"
+    },
+    "category": "Video"
+  }
+}

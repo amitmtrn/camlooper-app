@@ -197,7 +197,14 @@ impl VirtualCamera {
         Ok(())
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    pub async fn push_raw_frame(&self, frame: &[u8]) -> Result<()> {
+        crate::macos_virtual_camera::push(frame).map_err(|e| anyhow::anyhow!(e))?;
+        self.frame_count.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     pub async fn push_raw_frame(&self, _frame: &[u8]) -> Result<()> {
         Err(anyhow::anyhow!("This platform's camera does not take pushed frames"))
     }
@@ -250,15 +257,35 @@ impl VirtualCamera {
         Ok(CameraSink::V4l2 { device: device_path })
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     async fn acquire_sink(&mut self) -> Result<CameraSink> {
-        // macOS ships a CMIO Camera Extension, but it cannot load until the app is signed
-        // and notarised, and its FrameReceiver is still a stub. Failing here is the honest
-        // answer: the previous code logged every frame and slept, so the UI reported a
-        // running camera that no application could ever see.
+        use crate::macos_virtual_camera as mac;
+
+        // The Camera Extension advertises a single format, so the camera runs at that
+        // format whatever the Resolution setting asked for.
+        self.config.width = mac::WIDTH;
+        self.config.height = mac::HEIGHT;
+        self.config.fps = mac::FPS;
+        set_output_resolution(mac::WIDTH, mac::HEIGHT);
+        {
+            let mut status = self.status.lock().await;
+            status.resolution = format!("{}x{}", mac::WIDTH, mac::HEIGHT);
+            status.fps = mac::FPS;
+        }
+
+        // Activation waits on macOS (and possibly on a permission prompt), so keep it off
+        // the async workers.
+        tokio::task::spawn_blocking(mac::open)
+            .await
+            .map_err(|e| anyhow::anyhow!("camera start task failed: {e}"))?
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(CameraSink::RawBgraStdout)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    async fn acquire_sink(&mut self) -> Result<CameraSink> {
         Err(anyhow::anyhow!(
-            "The CamLooper virtual camera is not available on this platform yet. On macOS it \
-             needs a signed and notarised build before the system extension will load."
+            "The CamLooper virtual camera is not available on this platform."
         ))
     }
 
@@ -275,7 +302,13 @@ impl VirtualCamera {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    async fn release_sink(&mut self) {
+        // Stops the sink stream; the extension falls back to its idle placeholder.
+        crate::macos_virtual_camera::close();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     async fn release_sink(&mut self) {
         // Nothing to release: ffmpeg holds the device node open, and the pipeline closes it
         // when the pipeline stops.
@@ -615,6 +648,15 @@ pub async fn start_virtual_camera(
     config: Option<VirtualCameraConfig>,
     app: AppHandle,
 ) -> Result<VirtualCameraStatus> {
+    start_virtual_camera_with(config, Some(app)).await
+}
+
+/// [`start_virtual_camera`] without requiring a running Tauri app, so the camera can be
+/// driven from a test. Only Windows reads the handle (to find the bundled ffmpeg).
+pub async fn start_virtual_camera_with(
+    config: Option<VirtualCameraConfig>,
+    app: Option<AppHandle>,
+) -> Result<VirtualCameraStatus> {
     let config = config.unwrap_or_default();
 
     // Keep the MJPEG stage in step with what the camera will emit.
@@ -631,7 +673,9 @@ pub async fn start_virtual_camera(
     *global_camera = None;
 
     let mut camera = VirtualCamera::new(config);
-    camera.set_app_handle(app);
+    if let Some(app) = app {
+        camera.set_app_handle(app);
+    }
 
     camera.start().await?;
     let status = camera.get_status().await;
@@ -731,7 +775,17 @@ pub async fn list_video_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(target_os = "macos")]
 pub async fn list_video_devices() -> Result<Vec<String>> {
-    Ok(vec!["Virtual camera not supported on this platform".to_string()])
+    crate::camera_capture::list_avfoundation_devices()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+pub async fn list_video_devices() -> Result<Vec<String>> {
+    // An empty list makes the UI say "no camera found". This used to return a sentence
+    // explaining that the virtual camera was unsupported, which the camera picker then
+    // offered as if it were a device.
+    Ok(Vec::new())
 } 

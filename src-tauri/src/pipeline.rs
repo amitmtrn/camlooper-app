@@ -27,12 +27,12 @@ pub enum CameraSink {
     V4l2 { device: String },
     /// Windows: packed BGR24 on stdout, which Rust forwards into softcam's shared memory.
     RawBgr24Stdout,
-    /// macOS, once the CMIO extension is signed: BGRA on stdout
-    /// (`kCVPixelFormatType_32BGRA`).
+    /// macOS: BGRA on stdout (`kCVPixelFormatType_32BGRA`), which Rust forwards into the
+    /// CMIO Camera Extension's sink stream.
     #[allow(dead_code)]
     RawBgraStdout,
-    /// No camera leg at all — preview only. Used on macOS today, and whenever playback runs
-    /// with the virtual camera switched off.
+    /// No camera leg at all — preview only. Used whenever playback runs with the virtual
+    /// camera switched off.
     None,
 }
 
@@ -41,9 +41,16 @@ impl CameraSink {
     /// `None` when ffmpeg writes to the device itself and Rust never sees the pixels.
     pub fn frame_bytes(&self, geom: &Geometry) -> Option<usize> {
         let px = geom.width as usize * geom.height as usize;
+        self.bytes_per_pixel().map(|bpp| px * bpp)
+    }
+
+    /// Bytes per pixel of the raw frames a pipe sink hands back: blue, green, red, and for
+    /// BGRA a trailing alpha byte. Anything that reads those frames (the preview sampler)
+    /// must step by this, not assume three.
+    pub fn bytes_per_pixel(&self) -> Option<usize> {
         match self {
-            CameraSink::RawBgr24Stdout => Some(px * 3),
-            CameraSink::RawBgraStdout => Some(px * 4),
+            CameraSink::RawBgr24Stdout => Some(3),
+            CameraSink::RawBgraStdout => Some(4),
             CameraSink::V4l2 { .. } | CameraSink::None => None,
         }
     }
