@@ -550,8 +550,21 @@ impl Machine {
     // --- time --------------------------------------------------------------------------
 
     pub fn tick(&mut self, now: Instant) -> Vec<Action> {
+        self.tick_at(now, wall_ms())
+    }
+
+    /// [`Self::tick`] with the wall clock (Unix ms) given.
+    ///
+    /// A pending request also ends when the wall clock passes the `expires_at` the UI was
+    /// given. `Instant` may stand still while the computer sleeps; the dialog counts down
+    /// on the wall clock and closes itself after a resume, and without this the request
+    /// would stay pending (window raised, nothing to answer, phone waiting) for up to
+    /// another [`DECISION_TIMEOUT`].
+    pub fn tick_at(&mut self, now: Instant, wall_ms: i64) -> Vec<Action> {
         let Some(s) = self.session.as_ref() else { return vec![] };
-        if !s.accepted && now.duration_since(s.requested_at) >= DECISION_TIMEOUT {
+        let expired = now.duration_since(s.requested_at) >= DECISION_TIMEOUT
+            || self.status.expires_at.is_some_and(|at| wall_ms >= at);
+        if !s.accepted && expired {
             let id = s.id.clone();
             // No cooldown: the user may never have seen the dialog, or tried to accept
             // while the relay socket was down. The prompt rate limit covers nagging.
@@ -1034,6 +1047,29 @@ mod tests {
         assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
         assert!(!m.status().releasing && !m.status().is_busy());
         assert!(matches!(&m.on_signal(req("s2"), t)[..], [Action::AskUser(_)]));
+    }
+
+    #[test]
+    fn a_request_expires_on_the_wall_clock_too() {
+        // Suspend: the monotonic clock barely moved, the wall clock is past the deadline
+        // the dialog counted down to.
+        let t = Instant::now();
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        let expires_at = m.status().expires_at.expect("a pending request has a deadline");
+        assert!(m.tick_at(t + Duration::from_secs(1), expires_at - 1).is_empty());
+        assert_eq!(m.status().state, Phase::Requested);
+        let a = m.tick_at(t + Duration::from_secs(1), expires_at);
+        assert!(matches!(&a[0], Action::DismissRequest(id) if id == "s1"));
+        assert_eq!(sent(&a[1..]), vec!["reject:Timeout"]);
+        assert_eq!(m.status().state, Phase::Idle);
+
+        // An accepted session has no deadline: the wall clock ends nothing.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
+        assert!(m.tick_at(t + Duration::from_secs(1), i64::MAX).is_empty());
+        assert_eq!(m.status().state, Phase::Connecting);
     }
 
     #[test]
