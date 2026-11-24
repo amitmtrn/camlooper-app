@@ -630,14 +630,20 @@ the first request by itself and has no UI. The dialog, banner and tray item are 
 code on Windows and macOS; only the camera sink differs.
 
 **Already automated, don't repeat by hand:** `cargo test --lib` covers the 60 s decision
-timeout, the 15 s quiet period after a decline, stale/cancelled requests, a `stream_stop`
+timeout, the 15 s quiet period after a decline (and only after a decline), at most 5 dialogs
+a minute, stale/cancelled requests, a `stream_stop`
 without the session's id being ignored once accepted, the relay-flap grace period while live,
-the stop watchdog, the candidate cap and filter, the error code behind the error banner
+the stop watchdog (10 s; 125 s while the camera is still being prepared) ending as an error
+that keeps new requests `busy` until the old session has closed, a phone reusing its
+`sessionId`, the camera handoff being released only by the session that holds it, the
+prepare timeout being reported while a system prompt is still open, queued relay frames not
+crossing over to a newly linked phone, the candidate cap and filter, the error code behind the error banner
 (`last_error_code` = `ice_failed` etc.), that a panic in the session still hands the camera
 back, and that the tray-label payload accepts the new `stopPhone`/`phoneLive`/`phoneConnecting`
 fields. It also covers: an Accept less than 800 ms after the request being refused
 (`too_soon`), the status carrying `expiresAt` while a request is pending and a `seq` that
-grows with every change, a second Stop ≥ 5 s into a hung stop forcing it, the tray tooltip
+grows with every change, a second Stop ≥ 5 s into a hung stop forcing it (ending as an error,
+not idle), the tray tooltip
 saying "live" only when live, and the phone's name being cut to 40 characters with control
 and bidi-override characters removed.
 `cargo test --test phone_stream_loopback` covers the phone closing its connection (ends idle,
@@ -711,8 +717,9 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
   entry asks for attention. stderr shows `phone stream: <phone> asks to stream its camera`.
 - Step 3: the dialog closes; the phone shows that the computer declined. The loop keeps
   playing. The second tap is declined on the phone straight away and **no dialog appears and
-  the window is not raised** on the computer: for 15 s after a Decline (or an ignored dialog)
-  new requests are declined silently.
+  the window is not raised** on the computer: for 15 s after a Decline new requests are
+  declined silently. (A dialog that timed out, or a request the phone cancelled, does not
+  start this quiet period; instead at most 5 dialogs are raised per minute.)
 - Step 4: the countdown reaches 0 and the dialog closes by itself (within ~1 s of 0); the
   phone shows that the request timed out. Clicking nothing else is needed.
 - Step 5: the dialog closes, a red banner appears at the very top: spinner + "Connecting to
@@ -794,8 +801,16 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
 - After a Decline or a timeout the window that was raised from the tray stays open; close it
   again by hand.
 - A stop that hangs: if the banner still says "Stopping the phone camera…" after 5 s, its
-  **Stop** button (and the tray item) become clickable again and force the stop. This needs
-  a hung driver to see and is covered by `cargo test --lib` instead.
+  **Stop** button (and the tray item) become clickable again and force the stop. A forced
+  stop (or the watchdog giving up by itself) ends in the red error banner, not in a clean
+  idle: the old session still holds the camera, so playback may refuse to start and the
+  phone's next request is answered "busy" until it has shut down — then the error clears by
+  itself. This needs a hung driver to see and is covered by `cargo test --lib` instead.
+- Stop pressed while the polkit prompt is open (Linux, first accept after boot): the prompt
+  closes by itself within a second or two (stderr: `phone stream: ended (user)`) and the
+  banner disappears. On the Windows Store build the UAC prompt cannot be closed by the app:
+  the banner says "Stopping the phone camera…" until you answer it (or force the stop after
+  5 s, see above).
 - Screen readers: the dialog is announced with its text and "Declines automatically in 60 s",
   then again at 30 s and 10 s only. The live banner announces "Phone camera live" once, not
   the clock.
@@ -805,6 +820,8 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
   and show its own timeout — start again once the prompt is answered.)
 - The 15 s quiet period after a Decline is deliberate (a phone cannot keep popping the
   window up). A request during it is declined on the phone at once; it is not lost or stuck.
+  The same happens to a sixth request within a minute, whatever became of the first five —
+  when repeating steps quickly, leave a minute before deciding that requests are "stuck".
 - If you click **Accept** in the last second, you may get the toast "That request has already
   expired…" — the backend timed out first. Expected.
 - The phone page itself is English-only, so the translated hint and dialog name the phone's

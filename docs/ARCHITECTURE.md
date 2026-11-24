@@ -224,11 +224,30 @@ protocol is in [remote-protocol.md](remote-protocol.md).
   start, and so do the in-app camera preview and recording; the loop is resumed when the stream
   ends. The session task runs under `catch_unwind` and the acquire in its own never-cancelled
   task, so the camera is handed back exactly once whatever happens — a panic, a stop in the
-  middle of a polkit/UAC prompt.
+  middle of a polkit/UAC prompt. (`catch_unwind` needs an unwinding build. The release
+  profile deliberately does not set `panic = "abort"` — see the note in `Cargo.toml`; if it
+  ever does, a panic ends the process and the claim with it, and the panic tests describe
+  dev builds only.) When a session ends during the handoff the acquire is told
+  (`runner::Cancel`): on Linux the pending `pkexec` is killed, which closes the polkit
+  prompt; a Windows UAC prompt cannot be closed from outside and is waited for.
+- **Epochs:** every started session task gets a local, never-repeating epoch from the state
+  machine. Session events are matched by it (not by the phone-chosen `sessionId`, which a
+  phone may reuse), and the camera is acquired and released under it: `release(epoch)` does
+  nothing unless that epoch holds the claim, so a session that was given up on, or whose
+  acquire was refused, can never stop the camera under a later one.
 - **Rules:** `machine.rs` is a pure state machine (one session, 60 s decision timeout, 15 s
-  quiet period after a decline, busy, stale session ids, 10 s grace when the phone leaves the
-  relay mid-stream, 10 s stop watchdog); `manager.rs` runs it. There is no auto-accept in the app: a `DecisionSink`
+  quiet period after an explicit decline, at most 5 prompts a minute, busy, stale sessions,
+  10 s grace when the phone leaves the relay mid-stream, stop watchdog); `manager.rs` runs
+  it. The stop watchdog is 10 s, or 125 s for a session that was still preparing the camera.
+  When it fires — or the user forces a hung stop after 5 s — the status becomes `error`
+  rather than `idle`, and requests keep being answered `busy` until that session's `Closed`
+  arrives: until then it still holds the camera, and a second session next to it would mean
+  two writers. There is no auto-accept in the app: a `DecisionSink`
   (the UI) must call `remote_stream_accept`.
+- **Relay frames and pairings:** outbound frames reach the socket through queues, so one made
+  for the previous pairing can surface after a relink. `signal::PairScope` in the relay task
+  only lets a frame out if its `sessionId` was heard from the phone of the socket's current
+  pairing; a frame whose send failed stays first in line for the next socket.
 - **Commands / events:** `remote_stream_status`, `remote_stream_accept`, `remote_stream_reject`,
   `remote_stream_stop`; `remote://stream-status` is the UI's single source of truth (it
   carries a growing `seq`, and `sessionId`/`deviceName`/`expiresAt` while a request is

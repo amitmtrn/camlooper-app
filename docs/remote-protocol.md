@@ -82,17 +82,20 @@ declined request costs the phone no camera start.
 |---|---|---|
 | Sessions | one at a time | a `stream_request` with another `sessionId` while busy → `stream_reject{busy}` |
 | User decision | 60 s | `stream_reject{timeout}` |
-| After a decline or an ignored dialog | 15 s | new `stream_request`s → `stream_reject{declined}` without asking the user |
+| After the user declines | 15 s | new `stream_request`s → `stream_reject{declined}` without asking the user. Only an explicit decline starts this: not a timeout, a cancel by the phone, or an unlink |
+| Confirm dialogs | 5 per 60 s | further `stream_request`s → `stream_reject{declined}` without asking the user, however the earlier ones ended |
 | Accepted, no offer | 20 s | `stream_stop{timeout}` |
-| Accepted, camera not ready (a polkit/UAC prompt may be open) | 120 s | `stream_stop{timeout}`; the answer is sent only once the camera is ready |
+| Accepted, camera not ready (a polkit/UAC prompt may be open) | 120 s | `stream_stop{timeout}`, sent at the deadline even if the prompt is still open; the answer is sent only once the camera is ready |
+| A stopped or failed session has not handed the camera back yet | until it has | `stream_request` → `stream_reject{busy}` (also after the desktop gave up waiting: 10 s, 125 s if the camera was still being prepared, or a forced stop by the user) |
 | Remote candidates | 32 per session, counting those in the offer | the rest are ignored; so are non-UDP, non-IPv4, port 0, loopback, multicast and unspecified addresses |
 | Offer → ICE connected | 15 s | `stream_stop{ice_failed}` |
 | No video while connected | 10 s | `stream_stop{timeout}` |
 | Phone leaves the relay before the stream is live | `peer{online:false}`, `hello{peerOnline:false}` or `error{peer_offline}` | the attempt ends (`peer_offline`, nothing is sent) |
-| Phone leaves the relay while live | same | nothing at first: media is peer to peer. If the phone is still offline 10 s later **and** no frame arrived in that time, the stream stops (`peer_offline`, nothing is sent); while video keeps arriving it stays up. A media timeout while the phone is offline also ends as `peer_offline`, not as an error |
+| Phone leaves the relay while live | same | nothing at first: media is peer to peer. If the phone is still offline 10 s later **and** no frame arrived in that time, the stream stops (`peer_offline`, nothing is sent); while video keeps arriving it stays up. A media timeout while the phone is offline (per `peer`/`hello`) also ends as `peer_offline`, not as an error. An `error{peer_offline}` alone is only a hint: it is forgotten once video is seen to keep arriving |
 | Phone sends `stream_stop` (with the session's id) | — | the stream stops; nothing is sent back |
 | Phone closes the peer connection (DTLS close) | — | a normal stop, not an error. The desktop waits up to 1.5 s for the `stream_stop` that usually follows and uses its reason; nothing is sent back |
-| Desktop relay socket reconnects | — | queued frames younger than 30 s are sent if they are about the current session or end one (`stream_stop`, `stream_reject`); the rest are dropped |
+| Desktop relay socket reconnects | — | queued frames younger than 30 s are sent if they are about the current session or end one (`stream_stop`, `stream_reject`); the rest are dropped. A frame whose send failed with the old socket is sent first |
+| Desktop is linked to another phone | — | nothing queued for the previous pairing is sent: a frame goes out only if its `sessionId` was received from the phone of the current pairing |
 | Desktop failure (ffmpeg restarted 3× within 30 s, camera unavailable) | — | `stream_stop{error}` |
 
 ## Media
