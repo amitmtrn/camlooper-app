@@ -199,6 +199,7 @@
     "expired": "Ta prośba już wygasła. Dotknij ponownie „Start streaming” na telefonie.",
     "offline": "CamLooper nie jest teraz połączony z usługą telefonu. Spróbuj ponownie za chwilę.",
     "stoppedByPhone": "Telefon zakończył przesyłanie obrazu.",
+    "stopFailed": "Nie udało się zatrzymać kamery telefonu. Spróbuj ponownie lub zamknij CamLooper.",
     "controlsLocked": "Telefon używa kamery CamLooper. Zatrzymaj kamerę telefonu, aby użyć tych elementów sterujących."
   },
   "tray": {
@@ -207,6 +208,7 @@
     "autostart": "Uruchamiaj przy logowaniu",
     "quit": "Zakończ",
     "stopPhone": "Zatrzymaj kamerę telefonu",
-    "phoneLive": "CamLooper — kamera telefonu na żywo"
+    "phoneLive": "CamLooper — kamera telefonu na żywo",
+    "phoneConnecting": "CamLooper — łączenie z telefonem…"
   }
 }

@@ -197,6 +197,7 @@
     "expired": "Bu isteğin süresi zaten doldu. Telefonunuzda \"Start streaming\"e yeniden dokunun.",
     "offline": "CamLooper şu anda telefon hizmetine bağlı değil. Birazdan tekrar deneyin.",
     "stoppedByPhone": "Telefon yayını durdurdu.",
+    "stopFailed": "Telefon kamerası durdurulamadı. Tekrar deneyin veya CamLooper'dan çıkın.",
     "controlsLocked": "Telefonunuz CamLooper kamerasını kullanıyor. Bu denetimleri kullanmak için telefon kamerasını durdurun."
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "Oturum açıldığında başlat",
     "quit": "Çıkış",
     "stopPhone": "Telefon kamerasını durdur",
-    "phoneLive": "CamLooper — telefon kamerası yayında"
+    "phoneLive": "CamLooper — telefon kamerası yayında",
+    "phoneConnecting": "CamLooper — telefona bağlanılıyor…"
   }
 }

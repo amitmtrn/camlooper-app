@@ -199,6 +199,7 @@
     "expired": "תוקף הבקשה כבר פג. הקש שוב על \"Start streaming\" בטלפון.",
     "offline": "CamLooper לא מחובר כרגע לשירות הטלפון. נסה שוב בעוד רגע.",
     "stoppedByPhone": "הטלפון הפסיק לשדר.",
+    "stopFailed": "לא ניתן היה לעצור את מצלמת הטלפון. נסו שוב או צאו מ-CamLooper.",
     "controlsLocked": "הטלפון שלך משתמש במצלמת CamLooper. עצור את מצלמת הטלפון כדי להשתמש בפקדים האלה."
   },
   "tray": {
@@ -207,6 +208,7 @@
     "autostart": "הפעל בכניסה למערכת",
     "quit": "יציאה",
     "stopPhone": "עצירת מצלמת הטלפון",
-    "phoneLive": "CamLooper — מצלמת הטלפון בשידור חי"
+    "phoneLive": "CamLooper — מצלמת הטלפון בשידור חי",
+    "phoneConnecting": "CamLooper — מתחבר לטלפון…"
   }
 }

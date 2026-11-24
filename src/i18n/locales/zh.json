@@ -197,6 +197,7 @@
     "expired": "该请求已过期。请在手机上再次点按“Start streaming”。",
     "offline": "CamLooper 目前未连接到手机服务。请稍后再试。",
     "stoppedByPhone": "手机已停止推流。",
+    "stopFailed": "无法停止手机摄像头。请重试，或退出 CamLooper。",
     "controlsLocked": "你的手机正在使用 CamLooper 摄像头。停止手机摄像头后才能使用这些控件。"
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "登录时启动",
     "quit": "退出",
     "stopPhone": "停止手机摄像头",
-    "phoneLive": "CamLooper — 手机摄像头直播中"
+    "phoneLive": "CamLooper — 手机摄像头直播中",
+    "phoneConnecting": "CamLooper — 正在连接手机…"
   }
 }

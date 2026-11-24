@@ -196,7 +196,6 @@ function CamLooper() {
 
   // False while started hidden by "start at login" (tray only); gates the popup and the banner.
   const windowShown = useWindowShown();
-  useWelcomePopup(windowShown);
 
   // Keep the document title in sync with the active language.
   useEffect(() => {
@@ -281,7 +280,17 @@ function CamLooper() {
   const phoneStream = usePhoneStream({
     // The phone's own Stop: back to idle with a neutral note, never an error.
     onStoppedByPhone: () => toast(t('phoneStream.stoppedByPhone')),
+    onStopFailed: () => toast.error(t('phoneStream.stopFailed')),
   });
+  // A phone asking to stream raises the window; that must not also open the welcome page in
+  // a browser (which would take the focus away from the question) or count as an app open
+  // for the ad. Both wait until the request is answered.
+  const phoneRequestPending = phoneStream.request !== null;
+  useWelcomePopup(windowShown && !phoneRequestPending);
+  const [adAllowed, setAdAllowed] = useState(false);
+  useEffect(() => {
+    if (windowShown && !phoneRequestPending) setAdAllowed(true);
+  }, [windowShown, phoneRequestPending]);
   // While the phone streams, the backend refuses to start playback or the camera; grey the
   // controls and say why instead of letting the click fail.
   const phoneBusy = phoneOwnsCamera(phoneStream.status.state);
@@ -289,6 +298,8 @@ function CamLooper() {
     const result = await phoneStream.accept(sessionId);
     if (result === 'expired') toast.error(t('phoneStream.expired'));
     else if (result === 'offline') toast.warning(t('phoneStream.offline'));
+    else if (result === 'failed') toast.error(t('phoneStream.errors.generic'));
+    // 'too_soon': the dialog is still there; nothing to say.
   };
   const meeting = useMeeting();
   const remoteCardRef = React.useRef<RemoteCardHandle>(null);
@@ -937,6 +948,7 @@ function CamLooper() {
           quit: t('tray.quit'),
           stopPhone: t('tray.stopPhone'),
           phoneLive: t('tray.phoneLive'),
+          phoneConnecting: t('tray.phoneConnecting'),
         },
       }).catch(() => {
         /* no tray (e.g. GNOME without the AppIndicator extension) — nothing to label */
@@ -1269,9 +1281,12 @@ function CamLooper() {
       />
       {phoneStream.request && (
         <PhoneStreamDialog
+          key={phoneStream.request.sessionId}
           request={phoneStream.request}
+          busy={phoneStream.accepting}
           onAccept={(id) => void handlePhoneAccept(id)}
           onDecline={(id) => void phoneStream.reject(id)}
+          onExpire={phoneStream.expire}
         />
       )}
       {macExtensionPending && (
@@ -1311,7 +1326,7 @@ function CamLooper() {
         </div>
       )}
       {/* Not mounted while hidden in the tray: an autostart launch is not an app open. */}
-      {windowShown && <AdBanner />}
+      {adAllowed && <AdBanner />}
       <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
         {/* Top bar: brand + tagline on the left, step indicator on the right */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">

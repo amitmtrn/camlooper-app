@@ -197,6 +197,7 @@
     "expired": "Essa solicitação já expirou. Toque em \"Start streaming\" no celular novamente.",
     "offline": "O CamLooper não está conectado ao serviço do celular no momento. Tente novamente em instantes.",
     "stoppedByPhone": "O celular parou de transmitir.",
+    "stopFailed": "Não foi possível parar a câmera do celular. Tente de novo ou feche o CamLooper.",
     "controlsLocked": "Seu celular está usando a câmera do CamLooper. Pare a câmera do celular para usar estes controles."
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "Iniciar ao fazer login",
     "quit": "Sair",
     "stopPhone": "Parar câmera do celular",
-    "phoneLive": "CamLooper — câmera do celular ao vivo"
+    "phoneLive": "CamLooper — câmera do celular ao vivo",
+    "phoneConnecting": "CamLooper — conectando ao celular…"
   }
 }

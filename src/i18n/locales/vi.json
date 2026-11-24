@@ -197,6 +197,7 @@
     "expired": "Yêu cầu đó đã hết hạn. Hãy nhấn \"Start streaming\" trên điện thoại một lần nữa.",
     "offline": "CamLooper hiện không kết nối với dịch vụ điện thoại. Hãy thử lại sau giây lát.",
     "stoppedByPhone": "Điện thoại đã dừng phát trực tiếp.",
+    "stopFailed": "Không thể dừng camera điện thoại. Hãy thử lại hoặc thoát CamLooper.",
     "controlsLocked": "Điện thoại của bạn đang dùng camera CamLooper. Hãy dừng camera điện thoại để dùng các điều khiển này."
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "Khởi động khi đăng nhập",
     "quit": "Thoát",
     "stopPhone": "Dừng camera điện thoại",
-    "phoneLive": "CamLooper — camera điện thoại đang phát"
+    "phoneLive": "CamLooper — camera điện thoại đang phát",
+    "phoneConnecting": "CamLooper — đang kết nối với điện thoại…"
   }
 }

@@ -197,6 +197,7 @@
     "expired": "La richiesta è già scaduta. Tocca di nuovo \"Start streaming\" sul telefono.",
     "offline": "CamLooper non è connesso al servizio del telefono in questo momento. Riprova tra un attimo.",
     "stoppedByPhone": "Il telefono ha interrotto lo streaming.",
+    "stopFailed": "Impossibile interrompere la fotocamera del telefono. Riprova o esci da CamLooper.",
     "controlsLocked": "Il telefono sta usando la fotocamera di CamLooper. Interrompi la fotocamera del telefono per usare questi comandi."
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "Avvia all'accesso",
     "quit": "Esci",
     "stopPhone": "Interrompi fotocamera del telefono",
-    "phoneLive": "CamLooper — fotocamera del telefono in diretta"
+    "phoneLive": "CamLooper — fotocamera del telefono in diretta",
+    "phoneConnecting": "CamLooper — connessione al telefono…"
   }
 }

@@ -197,6 +197,7 @@
     "expired": "Cette demande a déjà expiré. Touchez à nouveau « Start streaming » sur votre téléphone.",
     "offline": "CamLooper n'est pas connecté au service du téléphone pour le moment. Réessayez dans un instant.",
     "stoppedByPhone": "Le téléphone a arrêté la diffusion.",
+    "stopFailed": "Impossible d'arrêter la caméra du téléphone. Réessayez ou quittez CamLooper.",
     "controlsLocked": "Votre téléphone utilise la caméra CamLooper. Arrêtez la caméra du téléphone pour utiliser ces commandes."
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "Lancer à l'ouverture de session",
     "quit": "Quitter",
     "stopPhone": "Arrêter la caméra du téléphone",
-    "phoneLive": "CamLooper — caméra du téléphone en direct"
+    "phoneLive": "CamLooper — caméra du téléphone en direct",
+    "phoneConnecting": "CamLooper — connexion au téléphone…"
   }
 }

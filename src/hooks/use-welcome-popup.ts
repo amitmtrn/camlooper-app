@@ -13,28 +13,32 @@ import {
  * once every WELCOME_POPUP_MIN_INTERVAL_MS. The last-shown time is persisted so the
  * throttle survives restarts — someone reopening the app all afternoon sees it once.
  *
- * `enabled` is whether the window has actually been shown (see use-window-shown.ts): when the
- * app is started hidden by "start at login", the timer only begins once the user opens the
- * window, so a login never opens a browser tab by itself.
+ * `enabled` is whether the window has actually been shown (see use-window-shown.ts) and no
+ * phone stream request is waiting for an answer: when the app is started hidden by "start at
+ * login", the timer only begins once the user opens the window, so a login never opens a
+ * browser tab by itself — and a browser tab never opens over the "may this phone stream?"
+ * dialog. If `enabled` drops before the timer fires, the delay starts over when it returns.
  */
 export function useWelcomePopup(enabled: boolean) {
   const { i18n } = useTranslation();
-  const startedRef = useRef(false);
+  const firedRef = useRef(false);
 
   useEffect(() => {
     if (!enabled) return;
     // Opening a browser tab on every Vite restart makes the app unpleasant to develop.
     if (!import.meta.env.PROD) return;
 
-    // Guard against React 18 StrictMode double-invoke.
-    if (startedRef.current) return;
-    startedRef.current = true;
+    // Once per launch. Latched when the timer fires, not when it starts: `enabled` can drop
+    // again before that (a phone's stream request is on screen), and the popup must then
+    // still get its turn afterwards.
+    if (firedRef.current) return;
 
     const stored = Number(localStorage.getItem(WELCOME_POPUP_STORAGE_KEY));
     const lastShown = Number.isFinite(stored) && stored > 0 ? stored : 0;
     if (Date.now() - lastShown < WELCOME_POPUP_MIN_INTERVAL_MS) return;
 
     const timeoutId = setTimeout(async () => {
+      firedRef.current = true;
       try {
         // Pass the active UI language so the page shows localized house-ad copy. Use the
         // resolved i18n language rather than reading localStorage directly: the stored key

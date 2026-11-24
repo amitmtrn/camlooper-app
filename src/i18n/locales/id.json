@@ -197,6 +197,7 @@
     "expired": "Permintaan itu sudah kedaluwarsa. Ketuk \"Start streaming\" di ponsel Anda lagi.",
     "offline": "CamLooper sedang tidak terhubung ke layanan ponsel. Coba lagi sebentar lagi.",
     "stoppedByPhone": "Ponsel berhenti melakukan streaming.",
+    "stopFailed": "Tidak dapat menghentikan kamera ponsel. Coba lagi, atau keluar dari CamLooper.",
     "controlsLocked": "Ponsel Anda sedang menggunakan kamera CamLooper. Hentikan kamera ponsel untuk menggunakan kontrol ini."
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "Jalankan saat login",
     "quit": "Keluar",
     "stopPhone": "Hentikan kamera ponsel",
-    "phoneLive": "CamLooper — kamera ponsel live"
+    "phoneLive": "CamLooper — kamera ponsel live",
+    "phoneConnecting": "CamLooper — menghubungkan ke ponsel…"
   }
 }

@@ -197,6 +197,7 @@
     "expired": "このリクエストはすでに期限切れです。スマホでもう一度「Start streaming」をタップしてください。",
     "offline": "CamLooper は現在スマホ連携サービスに接続されていません。しばらくしてからもう一度お試しください。",
     "stoppedByPhone": "スマホがストリーミングを停止しました。",
+    "stopFailed": "スマホカメラを停止できませんでした。もう一度試すか、CamLooper を終了してください。",
     "controlsLocked": "スマホが CamLooper カメラを使用中です。これらの操作を使うには、スマホカメラを停止してください。"
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "ログイン時に起動",
     "quit": "終了",
     "stopPhone": "スマホカメラを停止",
-    "phoneLive": "CamLooper — スマホカメラ配信中"
+    "phoneLive": "CamLooper — スマホカメラ配信中",
+    "phoneConnecting": "CamLooper — スマホに接続中…"
   }
 }

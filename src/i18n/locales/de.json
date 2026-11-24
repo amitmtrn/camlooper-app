@@ -197,6 +197,7 @@
     "expired": "Diese Anfrage ist bereits abgelaufen. Tippe auf deinem Handy erneut auf „Start streaming“.",
     "offline": "CamLooper ist gerade nicht mit dem Handy-Dienst verbunden. Versuche es gleich noch einmal.",
     "stoppedByPhone": "Das Handy hat das Streaming beendet.",
+    "stopFailed": "Die Handykamera konnte nicht gestoppt werden. Versuche es noch einmal oder beende CamLooper.",
     "controlsLocked": "Dein Handy verwendet gerade die CamLooper-Kamera. Stoppe die Handykamera, um diese Steuerelemente zu verwenden."
   },
   "tray": {
@@ -205,6 +206,7 @@
     "autostart": "Bei der Anmeldung starten",
     "quit": "Beenden",
     "stopPhone": "Handykamera stoppen",
-    "phoneLive": "CamLooper — Handykamera live"
+    "phoneLive": "CamLooper — Handykamera live",
+    "phoneConnecting": "CamLooper — Verbindung zum Handy wird hergestellt…"
   }
 }

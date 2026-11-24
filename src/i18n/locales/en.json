@@ -239,6 +239,7 @@
     "expired": "That request has already expired. Tap Start streaming on your phone again.",
     "offline": "CamLooper isn't connected to the phone service right now. Try again in a moment.",
     "stoppedByPhone": "Phone stopped streaming.",
+    "stopFailed": "Couldn't stop the phone camera. Try again, or quit CamLooper.",
     "controlsLocked": "Your phone is using the CamLooper camera. Stop the phone camera to use these controls."
   },
   "tray": {
@@ -247,6 +248,7 @@
     "autostart": "Start at login",
     "quit": "Quit",
     "stopPhone": "Stop phone camera",
-    "phoneLive": "CamLooper — phone camera live"
+    "phoneLive": "CamLooper — phone camera live",
+    "phoneConnecting": "CamLooper — connecting to the phone…"
   }
 }

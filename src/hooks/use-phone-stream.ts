@@ -1,16 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /**
  * Frontend side of the phone camera stream (remote v2). The state machine, timeouts and the
- * camera handoff live in Rust (`src-tauri/src/remote/stream`); this hook mirrors its status,
- * tracks the request awaiting the user's decision and relays accept / decline / stop.
+ * camera handoff live in Rust (`src-tauri/src/remote/stream`); this hook mirrors its status
+ * and relays accept / decline / stop.
+ *
+ * The status is the single source of truth. The confirm dialog and the error banner are
+ * derived from it, never from separate events: events and command replies reach the webview
+ * on different channels in no guaranteed order, so every status carries a `seq` and anything
+ * older than what was already applied is dropped.
  */
 
 export type PhoneStreamPhase = "idle" | "requested" | "connecting" | "live" | "stopping" | "error";
 
 export interface PhoneStreamStatus {
+  /** Grows with every change the backend publishes. */
+  seq: number;
   state: PhoneStreamPhase;
   sessionId: string | null;
   deviceName: string | null;
@@ -21,6 +28,8 @@ export interface PhoneStreamStatus {
   frames: number;
   /** Unix ms when `state` was entered. */
   since: number | null;
+  /** While `requested`: Unix ms at which the request declines by itself. */
+  expiresAt: number | null;
   /** Technical detail, for logs. */
   lastError: string | null;
   /** Stop reason behind `lastError`: `ice_failed`, `timeout`, `error`, … */
@@ -32,14 +41,16 @@ export interface PhoneStreamStatus {
 export interface PhoneStreamRequest {
   sessionId: string;
   deviceName: string | null;
-  receivedAt: number;
   expiresAt: number;
 }
 
-/** Mirrors `DECISION_TIMEOUT` in machine.rs; used only to rebuild a request missed at startup. */
-export const DECISION_TIMEOUT_MS = 60_000;
+export interface PhoneStreamError {
+  code: string | null;
+  detail: string | null;
+}
 
 const IDLE: PhoneStreamStatus = {
+  seq: -1,
   state: "idle",
   sessionId: null,
   deviceName: null,
@@ -49,10 +60,14 @@ const IDLE: PhoneStreamStatus = {
   fps: null,
   frames: 0,
   since: null,
+  expiresAt: null,
   lastError: null,
   lastErrorCode: null,
   endedByPhone: false,
 };
+
+/** A banner's Stop turns into a force stop this long into `stopping` (machine.rs: `FORCE_STOP_AFTER`, plus a margin). */
+export const FORCE_STOP_AFTER_MS = 5_250;
 
 /** The phone holds the camera: normal video start controls are off. */
 export function phoneOwnsCamera(state: PhoneStreamPhase): boolean {
@@ -90,110 +105,193 @@ export function formatElapsed(ms: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
-/** A request is current while the status still says `requested` for that session. */
-function requestFromStatus(s: PhoneStreamStatus): PhoneStreamRequest | null {
-  if (s.state !== "requested" || !s.sessionId) return null;
-  const receivedAt = s.since ?? Date.now();
-  return { sessionId: s.sessionId, deviceName: s.deviceName, receivedAt, expiresAt: receivedAt + DECISION_TIMEOUT_MS };
+/**
+ * Wrap a phone-provided name in FSI … PDI so its direction cannot reorder the sentence it is
+ * put into (a Hebrew name in an English sentence, a Latin name in an Arabic one).
+ */
+export function isolate(text: string): string {
+  return `\u2068${text}\u2069`;
 }
 
-/** `expired`: the request is gone. `offline`: not sent, the request is still pending. */
-export type AcceptResult = "ok" | "expired" | "offline";
+/** Whether `next` may replace `current`: never go back to an older snapshot. */
+export function isNewerOrSame(next: PhoneStreamStatus, current: PhoneStreamStatus): boolean {
+  return next.seq >= current.seq;
+}
 
-export function usePhoneStream(options: { onStoppedByPhone?: () => void } = {}) {
-  const onStoppedByPhone = useRef(options.onStoppedByPhone);
-  onStoppedByPhone.current = options.onStoppedByPhone;
-  const previous = useRef<PhoneStreamStatus>(IDLE);
+/** The request awaiting a decision, from the status alone. */
+export function requestFromStatus(s: PhoneStreamStatus): PhoneStreamRequest | null {
+  if (s.state !== "requested" || !s.sessionId || s.expiresAt == null) return null;
+  return { sessionId: s.sessionId, deviceName: s.deviceName, expiresAt: s.expiresAt };
+}
+
+/**
+ * - `expired`: the request is gone.
+ * - `offline` / `too_soon`: not accepted, the request is still pending and the dialog stays.
+ * - `failed`: anything else (backend not ready, …); the status is re-read.
+ */
+export type AcceptResult = "ok" | "expired" | "offline" | "too_soon" | "failed";
+
+function acceptResult(err: unknown): AcceptResult {
+  if (err === "offline" || err === "too_soon") return err;
+  return err === "no_such_request" ? "expired" : "failed";
+}
+
+/** Dismissed errors are remembered by when they happened, across re-reads and reloads. */
+const DISMISSED_ERROR_KEY = "camlooper.phoneStream.dismissedErrorSince";
+
+function readDismissedError(): number | null {
+  try {
+    const v = Number(sessionStorage.getItem(DISMISSED_ERROR_KEY));
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopFailed?: () => void } = {}) {
+  const callbacks = useRef(options);
+  callbacks.current = options;
+  const latest = useRef<PhoneStreamStatus>(IDLE);
   const [status, setStatus] = useState<PhoneStreamStatus>(IDLE);
-  const [request, setRequest] = useState<PhoneStreamRequest | null>(null);
-  /** The last failure, until the user dismisses it or a new stream starts. */
-  const [error, setError] = useState<{ code: string | null; detail: string | null } | null>(null);
+  /** A session whose dialog was closed here (declined, or its countdown ran out). */
+  const [closedSession, setClosedSession] = useState<string | null>(null);
+  /** A session whose accept is on its way, or done and waiting for the status to move on. */
+  const [acceptingSession, setAcceptingSession] = useState<string | null>(null);
+  const [dismissedErrorSince, setDismissedErrorSince] = useState<number | null>(readDismissedError);
 
   const applyStatus = useCallback((s: PhoneStreamStatus) => {
+    const before = latest.current;
+    // An older snapshot arriving late (a command reply overtaken by an event) must not
+    // bring back a banner or a dialog that is already gone.
+    if (!isNewerOrSame(s, before)) return;
+    latest.current = s;
     // The phone ended a session that was up a moment ago: say so, neutrally. (Not on the
     // first read after startup, where there is no "moment ago".)
-    const before = previous.current;
-    previous.current = s;
     if (s.state === "idle" && s.endedByPhone && phoneOwnsCamera(before.state)) {
-      onStoppedByPhone.current?.();
+      callbacks.current.onStoppedByPhone?.();
     }
     setStatus(s);
-    // Close the dialog as soon as the backend has moved on (accepted, cancelled, timed out).
-    setRequest((r) => (r && (s.state !== "requested" || s.sessionId !== r.sessionId) ? null : r));
-    if (s.state === "error") setError({ code: s.lastErrorCode, detail: s.lastError });
-    else if (s.state === "requested" || s.state === "connecting") setError(null);
   }, []);
+
+  /** Re-read the status: at startup, and as a self-heal for an event that never arrived. */
+  const refresh = useCallback(async () => {
+    try {
+      applyStatus(await invoke<PhoneStreamStatus>("remote_stream_status"));
+    } catch (err) {
+      console.error("phone stream: could not read status:", err);
+    }
+  }, [applyStatus]);
 
   useEffect(() => {
     let cancelled = false;
     let unlisteners: UnlistenFn[] = [];
+    const onFocus = () => void refresh();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
     (async () => {
-      // Subscribe first, then read, so a request raised during startup is not lost.
+      // Subscribe first, then read, so a change during startup is not lost.
       const subs = await Promise.all([
         listen<PhoneStreamStatus>("remote://stream-status", (e) => applyStatus(e.payload)),
-        listen<PhoneStreamRequest>("remote://stream-request", (e) => {
-          console.log("phone stream: request from", e.payload.deviceName ?? "phone");
-          setRequest(e.payload);
-        }),
-        listen<{ sessionId: string }>("remote://stream-request-dismissed", (e) => {
-          setRequest((r) => (r?.sessionId === e.payload.sessionId ? null : r));
-        }),
+        listen("app://shown", () => void refresh()),
+        listen("remote://stream-stop-failed", () => callbacks.current.onStopFailed?.()),
       ]);
       if (cancelled) {
         subs.forEach((u) => u());
         return;
       }
       unlisteners = subs;
-      try {
-        const current = await invoke<PhoneStreamStatus>("remote_stream_status");
-        if (cancelled) return;
-        applyStatus(current);
-        const pending = requestFromStatus(current);
-        if (pending) setRequest((r) => r ?? pending);
-      } catch (err) {
-        console.error("phone stream: could not read status:", err);
-      }
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("visibilitychange", onVisible);
+      await refresh();
     })();
     return () => {
       cancelled = true;
       unlisteners.forEach((u) => u());
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [applyStatus]);
+  }, [applyStatus, refresh]);
 
-  const accept = useCallback(async (sessionId: string): Promise<AcceptResult> => {
-    try {
-      await invoke("remote_stream_accept", { sessionId });
-      setRequest(null);
-      return "ok";
-    } catch (err) {
-      console.error("phone stream: accept failed:", err);
-      // The relay connection is down: the accept was not sent and the request is still
-      // pending in the backend, so the dialog stays for another try.
-      if (err === "offline") return "offline";
-      setRequest(null);
-      return "expired";
-    }
-  }, []);
+  const request = useMemo(() => {
+    const r = requestFromStatus(status);
+    return r && r.sessionId !== closedSession ? r : null;
+  }, [status, closedSession]);
+  const accepting = request !== null && request.sessionId === acceptingSession;
 
-  const reject = useCallback(async (sessionId: string) => {
-    setRequest(null);
-    try {
-      await invoke("remote_stream_reject", { sessionId });
-    } catch (err) {
-      // Already expired or cancelled: nothing left to decline.
-      console.warn("phone stream: decline:", err);
-    }
-  }, []);
+  /** The last failure, until the user dismisses it or a new stream starts. */
+  const error = useMemo<PhoneStreamError | null>(
+    () =>
+      status.state === "error" && status.since !== dismissedErrorSince
+        ? { code: status.lastErrorCode, detail: status.lastError }
+        : null,
+    [status, dismissedErrorSince],
+  );
 
+  const accept = useCallback(
+    async (sessionId: string): Promise<AcceptResult> => {
+      // The dialog stays, busy, until the status leaves `requested` — accepting can sit
+      // behind a system prompt for a while, and a failure must not leave nothing on screen.
+      setAcceptingSession(sessionId);
+      let result: AcceptResult = "ok";
+      try {
+        await invoke("remote_stream_accept", { sessionId });
+      } catch (err) {
+        console.error("phone stream: accept failed:", err);
+        result = acceptResult(err);
+        setAcceptingSession(null);
+      }
+      // Whatever happened, show what the backend now says (the dialog again if the request
+      // is still pending, nothing if it is gone).
+      await refresh();
+      return result;
+    },
+    [refresh],
+  );
+
+  const reject = useCallback(
+    async (sessionId: string) => {
+      setClosedSession(sessionId);
+      try {
+        await invoke("remote_stream_reject", { sessionId });
+      } catch (err) {
+        // Already expired or cancelled: nothing left to decline.
+        console.warn("phone stream: decline:", err);
+        void refresh();
+      }
+    },
+    [refresh],
+  );
+
+  /** The dialog's own countdown ran out: close it now; the backend's timeout is what counts. */
+  const expire = useCallback(
+    (sessionId: string) => {
+      setClosedSession(sessionId);
+      void refresh();
+    },
+    [refresh],
+  );
+
+  /** Also the way out of a stop that hangs: a repeat after ~5 s forces it. */
   const stop = useCallback(async () => {
     try {
       await invoke("remote_stream_stop");
     } catch (err) {
       console.error("phone stream: stop failed:", err);
+      callbacks.current.onStopFailed?.();
+    }
+    void refresh();
+  }, [refresh]);
+
+  const dismissError = useCallback(() => {
+    const since = latest.current.since;
+    setDismissedErrorSince(since);
+    try {
+      if (since != null) sessionStorage.setItem(DISMISSED_ERROR_KEY, String(since));
+    } catch {
+      // Storage unavailable: dismissed for this page load only.
     }
   }, []);
 
-  const dismissError = useCallback(() => setError(null), []);
-
-  return { status, request, error, accept, reject, stop, dismissError };
+  return { status, request, accepting, error, accept, reject, expire, stop, dismissError };
 }
