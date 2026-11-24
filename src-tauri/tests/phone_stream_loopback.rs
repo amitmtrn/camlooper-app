@@ -117,7 +117,7 @@ async fn run_loopback(codec: EncodedCodec, frames: Vec<Vec<u8>>, script: &str) {
         other => panic!("expected the answer, got {other:?}"),
     };
     assert!(answer.contains("a=candidate:"), "desktop candidates are embedded in the answer");
-    sim.answer(answer);
+    sim.answer(answer.clone());
     for _ in 0..2 {
         let c = sim.candidates.recv_timeout(Duration::from_secs(10)).expect("phone candidate");
         manager.on_relay_signal(json!({"kind":"candidate","sessionId":"loop-1","candidate":c,"sdpMid":"0","sdpMLineIndex":0}));
@@ -130,6 +130,26 @@ async fn run_loopback(codec: EncodedCodec, frames: Vec<Vec<u8>>, script: &str) {
     };
     assert_eq!(live, (Some(640), Some(360), Some(codec.name().to_string())));
     tokio::time::timeout(Duration::from_secs(5), status.wait_for(|s| s.state == Phase::Live)).await.unwrap().unwrap();
+
+    // Anything on the network can reach the receiver's UDP ports. Junk that looks like DTLS,
+    // RTP, STUN or nothing at all, from a stranger's socket, must not disturb the stream.
+    let junk = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let ports: Vec<u16> = answer
+        .lines()
+        .filter(|l| l.starts_with("a=candidate:") && l.contains(" typ host"))
+        .filter_map(|l| l.split_whitespace().nth(5)?.parse().ok())
+        .collect();
+    assert!(!ports.is_empty(), "host candidate ports in the answer: {answer}");
+    for port in &ports {
+        let mut dtls = vec![22u8, 254, 253, 0, 0, 0, 0, 0, 0, 0, 1, 0, 40];
+        dtls.extend_from_slice(&[0xab; 40]);
+        let alert = [21u8, 254, 253, 0, 1, 0, 0, 0, 0, 0, 9, 0, 2, 2, 40];
+        let rtp = [0x80u8, 102, 0, 1, 0, 0, 0, 1, 0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4];
+        let stun = [0u8, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        for pkt in [&dtls[..], &alert[..], &rtp[..], &stun[..], &[0xff; 64][..], &[][..]] {
+            let _ = junk.send_to(pkt, (Ipv4Addr::LOCALHOST, *port));
+        }
+    }
 
     tokio::time::sleep(Duration::from_millis(3500)).await;
     let st = manager.status();
@@ -172,4 +192,79 @@ async fn vp8_phone_stream_decodes_through_the_pipeline() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crashed_ffmpeg_is_restarted_and_resumes_on_a_keyframe() {
     run_loopback(EncodedCodec::H264, h264_access_units(&fixture("h264-640x360.h264")), CRASH_ONCE_FFMPEG).await;
+}
+
+/// The phone taps Stop: it sends `stream_stop{user}` over the relay and closes its
+/// RTCPeerConnection, and the DTLS close reaches the desktop first (seen in a real run, where
+/// the session used to end as `error: the connection was closed`). Either way round, and also
+/// when the relay's frame never arrives, the session must end as a normal stop: idle, no
+/// error, nothing echoed to the phone.
+async fn run_phone_closes(relay_stop_follows: bool) {
+    if !tool_available("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let target = CameraTarget {
+        sink: CameraSink::Null,
+        geometry: Geometry { width: 1280, height: 720, fps: 30 },
+        preview: false,
+    };
+    let mut deps = SessionDeps::new(tee_ffmpeg(dir.path(), TEE_FFMPEG), Arc::new(FixedCamera(target)), Arc::new(NoStun));
+    deps.rtc = RtcOptions { bind_ips: Some(vec![Ipv4Addr::LOCALHOST]), ..RtcOptions::default() };
+    let (dtx, mut decisions) = mpsc::unbounded_channel();
+    let (manager, mut out) = StreamManager::spawn(Arc::new(Arc::new(deps)), Arc::new(ChannelDecisions(dtx)));
+    let mut status = manager.subscribe();
+
+    manager.on_relay_signal(json!({"kind":"stream_request","sessionId":"close-1","deviceLabel":"Sim"}));
+    let Some(DecisionEvent::Request(req)) = decisions.recv().await else { panic!("no decision request") };
+    manager.accept(&req.session_id).await.unwrap();
+    // The phone streams for two seconds, then closes its peer connection.
+    let sim = PhoneSim::start_with(EncodedCodec::H264, h264_access_units(&fixture("h264-640x360.h264")), 2, true);
+    manager.on_relay_signal(json!({"kind":"offer","sessionId":"close-1","sdp": sim.offer}));
+    let answer = loop {
+        if let OutboundFrame::Signal(StreamSignal::Answer { sdp, .. }) = next_out(&mut out).await {
+            break sdp;
+        }
+    };
+    sim.answer(answer);
+    for _ in 0..2 {
+        let c = sim.candidates.recv_timeout(Duration::from_secs(10)).expect("phone candidate");
+        manager.on_relay_signal(json!({"kind":"candidate","sessionId":"close-1","candidate":c}));
+    }
+    tokio::time::timeout(Duration::from_secs(10), status.wait_for(|s| s.state == Phase::Live)).await.unwrap().unwrap();
+
+    let report = tokio::task::spawn_blocking(move || sim.finish()).await.unwrap();
+    assert!(report.connected);
+    let closed_at = std::time::Instant::now();
+    if relay_stop_follows {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager.on_relay_stream_stop(Some(json!({"sessionId":"close-1","reason":"user"})));
+    }
+    // Well inside the 10 s media timeout: the close itself ended the session.
+    let ended = tokio::time::timeout(Duration::from_secs(6), status.wait_for(|s| s.state == Phase::Idle || s.state == Phase::Error))
+        .await
+        .expect("the session ends soon after the phone closes")
+        .unwrap()
+        .clone();
+    assert_eq!(ended.state, Phase::Idle, "a phone hanging up is not an error: {ended:?}");
+    assert_eq!((ended.last_error.clone(), ended.last_error_code.clone()), (None, None), "{ended:?}");
+    assert!(ended.ended_by_phone, "{ended:?}");
+    if relay_stop_follows {
+        assert!(closed_at.elapsed() < Duration::from_millis(1400), "the relay's stop ends the wait early");
+    }
+    // Nothing is sent back to a phone that hung up.
+    while let Ok(f) = out.try_recv() {
+        assert!(!matches!(f, OutboundFrame::StreamStop { .. }), "unexpected {f:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_phone_closing_the_connection_is_a_normal_stop() {
+    run_phone_closes(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_phone_closing_before_its_relay_stop_arrives_is_a_normal_stop() {
+    run_phone_closes(true).await;
 }

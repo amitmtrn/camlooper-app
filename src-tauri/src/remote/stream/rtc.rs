@@ -21,13 +21,21 @@
 //!   generous ceiling for senders that still look at it.
 //! * **Timeouts.** No ICE connection within 15 s → `ice_failed`. Once connected, no media
 //!   for 10 s → `timeout`.
+//! * **Hostile input.** The UDP ports are reachable by anything on the LAN. A datagram is only
+//!   handed to str0m when [`Rtc::accepts`] says it belongs to this session (STUN with our
+//!   ufrag, or a source that is a validated ICE peer), and an error from a received datagram
+//!   is logged and ignored — it never ends the session. Remote candidates are filtered (UDP,
+//!   IPv4, a real unicast address) and capped per session; oversized frames are dropped.
+//! * **Peer close.** When the phone closes its `RTCPeerConnection` the DTLS close_notify
+//!   arrives here before (or without) the relay's `stream_stop`. That is reported as
+//!   [`RtcClose::PeerClosed`], a normal ending, not an error.
 //!
 //! Privacy: SDP and candidate addresses are logged at debug level only.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use str0m::bwe::Bitrate;
 use str0m::change::SdpOffer;
 use str0m::format::Codec as SCodec;
@@ -38,10 +46,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use super::media::{h264_is_keyframe, vp8_is_keyframe, PliLimiter};
-use super::signal::{StopReason, MAX_SDP_BYTES};
+use super::signal::{StopReason, MAX_REMOTE_CANDIDATES, MAX_SDP_BYTES};
 use crate::pipeline::EncodedCodec;
 
-const MAX_HOST_IPS: usize = 8;
+const MAX_HOST_IPS: usize = 4;
+/// A depacketized frame larger than this is dropped (a 1080p keyframe is well under 1 MB).
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const STUN_BUDGET: Duration = Duration::from_millis(800);
 const FRAME_QUEUE: usize = 90;
 
@@ -103,12 +113,15 @@ pub enum RtcEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtcClose {
     Stopped,
+    /// The phone closed the connection (DTLS close_notify). A normal ending.
+    PeerClosed,
     Failed { reason: StopReason, detail: String },
 }
 
 /// Sockets bound and candidates gathered, ready for an offer.
 pub struct LocalTransport {
-    sockets: Vec<Arc<UdpSocket>>,
+    /// Each socket with its bound address (looked up once, not per packet).
+    sockets: Vec<(SocketAddr, Arc<UdpSocket>)>,
     candidates: Vec<Candidate>,
 }
 
@@ -118,29 +131,58 @@ impl LocalTransport {
     }
 }
 
-/// Usable IPv4 addresses: not loopback / link-local / unspecified; container and VM
-/// bridges are skipped when anything else is available (they are never on the phone's LAN).
-pub fn host_ipv4s() -> Vec<Ipv4Addr> {
-    let ifaces = if_addrs::get_if_addrs().unwrap_or_default();
+/// Interface name prefixes that are never on the phone's LAN: container and VM bridges, and
+/// VPN / tunnel interfaces (whose addresses would also be disclosed to the relay in the answer).
+const SKIPPED_INTERFACES: &[&str] = &[
+    "docker", "br-", "veth", "virbr", "vboxnet", "vmnet", "cni", "flannel", "podman", "lxcbr", "lxdbr", "tun", "tap", "wg",
+    "utun", "tailscale", "zt", "ipsec", "ppp",
+];
+
+/// Pick the host candidates from `(interface name, address)` pairs: no loopback / link-local /
+/// unspecified / broadcast; bridges and tunnels are skipped when anything else is available;
+/// the default-route interface's address comes first; at most [`MAX_HOST_IPS`].
+pub fn select_host_ips(ifaces: &[(String, Ipv4Addr)], default_route: Option<Ipv4Addr>) -> Vec<Ipv4Addr> {
     let usable = |ip: &Ipv4Addr| !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() && !ip.is_broadcast();
-    let virtual_name = |name: &str| {
-        ["docker", "br-", "veth", "virbr", "vboxnet", "vmnet", "cni", "flannel", "podman", "lxcbr", "lxdbr"]
-            .iter()
-            .any(|p| name.starts_with(p))
+    let skipped = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        SKIPPED_INTERFACES.iter().any(|p| name.starts_with(p))
     };
-    let mut all: Vec<(bool, Ipv4Addr)> = ifaces
-        .iter()
-        .filter_map(|i| match i.ip() {
-            IpAddr::V4(ip) if usable(&ip) => Some((virtual_name(&i.name), ip)),
-            _ => None,
-        })
-        .collect();
+    let mut all: Vec<(bool, Ipv4Addr)> =
+        ifaces.iter().filter(|(_, ip)| usable(ip)).map(|(name, ip)| (skipped(name), *ip)).collect();
     all.sort();
     all.dedup();
     let real: Vec<Ipv4Addr> = all.iter().filter(|(v, _)| !v).map(|(_, ip)| *ip).collect();
     let mut ips = if real.is_empty() { all.into_iter().map(|(_, ip)| ip).collect() } else { real };
+    if let Some(pos) = default_route.and_then(|d| ips.iter().position(|ip| *ip == d)) {
+        let d = ips.remove(pos);
+        ips.insert(0, d);
+    }
     ips.truncate(MAX_HOST_IPS);
     ips
+}
+
+/// The local address the OS would use to reach the internet (no packet is sent: connecting a
+/// UDP socket only selects a route).
+fn default_route_ipv4() -> Option<Ipv4Addr> {
+    let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    s.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match s.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    }
+}
+
+/// Usable IPv4 addresses of this machine for host candidates (see [`select_host_ips`]).
+pub fn host_ipv4s() -> Vec<Ipv4Addr> {
+    let ifaces: Vec<(String, Ipv4Addr)> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.ip() {
+            IpAddr::V4(ip) => Some((i.name, ip)),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    select_host_ips(&ifaces, default_route_ipv4())
 }
 
 /// Bind sockets and gather candidates. `stun` is the first STUN server from
@@ -161,7 +203,7 @@ pub async fn gather(opts: &RtcOptions, stun: Option<SocketAddr>) -> Result<Local
         match Candidate::host(local, "udp") {
             Ok(c) => {
                 candidates.push(c);
-                sockets.push(Arc::new(sock));
+                sockets.push((local, Arc::new(sock)));
             }
             Err(e) => log::debug!("phone stream: no host candidate for {local}: {e}"),
         }
@@ -195,8 +237,18 @@ pub fn accept_offer(
         rtc.add_local_candidate(c.clone());
     }
     log::debug!("phone stream: offer sdp:\n{offer_sdp}");
-    let offer = SdpOffer::from_sdp_string(offer_sdp).context("unreadable offer SDP")?;
-    let answer = rtc.sdp_api().accept_offer(offer).context("offer not acceptable")?;
+    let allow_loopback = transport.sockets.iter().any(|(a, _)| a.ip().is_loopback());
+    let (offer_sdp, offer_candidates) = filter_offer_candidates(offer_sdp, allow_loopback, MAX_REMOTE_CANDIDATES);
+    // str0m's errors can quote SDP lines (addresses, ufrag). The detail stays at debug level;
+    // what reaches stderr and the UI is a fixed sentence.
+    let offer = SdpOffer::from_sdp_string(&offer_sdp).map_err(|e| {
+        log::debug!("phone stream: unreadable offer SDP: {e}");
+        anyhow!("the phone's offer could not be read")
+    })?;
+    let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
+        log::debug!("phone stream: offer not acceptable: {e}");
+        anyhow!("the phone's offer is not supported")
+    })?;
     let answer = answer.to_sdp_string();
     log::debug!("phone stream: answer sdp:\n{answer}");
     if answer.len() > MAX_SDP_BYTES {
@@ -204,7 +256,8 @@ pub fn accept_offer(
     }
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = mpsc::channel(FRAME_QUEUE);
-    tokio::spawn(run(rtc, transport.sockets, opts, start, cmd_rx, ev_tx));
+    let limits = CandidateLimits { used: offer_candidates, allow_loopback };
+    tokio::spawn(run(rtc, transport.sockets, opts, start, limits, cmd_rx, ev_tx));
     Ok((answer, cmd_tx, ev_rx))
 }
 
@@ -230,6 +283,45 @@ fn build_rtc(start: Instant) -> Rtc {
     cfg.build(start)
 }
 
+/// Whether a remote candidate is worth pairing with: UDP, IPv4 (we only bind IPv4), a real
+/// unicast address and port. Loopback only when we bound loopback ourselves (tests).
+fn candidate_allowed(c: &Candidate, allow_loopback: bool) -> bool {
+    let addr = c.addr();
+    let IpAddr::V4(ip) = addr.ip() else { return false };
+    c.proto() == Protocol::Udp
+        && addr.port() != 0
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+        && (allow_loopback || !ip.is_loopback())
+}
+
+/// Drop `a=candidate:` lines from the offer that fail [`candidate_allowed`], cannot be parsed
+/// (mDNS names, which str0m cannot use anyway) or exceed `max`. Returns the SDP and how many
+/// candidates were kept.
+fn filter_offer_candidates(sdp: &str, allow_loopback: bool, max: usize) -> (String, usize) {
+    let mut out = String::with_capacity(sdp.len());
+    let mut kept = 0;
+    for line in sdp.split_inclusive('\n') {
+        if let Some(c) = line.trim_end().strip_prefix("a=candidate:") {
+            let ok = kept < max
+                && Candidate::from_sdp_string(&format!("candidate:{c}")).is_ok_and(|c| candidate_allowed(&c, allow_loopback));
+            if !ok {
+                continue;
+            }
+            kept += 1;
+        }
+        out.push_str(line);
+    }
+    (out, kept)
+}
+
+struct CandidateLimits {
+    /// Remote candidates taken so far this session (offer + trickle).
+    used: usize,
+    allow_loopback: bool,
+}
+
 struct Udp {
     local: SocketAddr,
     source: SocketAddr,
@@ -238,14 +330,15 @@ struct Udp {
 
 async fn run(
     mut rtc: Rtc,
-    sockets: Vec<Arc<UdpSocket>>,
+    sockets: Vec<(SocketAddr, Arc<UdpSocket>)>,
     opts: RtcOptions,
     start: Instant,
+    mut limits: CandidateLimits,
     mut cmd_rx: mpsc::UnboundedReceiver<RtcCommand>,
     ev_tx: mpsc::Sender<RtcEvent>,
 ) {
     let (udp_tx, mut udp_rx) = mpsc::channel::<Udp>(1024);
-    let readers: Vec<_> = sockets.iter().map(|s| spawn_reader(s.clone(), udp_tx.clone())).collect();
+    let readers: Vec<_> = sockets.iter().map(|(local, s)| spawn_reader(*local, s.clone(), udp_tx.clone())).collect();
     drop(udp_tx);
 
     let mut st = LoopState {
@@ -255,6 +348,8 @@ async fn run(
         pli: PliLimiter::new(opts.pli_interval),
         next_remb: start,
         discontinuity: false,
+        peer_closed: false,
+        ignored: 0,
         frames: 0,
         dropped: 0,
         plis: 0,
@@ -265,6 +360,10 @@ async fn run(
             Ok(t) => t,
             Err(close) => break close,
         };
+        if st.peer_closed {
+            // The close_notify reply went out in the drain above.
+            break RtcClose::PeerClosed;
+        }
         // 2. Our own timers.
         let now = Instant::now();
         if st.connected_at.is_none() && now.duration_since(start) >= opts.ice_timeout {
@@ -299,6 +398,7 @@ async fn run(
             }
         }
         if !rtc.is_alive() {
+            // str0m disconnects itself on a DTLS fingerprint mismatch (and little else).
             break RtcClose::Failed { reason: StopReason::Error, detail: "the connection was closed".into() };
         }
 
@@ -312,12 +412,15 @@ async fn run(
         }
         let input_result = tokio::select! {
             pkt = udp_rx.recv() => match pkt {
-                Some(p) => handle_udp(&mut rtc, p),
+                Some(p) => {
+                    handle_udp(&mut rtc, p, &mut st);
+                    Ok(())
+                }
                 None => break RtcClose::Failed { reason: StopReason::Error, detail: "network sockets closed".into() },
             },
             cmd = cmd_rx.recv() => match cmd {
                 Some(RtcCommand::RemoteCandidate(c)) => {
-                    add_remote_candidate(&mut rtc, &c);
+                    add_remote_candidate(&mut rtc, &c, &mut limits);
                     Ok(())
                 }
                 Some(RtcCommand::RequestKeyframe) => {
@@ -336,7 +439,11 @@ async fn run(
             }
         };
         if let Err(e) = input_result {
-            break RtcClose::Failed { reason: StopReason::Error, detail: e };
+            if st.peer_closed {
+                break RtcClose::PeerClosed;
+            }
+            log::debug!("phone stream: receiver timer error: {e}");
+            break RtcClose::Failed { reason: StopReason::Error, detail: "the connection failed".into() };
         }
     };
 
@@ -347,14 +454,16 @@ async fn run(
         r.abort();
     }
     eprintln!(
-        "phone stream: receiver closed ({}) after {} frames, {} dropped, {} keyframe requests",
+        "phone stream: receiver closed ({}) after {} frames, {} dropped, {} keyframe requests, {} stray datagrams",
         match &close {
             RtcClose::Stopped => "stopped".to_string(),
+            RtcClose::PeerClosed => "closed by the phone".to_string(),
             RtcClose::Failed { reason, detail } => format!("{reason}: {detail}"),
         },
         st.frames,
         st.dropped,
-        st.plis
+        st.plis,
+        st.ignored
     );
     let _ = ev_tx.send(RtcEvent::Closed(close)).await;
 }
@@ -367,6 +476,10 @@ struct LoopState {
     next_remb: Instant,
     /// Frames were dropped since the last delivered one; the next is marked non-contiguous.
     discontinuity: bool,
+    /// The phone closed the connection (str0m's `Event::Closed`).
+    peer_closed: bool,
+    /// Datagrams that were not for this session or that str0m rejected.
+    ignored: u64,
     frames: u64,
     dropped: u64,
     plis: u64,
@@ -375,23 +488,33 @@ struct LoopState {
 /// Poll str0m until it asks to be woken at a time. Transmits go out immediately.
 fn drain(
     rtc: &mut Rtc,
-    sockets: &[Arc<UdpSocket>],
+    sockets: &[(SocketAddr, Arc<UdpSocket>)],
     st: &mut LoopState,
     ev_tx: &mpsc::Sender<RtcEvent>,
 ) -> Result<Instant, RtcClose> {
     loop {
-        let out = rtc
-            .poll_output()
-            .map_err(|e| RtcClose::Failed { reason: StopReason::Error, detail: e.to_string() })?;
+        let out = match rtc.poll_output() {
+            Ok(out) => out,
+            // Closing down after the phone's close_notify is not a failure, whatever it trips over.
+            Err(_) if st.peer_closed => return Err(RtcClose::PeerClosed),
+            Err(e) => {
+                log::debug!("phone stream: receiver error: {e}");
+                return Err(RtcClose::Failed { reason: StopReason::Error, detail: "the connection failed".into() });
+            }
+        };
         match out {
             Output::Timeout(t) => return Ok(t),
             Output::Transmit(t) => {
-                if let Some(s) = sockets.iter().find(|s| s.local_addr().ok() == Some(t.source)) {
+                if let Some((_, s)) = sockets.iter().find(|(local, _)| *local == t.source) {
                     // UDP: a full send buffer is the same as loss; never block the loop on it.
                     let _ = s.try_send_to(&t.contents, t.destination);
                 }
             }
             Output::Event(ev) => match ev {
+                Event::Closed => {
+                    log::debug!("phone stream: the phone closed the connection");
+                    st.peer_closed = true;
+                }
                 Event::IceConnectionStateChange(state) => {
                     log::debug!("phone stream: ICE {state:?}");
                     if matches!(state, IceConnectionState::Connected | IceConnectionState::Completed)
@@ -415,6 +538,12 @@ fn drain(
                         _ => continue,
                     };
                     st.last_media = Some(Instant::now());
+                    if d.data.len() > MAX_FRAME_BYTES {
+                        st.dropped += 1;
+                        st.discontinuity = true;
+                        st.pli.want();
+                        continue;
+                    }
                     let keyframe = match codec {
                         EncodedCodec::H264 => h264_is_keyframe(&d.data),
                         EncodedCodec::Vp8 => vp8_is_keyframe(&d.data),
@@ -445,36 +574,52 @@ fn drain(
     }
 }
 
-fn handle_udp(rtc: &mut Rtc, p: Udp) -> Result<(), String> {
+/// Feed one datagram to str0m, if it belongs to this session. Never fatal: the socket is
+/// reachable by anything on the network, so a datagram str0m rejects (a malformed DTLS record,
+/// a stray packet from a port scan) is counted and dropped. A real failure shows up as
+/// `!rtc.is_alive()` or as a timeout.
+fn handle_udp(rtc: &mut Rtc, p: Udp, st: &mut LoopState) {
     let Ok(contents) = p.data.as_slice().try_into() else {
-        return Ok(()); // not STUN/DTLS/RTP
+        return; // not STUN/DTLS/RTP
     };
     let input = Input::Receive(
         Instant::now(),
         Receive { proto: Protocol::Udp, source: p.source, destination: p.local, contents },
     );
-    rtc.handle_input(input).map_err(|e| e.to_string())
+    if !rtc.accepts(&input) {
+        st.ignored += 1;
+        return;
+    }
+    if let Err(e) = rtc.handle_input(input) {
+        st.ignored += 1;
+        log::debug!("phone stream: ignoring a datagram str0m rejected: {e}");
+    }
 }
 
-fn add_remote_candidate(rtc: &mut Rtc, c: &str) {
+fn add_remote_candidate(rtc: &mut Rtc, c: &str, limits: &mut CandidateLimits) {
     if c.is_empty() {
         return; // end-of-candidates: nothing to do for str0m
     }
+    if limits.used >= MAX_REMOTE_CANDIDATES {
+        log::debug!("phone stream: ignoring candidate (over the per-session limit)");
+        return;
+    }
     match Candidate::from_sdp_string(c) {
         // str0m is BUNDLE-only, so sdpMid / sdpMLineIndex do not matter.
-        Ok(cand) => {
+        Ok(cand) if candidate_allowed(&cand, limits.allow_loopback) => {
             log::debug!("phone stream: remote candidate {c}");
+            limits.used += 1;
             rtc.add_remote_candidate(cand)
         }
+        Ok(_) => log::debug!("phone stream: ignoring candidate (not a usable UDP/IPv4 address)"),
         // mDNS (.local) host candidates land here: str0m cannot resolve them. The phone's
         // srflx/prflx path still works on the same LAN.
         Err(e) => log::debug!("phone stream: ignoring candidate ({e})"),
     }
 }
 
-fn spawn_reader(sock: Arc<UdpSocket>, tx: mpsc::Sender<Udp>) -> tokio::task::JoinHandle<()> {
+fn spawn_reader(local: SocketAddr, sock: Arc<UdpSocket>, tx: mpsc::Sender<Udp>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let Ok(local) = sock.local_addr() else { return };
         let mut buf = vec![0u8; 2048];
         loop {
             match sock.recv_from(&mut buf).await {
@@ -530,7 +675,7 @@ pub async fn resolve_stun(urls: &[String], budget: Duration) -> Option<SocketAdd
 
 /// One STUN binding from the socket that routes to `server` (or the first socket),
 /// two transmissions 400 ms apart. `(local, mapped)` on success.
-async fn stun_srflx(sockets: &[Arc<UdpSocket>], server: SocketAddr) -> Option<(SocketAddr, SocketAddr)> {
+async fn stun_srflx(sockets: &[(SocketAddr, Arc<UdpSocket>)], server: SocketAddr) -> Option<(SocketAddr, SocketAddr)> {
     let route_ip = std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
             s.connect(server)?;
@@ -538,12 +683,7 @@ async fn stun_srflx(sockets: &[Arc<UdpSocket>], server: SocketAddr) -> Option<(S
         })
         .ok()
         .map(|a| a.ip());
-    let sock = sockets
-        .iter()
-        .find(|s| s.local_addr().ok().map(|a| a.ip()) == route_ip)
-        .or_else(|| sockets.first())?
-        .clone();
-    let local = sock.local_addr().ok()?;
+    let (local, sock) = sockets.iter().find(|(a, _)| Some(a.ip()) == route_ip).or_else(|| sockets.first())?.clone();
     let mut txid = [0u8; 12];
     rand::Rng::fill(&mut rand::thread_rng(), &mut txid);
     let mut req = vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42];
@@ -576,9 +716,14 @@ async fn stun_srflx(sockets: &[Arc<UdpSocket>], server: SocketAddr) -> Option<(S
     None
 }
 
-/// XOR-MAPPED-ADDRESS (IPv4) from a STUN binding success response.
+/// XOR-MAPPED-ADDRESS (IPv4) from a STUN binding success response. The header must carry the
+/// magic cookie and a length that matches the datagram.
 pub fn parse_xor_mapped(msg: &[u8]) -> Option<SocketAddr> {
-    if msg.len() < 20 || msg[0..2] != [0x01, 0x01] {
+    if msg.len() < 20 || msg[0..2] != [0x01, 0x01] || msg[4..8] != [0x21, 0x12, 0xa4, 0x42] {
+        return None;
+    }
+    let body = u16::from_be_bytes([msg[2], msg[3]]) as usize;
+    if !body.is_multiple_of(4) || msg.len() != 20 + body {
         return None;
     }
     let mut i = 20;
@@ -610,6 +755,128 @@ mod tests {
         m[1] = 0x11;
         assert_eq!(parse_xor_mapped(&m), None);
         assert_eq!(parse_xor_mapped(&[1, 1]), None);
+        // A wrong magic cookie or a length that does not match the datagram is not STUN.
+        m[1] = 0x01;
+        assert!(parse_xor_mapped(&m).is_some());
+        let mut bad = m.clone();
+        bad[4] ^= 0xff;
+        assert_eq!(parse_xor_mapped(&bad), None);
+        let mut bad = m.clone();
+        bad[3] = 0x10;
+        assert_eq!(parse_xor_mapped(&bad), None);
+        let mut bad = m.clone();
+        bad.push(0);
+        assert_eq!(parse_xor_mapped(&bad), None);
+    }
+
+    #[test]
+    fn host_candidates_skip_tunnels_and_lead_with_the_default_route() {
+        let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let ifaces: Vec<(String, Ipv4Addr)> = [
+            ("lo", "127.0.0.1"),
+            ("docker0", "172.17.0.1"),
+            ("tun0", "10.8.0.2"),
+            ("wg0", "10.9.0.2"),
+            ("utun3", "100.64.0.1"),
+            ("tailscale0", "100.100.1.1"),
+            ("enp3s0", "192.168.1.20"),
+            ("wlp2s0", "192.168.50.7"),
+            ("eth9", "169.254.3.4"),
+        ]
+        .iter()
+        .map(|(n, a)| (n.to_string(), ip(a)))
+        .collect();
+        // Full-tunnel VPN: the default route is the tunnel, which is never advertised.
+        assert_eq!(select_host_ips(&ifaces, Some(ip("10.8.0.2"))), vec![ip("192.168.1.20"), ip("192.168.50.7")]);
+        // The default-route interface comes first.
+        assert_eq!(select_host_ips(&ifaces, Some(ip("192.168.50.7"))), vec![ip("192.168.50.7"), ip("192.168.1.20")]);
+        // Only tunnels/bridges available: better than nothing.
+        let only_virtual: Vec<_> = ifaces.iter().filter(|(n, _)| n == "tun0" || n == "docker0").cloned().collect();
+        assert_eq!(select_host_ips(&only_virtual, None).len(), 2);
+        // Capped.
+        let many: Vec<_> = (1..=20).map(|i| (format!("eth{i}"), Ipv4Addr::new(10, 0, i, 1))).collect();
+        assert_eq!(select_host_ips(&many, None).len(), MAX_HOST_IPS);
+    }
+
+    #[test]
+    fn remote_candidates_are_filtered() {
+        let c = |s: &str| Candidate::from_sdp_string(s).unwrap();
+        let ok = "candidate:1 1 udp 2122260223 192.168.1.5 50000 typ host";
+        assert!(candidate_allowed(&c(ok), false));
+        for bad in [
+            "candidate:1 1 tcp 1518280447 192.168.1.5 9 typ host tcptype active",
+            "candidate:1 1 udp 2122260223 192.168.1.5 0 typ host",
+            "candidate:1 1 udp 2122260223 127.0.0.1 50000 typ host",
+            "candidate:1 1 udp 2122260223 0.0.0.0 50000 typ host",
+            "candidate:1 1 udp 2122260223 224.0.0.251 5353 typ host",
+            "candidate:1 1 udp 2122260223 255.255.255.255 50000 typ host",
+            "candidate:1 1 udp 2122260223 2001:db8::1 50000 typ host",
+        ] {
+            if let Ok(cand) = Candidate::from_sdp_string(bad) {
+                assert!(!candidate_allowed(&cand, false), "{bad}");
+            }
+        }
+        // Loopback only when we bound loopback ourselves (the tests' own transport).
+        assert!(candidate_allowed(&c("candidate:1 1 udp 2122260223 127.0.0.1 50000 typ host"), true));
+    }
+
+    #[test]
+    fn offer_candidates_are_filtered_and_counted() {
+        let mut offer = chrome_like_offer();
+        let mut lines = String::new();
+        lines.push_str("a=candidate:1 1 udp 2122260223 192.168.1.5 50000 typ host\r\n");
+        lines.push_str("a=candidate:2 1 udp 2122260223 127.0.0.1 50001 typ host\r\n");
+        lines.push_str("a=candidate:3 1 udp 2122260223 abcd1234.local 50002 typ host\r\n");
+        for i in 0..100 {
+            lines.push_str(&format!("a=candidate:{} 1 udp 2122260223 192.168.2.{} 50000 typ host\r\n", 10 + i, 1 + i));
+        }
+        offer.push_str(&lines);
+        let (filtered, kept) = filter_offer_candidates(&offer, false, MAX_REMOTE_CANDIDATES);
+        assert_eq!(kept, MAX_REMOTE_CANDIDATES);
+        assert_eq!(filtered.matches("a=candidate:").count(), MAX_REMOTE_CANDIDATES);
+        assert!(!filtered.contains("127.0.0.1 50001") && !filtered.contains(".local"));
+        assert!(filtered.contains("a=fingerprint:") && filtered.ends_with("\r\n"), "everything else is untouched");
+        // And the trickle path shares the budget.
+        let mut rtc = build_rtc(Instant::now());
+        let mut limits = CandidateLimits { used: kept, allow_loopback: false };
+        add_remote_candidate(&mut rtc, "candidate:1 1 udp 2122260223 192.168.9.9 50000 typ host", &mut limits);
+        assert_eq!(limits.used, MAX_REMOTE_CANDIDATES);
+        let mut limits = CandidateLimits { used: 0, allow_loopback: false };
+        add_remote_candidate(&mut rtc, "candidate:1 1 udp 2122260223 192.168.9.9 50000 typ host", &mut limits);
+        add_remote_candidate(&mut rtc, "candidate:2 1 udp 2122260223 127.0.0.1 50000 typ host", &mut limits);
+        add_remote_candidate(&mut rtc, "", &mut limits);
+        assert_eq!(limits.used, 1);
+    }
+
+    #[test]
+    fn offer_errors_do_not_quote_the_sdp() {
+        let t = LocalTransport { sockets: vec![], candidates: vec![] };
+        let secret = "v=0\r\no=- 1 2 IN IP4 203.0.113.77\r\nthis is not sdp 203.0.113.77\r\n";
+        let err = accept_offer(t, secret, RtcOptions::default()).expect_err("garbage offer");
+        let text = format!("{err:#}");
+        assert_eq!(text, "the phone's offer could not be read");
+    }
+
+    #[test]
+    fn dtls_certificates_are_valid_der_with_minimal_positive_serials() {
+        use x509_parser::prelude::*;
+        let provider = str0m_purecrypto::default_provider();
+        let mut serials = std::collections::HashSet::new();
+        for _ in 0..300 {
+            let cert = provider.dtls_provider.generate_certificate().expect("certificate");
+            let (rest, x509) = X509Certificate::from_der(&cert.certificate).expect("strict DER X.509");
+            assert!(rest.is_empty(), "no trailing bytes");
+            let serial = x509.raw_serial();
+            // DER INTEGER: positive, minimal (no redundant leading 0x00), at most 20 octets
+            // (RFC 5280 4.1.2.2). 300 certs cover the 1-in-128 leading-zero-byte case twice over.
+            assert!(!serial.is_empty() && serial.len() <= 20, "{serial:02x?}");
+            assert_eq!(serial[0] & 0x80, 0, "positive: {serial:02x?}");
+            assert!(serial.len() == 1 || serial[0] != 0 || serial[1] & 0x80 != 0, "minimal: {serial:02x?}");
+            assert!(serials.insert(serial.to_vec()), "serials are unique");
+            assert!(x509.validity().is_valid(), "valid now");
+            assert_eq!(x509.subject_pki.algorithm.algorithm.to_id_string(), "1.2.840.10045.2.1", "EC key");
+            assert!(!cert.private_key.is_empty());
+        }
     }
 
     #[test]

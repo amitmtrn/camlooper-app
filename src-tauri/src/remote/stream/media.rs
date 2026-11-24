@@ -229,7 +229,8 @@ pub fn sps_dimensions(nal: &[u8]) -> Option<(u32, u32)> {
                     let (mut last, mut next) = (8i32, 8i32);
                     for _ in 0..size {
                         if next != 0 {
-                            next = (last + r.se()? + 256) % 256;
+                            // i64: `se` spans the whole i32 range on a crafted SPS.
+                            next = (last as i64 + r.se()? as i64 + 256).rem_euclid(256) as i32;
                         }
                         if next != 0 {
                             last = next;
@@ -421,6 +422,71 @@ impl PliLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MSB-first bit writer for hand-built SPS payloads.
+    #[derive(Default)]
+    struct BitWriter {
+        bytes: Vec<u8>,
+        n: usize,
+    }
+    impl BitWriter {
+        fn bit(&mut self, b: u32) {
+            if self.n.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            if b != 0 {
+                *self.bytes.last_mut().unwrap() |= 0x80 >> (self.n % 8);
+            }
+            self.n += 1;
+        }
+        fn bits(&mut self, v: u64, count: u32) {
+            for i in (0..count).rev() {
+                self.bit(((v >> i) & 1) as u32);
+            }
+        }
+        fn ue(&mut self, v: u64) {
+            let len = 64 - (v + 1).leading_zeros();
+            self.bits(0, len - 1);
+            self.bits(v + 1, len);
+        }
+    }
+
+    #[test]
+    fn a_crafted_scaling_list_cannot_overflow() {
+        // High profile SPS whose first scaling-list delta is i32::MAX (ue = 2^32 - 3): in a
+        // debug build `last + delta + 256` used to overflow and panic in the session task.
+        let mut w = BitWriter::default();
+        w.bits(100, 8); // profile_idc: high
+        w.bits(0, 16); // constraint flags + level
+        w.ue(0); // sps id
+        w.ue(1); // chroma_format_idc
+        w.ue(0);
+        w.ue(0);
+        w.bit(0);
+        w.bit(1); // seq_scaling_matrix_present_flag
+        w.bit(1); // list 0 present
+        for _ in 0..16 {
+            w.ue((1u64 << 32) - 3);
+        }
+        w.bits(0xff, 8);
+        // Emulation prevention so the long zero runs survive `rbsp`.
+        let mut nal = vec![0x67];
+        let mut zeros = 0;
+        for b in w.bytes {
+            if zeros >= 2 && b <= 3 {
+                nal.push(3);
+                zeros = 0;
+            }
+            zeros = if b == 0 { zeros + 1 } else { 0 };
+            nal.push(b);
+        }
+        // The delta really is i32::MAX…
+        let payload = rbsp(&nal[1..]);
+        let mut r = Bits { data: &payload, pos: 8 + 16 + 1 + 3 + 1 + 1 + 1 + 1 + 1 };
+        assert_eq!(r.se(), Some(i32::MAX));
+        // …and parsing it does not panic (what it returns for such garbage does not matter).
+        let _ = sps_dimensions(&nal);
+    }
 
     const SPS: &[u8] = &[0x67, 0x42, 0xe0, 0x1f, 0xaa];
     const PPS: &[u8] = &[0x68, 0xce, 0x3c, 0x80];

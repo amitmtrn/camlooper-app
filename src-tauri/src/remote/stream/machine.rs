@@ -11,18 +11,34 @@
 //! ```
 //! One session at a time: a second `stream_request` while busy is answered `busy`. Every
 //! message whose `sessionId` is not the current session's is ignored.
+//!
+//! Things that are deliberately *not* immediate:
+//! * the phone leaving the relay while **live** does not end the stream — media is peer to
+//!   peer and a WebSocket flap is not a reason to drop it. The stream ends only when the phone
+//!   is still offline after [`PEER_OFFLINE_GRACE`] *and* no frame arrived in that time;
+//! * a declined (or ignored) request silences further requests for [`DECLINE_COOLDOWN`], so a
+//!   phone cannot keep raising the window;
+//! * a session that does not report `Closed` within [`STOPPING_WATCHDOG`] of being asked to
+//!   stop is given up on, so the machine can never stay busy forever.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use super::runner::{MediaStats, SessionCommand, SessionEvent};
-use super::signal::{LinkState, OutboundFrame, RejectReason, StopData, StopReason, StreamSignal};
+use super::signal::{LinkState, OutboundFrame, RejectReason, StopData, StopReason, StreamSignal, MAX_REMOTE_CANDIDATES};
 
 /// The user has this long to accept or decline before the request is auto-rejected.
 pub const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 /// While live, a changed resolution/codec is reported to the phone at most this often.
 const STATUS_MIN_INTERVAL: Duration = Duration::from_secs(2);
-const MAX_EARLY_CANDIDATES: usize = 64;
+/// After the user declines (or ignores) a request, new requests are declined without a prompt
+/// for this long.
+pub const DECLINE_COOLDOWN: Duration = Duration::from_secs(15);
+/// While live, the phone may be gone from the relay this long before the stream is ended —
+/// and then only if no frame arrived meanwhile.
+pub const PEER_OFFLINE_GRACE: Duration = Duration::from_secs(10);
+/// A session asked to stop must report `Closed` within this long.
+pub const STOPPING_WATCHDOG: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,6 +77,9 @@ pub struct StreamStatus {
     /// The stop reason behind `last_error` (`ice_failed`, `timeout`, `error`, …) so the UI can
     /// show translated, actionable text; `last_error` stays the technical detail for logs.
     pub last_error_code: Option<String>,
+    /// The last session ended normally because the phone stopped it (its Stop button, or it
+    /// closed the connection). The UI shows a neutral note, never an error.
+    pub ended_by_phone: bool,
 }
 
 impl Default for StreamStatus {
@@ -77,6 +96,7 @@ impl Default for StreamStatus {
             since: None,
             last_error: None,
             last_error_code: None,
+            ended_by_phone: false,
         }
     }
 }
@@ -123,8 +143,15 @@ struct Session {
     accepted: bool,
     early_offer: Option<String>,
     early_candidates: Vec<String>,
+    /// Non-empty candidates taken from the phone so far (held or forwarded).
+    candidates: usize,
     /// A stop has been requested; waiting for the session task to report `Closed`.
     stop_reason: Option<StopReason>,
+    stop_requested_at: Option<Instant>,
+    /// The pending stop came from the phone's `stream_stop`.
+    stop_from_phone: bool,
+    /// While live: when the phone was last seen leaving the relay, and the frame count then.
+    peer_offline: Option<(Instant, u64)>,
     last_status: Option<(Option<String>, Option<u32>, Option<u32>)>,
     last_status_at: Option<Instant>,
 }
@@ -135,6 +162,8 @@ pub struct Machine {
     session: Option<Session>,
     /// The paired phone's name, used when a request carries no label.
     pub default_device_name: Option<String>,
+    /// Requests are declined without asking until then (see [`DECLINE_COOLDOWN`]).
+    quiet_until: Option<Instant>,
 }
 
 fn wall_ms() -> i64 {
@@ -205,12 +234,18 @@ impl Machine {
                 if s.stop_reason.is_some() {
                     return vec![];
                 }
+                // The cap is per session, not per phase: the relay lets a phone send 300
+                // frames a minute for as long as the stream lasts.
+                if !candidate.is_empty() {
+                    if s.candidates >= MAX_REMOTE_CANDIDATES {
+                        return vec![];
+                    }
+                    s.candidates += 1;
+                }
                 if s.accepted {
                     vec![Action::ToSession(SessionCommand::RemoteCandidate(candidate))]
                 } else {
-                    if s.early_candidates.len() < MAX_EARLY_CANDIDATES {
-                        s.early_candidates.push(candidate);
-                    }
+                    s.early_candidates.push(candidate);
                     vec![]
                 }
             }
@@ -229,6 +264,10 @@ impl Machine {
         if !self.status.state.is_free() {
             return vec![signal(StreamSignal::StreamReject { session_id, reason: RejectReason::Busy })];
         }
+        if self.quiet_until.is_some_and(|t| now < t) {
+            // The user just said no (or ignored the dialog). Do not raise the window again.
+            return vec![signal(StreamSignal::StreamReject { session_id, reason: RejectReason::Declined })];
+        }
         let received_at = wall_ms();
         let device_name = device_label.or_else(|| self.default_device_name.clone());
         self.session = Some(Session {
@@ -237,7 +276,11 @@ impl Machine {
             accepted: false,
             early_offer: None,
             early_candidates: Vec::new(),
+            candidates: 0,
             stop_reason: None,
+            stop_requested_at: None,
+            stop_from_phone: false,
+            peer_offline: None,
             last_status: None,
             last_status_at: None,
         });
@@ -255,28 +298,47 @@ impl Machine {
         })]
     }
 
-    /// `stream_stop` from the phone. A stop without a (valid) sessionId applies to the
-    /// current session: there is only ever one.
-    pub fn on_remote_stop(&mut self, stop: StopData, _now: Instant) -> Vec<Action> {
-        let Some(current) = self.current_session().map(str::to_string) else {
-            return vec![];
-        };
-        if stop.session_id.as_deref().is_some_and(|id| id != current) {
-            return vec![];
+    /// `stream_stop` from the phone. Once the session is accepted the stop must name it: a
+    /// bare stop, or a late one from an earlier session, must not end a stream that is
+    /// running. Before the user decided, a stop without a (valid) `sessionId` still cancels
+    /// the pending request — there is nothing to protect yet.
+    pub fn on_remote_stop(&mut self, stop: StopData, now: Instant) -> Vec<Action> {
+        let Some(s) = self.session.as_mut() else { return vec![] };
+        match stop.session_id.as_deref() {
+            Some(id) if id != s.id => return vec![],
+            None if s.accepted => return vec![],
+            _ => {}
         }
-        self.end_without_telling_phone(stop.reason)
+        if s.stop_reason.is_none() {
+            s.stop_from_phone = true;
+        }
+        self.end_without_telling_phone(stop.reason, now)
     }
 
     /// The phone left the relay (`peer{online:false}`, `hello{peerOnline:false}`, or a
-    /// `peer_offline` error for something we sent).
-    pub fn on_peer_offline(&mut self, _now: Instant) -> Vec<Action> {
-        if self.session.is_none() {
+    /// `peer_offline` error for something we sent). Before the stream is live that ends the
+    /// attempt at once (signaling cannot complete). A live stream does not need the relay:
+    /// it gets [`PEER_OFFLINE_GRACE`], see [`Self::tick`].
+    pub fn on_peer_offline(&mut self, now: Instant) -> Vec<Action> {
+        let frames = self.status.frames;
+        let live = self.status.state == Phase::Live;
+        let Some(s) = self.session.as_mut() else { return vec![] };
+        if live && s.stop_reason.is_none() {
+            s.peer_offline.get_or_insert((now, frames));
             return vec![];
         }
-        self.end_without_telling_phone(StopReason::PeerOffline)
+        self.end_without_telling_phone(StopReason::PeerOffline, now)
     }
 
-    fn end_without_telling_phone(&mut self, reason: StopReason) -> Vec<Action> {
+    /// The phone is (back) on the relay.
+    pub fn on_peer_online(&mut self, _now: Instant) -> Vec<Action> {
+        if let Some(s) = self.session.as_mut() {
+            s.peer_offline = None;
+        }
+        vec![]
+    }
+
+    fn end_without_telling_phone(&mut self, reason: StopReason, now: Instant) -> Vec<Action> {
         let Some(s) = self.session.as_mut() else { return vec![] };
         if !s.accepted {
             let id = s.id.clone();
@@ -287,6 +349,7 @@ impl Machine {
             return vec![];
         }
         s.stop_reason = Some(reason.clone());
+        s.stop_requested_at = Some(now);
         self.enter(Phase::Stopping);
         vec![Action::ToSession(SessionCommand::Stop(reason))]
     }
@@ -324,19 +387,21 @@ impl Machine {
         Ok(actions)
     }
 
-    pub fn reject(&mut self, session_id: &str, _now: Instant) -> Result<Vec<Action>, DecisionError> {
+    pub fn reject(&mut self, session_id: &str, now: Instant) -> Result<Vec<Action>, DecisionError> {
         if !self.session.as_ref().is_some_and(|s| s.id == session_id && !s.accepted) {
             return Err(DecisionError::NoSuchRequest);
         }
+        self.quiet_until = Some(now + DECLINE_COOLDOWN);
         self.finish(None);
         Ok(vec![signal(StreamSignal::StreamReject { session_id: session_id.to_string(), reason: RejectReason::Declined })])
     }
 
     /// Stop from the desktop side (the user's stop button, or the app shutting down).
-    pub fn stop(&mut self, reason: StopReason, _now: Instant) -> Vec<Action> {
+    pub fn stop(&mut self, reason: StopReason, now: Instant) -> Vec<Action> {
         let Some(s) = self.session.as_mut() else { return vec![] };
         let id = s.id.clone();
         if !s.accepted {
+            self.quiet_until = Some(now + DECLINE_COOLDOWN);
             self.finish(None);
             return vec![
                 Action::DismissRequest(id.clone()),
@@ -347,6 +412,7 @@ impl Machine {
             return vec![];
         }
         s.stop_reason = Some(reason.clone());
+        s.stop_requested_at = Some(now);
         self.enter(Phase::Stopping);
         vec![
             Action::Send(OutboundFrame::StreamStop { session_id: id, reason: reason.clone() }),
@@ -360,11 +426,36 @@ impl Machine {
         let Some(s) = self.session.as_ref() else { return vec![] };
         if !s.accepted && now.duration_since(s.requested_at) >= DECISION_TIMEOUT {
             let id = s.id.clone();
+            self.quiet_until = Some(now + DECLINE_COOLDOWN);
             self.finish(None);
             return vec![
                 Action::DismissRequest(id.clone()),
                 signal(StreamSignal::StreamReject { session_id: id, reason: RejectReason::Timeout }),
             ];
+        }
+        // The session task was asked to stop and never reported back (stuck in a system
+        // prompt, a hung driver call). Its `Closed` — if it ever comes — is for a session
+        // that is no longer current and is ignored; the camera handoff refuses a new acquire
+        // until the old one has been released.
+        if s.stop_requested_at.is_some_and(|t| now.duration_since(t) >= STOPPING_WATCHDOG) {
+            eprintln!("phone stream: the session did not shut down within {}s; giving up on it", STOPPING_WATCHDOG.as_secs());
+            self.finish(None);
+            return vec![];
+        }
+        // Live, and the phone has been off the relay for the whole grace period.
+        if let Some((since, frames_then)) = s.peer_offline {
+            if s.stop_reason.is_none() && now.duration_since(since) >= PEER_OFFLINE_GRACE {
+                let frames = self.status.frames;
+                if frames > frames_then {
+                    // Video is still arriving peer to peer: the stream is healthy without
+                    // the relay. Look again after another grace period.
+                    if let Some(s) = self.session.as_mut() {
+                        s.peer_offline = Some((now, frames));
+                    }
+                } else {
+                    return self.end_without_telling_phone(StopReason::PeerOffline, now);
+                }
+            }
         }
         vec![]
     }
@@ -402,11 +493,29 @@ impl Machine {
             SessionEvent::Closed { reason, error } => {
                 let s = self.session.as_ref().expect("is_current checked");
                 let requested = s.stop_reason.clone();
+                let from_phone = s.stop_from_phone;
+                let phone_offline = s.peer_offline.is_some();
                 let id = s.id.clone();
                 match requested {
                     // We (or the phone) asked for this stop; the phone already knows.
                     Some(_) => {
-                        self.finish(error.filter(|_| reason.is_failure()).map(|e| (reason, e)));
+                        let failure = error.filter(|_| reason.is_failure()).map(|e| (reason, e));
+                        let clean = failure.is_none();
+                        self.finish(failure);
+                        self.status.ended_by_phone = clean && from_phone;
+                        vec![]
+                    }
+                    // The phone closed the connection and its `stream_stop` never came (or
+                    // was not waited for). A normal ending; the phone knows.
+                    None if reason == StopReason::PeerStopped => {
+                        self.finish(None);
+                        self.status.ended_by_phone = true;
+                        vec![]
+                    }
+                    // The video dried up while the phone was off the relay: it went away
+                    // (tab closed, phone asleep). Not an error, and nobody to tell.
+                    None if phone_offline && reason == StopReason::Timeout => {
+                        self.finish(None);
                         vec![]
                     }
                     // The session failed on its own (ICE, timeout, ffmpeg): tell the phone.
@@ -605,25 +714,180 @@ mod tests {
         assert_eq!(a, vec![Action::DismissRequest("s1".into())]);
         assert_eq!(m.status().state, Phase::Idle);
 
-        // Phone stops a live stream: no stream_stop echoed back.
+        // Phone stops a live stream: no stream_stop echoed back, no error, and the status
+        // says it was the phone's doing so the UI can show a neutral note.
         let mut m = Machine::new();
         live(&mut m, "s1", t);
-        let a = m.on_remote_stop(StopData { session_id: None, reason: StopReason::User }, t);
+        let a = m.on_remote_stop(StopData { session_id: Some("s1".into()), reason: StopReason::User }, t);
         assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::User))]);
         assert!(sent(&a).is_empty());
         assert_eq!(m.status().state, Phase::Stopping);
         m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t);
         assert_eq!(m.status().state, Phase::Idle);
+        assert_eq!(m.status().last_error, None);
+        assert!(m.status().ended_by_phone);
 
-        // Phone goes offline mid-stream.
+        // A stop from the desktop's own Stop button is not "the phone stopped".
         let mut m = Machine::new();
         live(&mut m, "s1", t);
+        m.stop(StopReason::User, t);
+        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t);
+        assert!(!m.status().ended_by_phone);
+
+        // Phone goes offline while connecting: signaling cannot finish, the attempt ends now.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
         let a = m.on_peer_offline(t);
         assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::PeerOffline))]);
         assert!(m.on_peer_offline(t).is_empty(), "only once");
         m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::PeerOffline, error: None }, t);
         assert_eq!(m.status().state, Phase::Idle);
         assert_eq!(m.status().last_error, None);
+        assert!(!m.status().ended_by_phone);
+    }
+
+    #[test]
+    fn the_phone_closing_the_connection_is_a_normal_end_not_an_error() {
+        let t = Instant::now();
+        // The DTLS close beat the relay's stream_stop and none followed within the grace
+        // period: the session reports `peer_stopped` on its own.
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        let a = m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::PeerStopped, error: None }, t);
+        assert!(a.is_empty(), "nothing is sent to a phone that hung up: {a:?}");
+        let st = m.status();
+        assert_eq!((st.state, st.last_error.clone(), st.last_error_code.clone()), (Phase::Idle, None, None));
+        assert!(st.ended_by_phone);
+        // The relay's stop arriving late finds no session and does nothing.
+        assert!(m.on_remote_stop(StopData { session_id: Some("s1".into()), reason: StopReason::User }, t).is_empty());
+        assert_eq!(m.status().state, Phase::Idle);
+        assert!(!StopReason::PeerStopped.is_failure());
+        assert_eq!(StopReason::PeerStopped.as_str(), "peer_stopped");
+    }
+
+    #[test]
+    fn a_stop_must_name_the_session_once_it_is_accepted() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        // Bare, and from an earlier session: both ignored.
+        assert!(m.on_remote_stop(StopData { session_id: None, reason: StopReason::User }, t).is_empty());
+        assert!(m.on_remote_stop(StopData { session_id: Some("s0".into()), reason: StopReason::User }, t).is_empty());
+        assert_eq!(m.status().state, Phase::Live);
+        // Before the user decided, a bare stop still cancels the request.
+        let mut m = Machine::new();
+        m.on_signal(req("s2"), t);
+        let a = m.on_remote_stop(StopData { session_id: None, reason: StopReason::User }, t);
+        assert_eq!(a, vec![Action::DismissRequest("s2".into())]);
+    }
+
+    #[test]
+    fn a_relay_flap_does_not_end_a_live_stream() {
+        let t = Instant::now();
+        let secs = Duration::from_secs;
+        // Offline and back within the grace period: nothing happens.
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        assert!(m.on_peer_offline(t).is_empty());
+        assert_eq!(m.status().state, Phase::Live);
+        assert!(m.tick(t + secs(9)).is_empty());
+        m.on_peer_online(t + secs(9));
+        assert!(m.tick(t + secs(60)).is_empty());
+        assert_eq!(m.status().state, Phase::Live);
+
+        // Still offline after the grace period, but video keeps arriving peer to peer: live.
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        m.on_peer_offline(t);
+        let mut later = stats(1280, 720);
+        later.frames = 300;
+        m.on_session_event("s1", SessionEvent::Stats(later.clone()), t + secs(9));
+        assert!(m.tick(t + PEER_OFFLINE_GRACE).is_empty());
+        assert_eq!(m.status().state, Phase::Live);
+        // …and once the video stops as well, the next grace period ends it, without an error.
+        let a = m.tick(t + PEER_OFFLINE_GRACE * 2);
+        assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::PeerOffline))]);
+        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::PeerOffline, error: None }, t + secs(21));
+        assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
+
+        // The phone vanished (tab closed): the media timeout fires while it is off the relay.
+        // That is the phone going away, not a failure to report.
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        m.on_peer_offline(t);
+        let a = m.on_session_event(
+            "s1",
+            SessionEvent::Closed { reason: StopReason::Timeout, error: Some("no video from the phone".into()) },
+            t + secs(10),
+        );
+        assert!(a.is_empty());
+        assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
+        // The same timeout with the phone on the relay is an error, as before.
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        let a = m.on_session_event(
+            "s1",
+            SessionEvent::Closed { reason: StopReason::Timeout, error: Some("no video from the phone".into()) },
+            t,
+        );
+        assert_eq!(sent(&a), vec!["stop:timeout"]);
+        assert_eq!(m.status().state, Phase::Error);
+    }
+
+    #[test]
+    fn a_session_that_never_reports_closed_does_not_keep_the_machine_busy() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        m.stop(StopReason::User, t);
+        assert!(m.tick(t + STOPPING_WATCHDOG - Duration::from_secs(1)).is_empty());
+        assert_eq!(m.status().state, Phase::Stopping);
+        assert!(m.tick(t + STOPPING_WATCHDOG).is_empty());
+        assert_eq!(m.status().state, Phase::Idle);
+        // The late Closed belongs to no current session.
+        assert!(m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t).is_empty());
+        assert!(matches!(&m.on_signal(req("s2"), t)[..], [Action::AskUser(_)]));
+    }
+
+    #[test]
+    fn declining_silences_new_requests_for_a_while() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.reject("s1", t).unwrap();
+        // A new sessionId right away: declined without raising the dialog again.
+        let a = m.on_signal(req("s2"), t + Duration::from_secs(1));
+        assert_eq!(sent(&a), vec!["reject:Declined"]);
+        assert!(!a.iter().any(|x| matches!(x, Action::AskUser(_))));
+        assert_eq!(m.status().state, Phase::Idle);
+        // After the cooldown the user is asked again.
+        assert!(matches!(&m.on_signal(req("s3"), t + DECLINE_COOLDOWN)[..], [Action::AskUser(_)]));
+        // An ignored dialog (60 s timeout) counts as a no, too.
+        let t2 = t + DECLINE_COOLDOWN + DECISION_TIMEOUT;
+        m.tick(t2);
+        assert_eq!(sent(&m.on_signal(req("s4"), t2 + Duration::from_secs(1))), vec!["reject:Declined"]);
+    }
+
+    #[test]
+    fn candidates_are_capped_per_session() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        // Some early, the rest after the accept: one budget for both.
+        for i in 0..10 {
+            m.on_signal(cand("s1", &format!("candidate:{i}")), t);
+        }
+        let a = m.accept("s1", t).unwrap();
+        let held = a.iter().filter(|x| matches!(x, Action::ToSession(SessionCommand::RemoteCandidate(_)))).count();
+        assert_eq!(held, 10);
+        let mut forwarded = 0;
+        for i in 0..200 {
+            forwarded += m.on_signal(cand("s1", &format!("candidate:late{i}")), t).len();
+        }
+        assert_eq!(held + forwarded, MAX_REMOTE_CANDIDATES);
+        // End-of-candidates is not a candidate and still passes.
+        assert_eq!(m.on_signal(cand("s1", ""), t).len(), 1);
     }
 
     #[test]

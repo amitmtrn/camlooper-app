@@ -68,6 +68,11 @@ if-addrs = "0.15"
 # logger in the app, so these stay silent unless a dev tool (examples/phone_stream_cli.rs) does.
 log = "0.4"
 
+[dev-dependencies]
+# Test only: parses the DTLS certificates the vendored crypto provider generates
+# (src/remote/stream/rtc.rs). Pure Rust; already in Cargo.lock as an optional dependency of rcgen.
+x509-parser = "0.18"
+
 # FFmpeg - conditional compilation for different platforms
 # On Windows, use a different implementation to avoid cross-compilation issues
 [target.'cfg(not(windows))'.dependencies]

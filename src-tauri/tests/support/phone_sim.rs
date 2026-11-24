@@ -64,8 +64,15 @@ pub struct PhoneSim {
 }
 
 impl PhoneSim {
-    /// Start a phone that sends `frames` (`codec`) for `seconds` after it connects.
+    /// Start a phone that sends `frames` (`codec`) for `seconds` after it connects, then
+    /// vanishes without a word (the desktop sees the media stop).
     pub fn start(codec: EncodedCodec, frames: Vec<Vec<u8>>, seconds: u64) -> PhoneSim {
+        Self::start_with(codec, frames, seconds, false)
+    }
+
+    /// Like [`Self::start`]; with `close` the phone ends like a browser's
+    /// `RTCPeerConnection.close()`: a DTLS close_notify to the desktop.
+    pub fn start_with(codec: EncodedCodec, frames: Vec<Vec<u8>>, seconds: u64, close: bool) -> PhoneSim {
         assert!(!frames.is_empty());
         let mut cfg = RtcConfig::new()
             .set_crypto_provider(Arc::new(str0m_purecrypto::default_provider()))
@@ -94,7 +101,7 @@ impl PhoneSim {
             let _ = cand_tx.send(c.to_sdp_string());
             let _ = cand_tx.send(String::new());
             rtc.add_local_candidate(c);
-            play(rtc, sock, local, vmid, codec, frames, seconds)
+            play(rtc, sock, local, vmid, codec, frames, seconds, close)
         });
         PhoneSim { offer, answer_tx, candidates: cand_rx, join }
     }
@@ -108,6 +115,7 @@ impl PhoneSim {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn play(
     mut rtc: Rtc,
     sock: UdpSocket,
@@ -116,6 +124,7 @@ fn play(
     codec: EncodedCodec,
     frames: Vec<Vec<u8>>,
     seconds: u64,
+    close: bool,
 ) -> SimReport {
     let is_key = |f: &[u8]| match codec {
         EncodedCodec::H264 => h264_is_keyframe(f),
@@ -197,6 +206,23 @@ fn play(
         };
         if rtc.handle_input(input).is_err() {
             break;
+        }
+    }
+    if close && report.connected && rtc.close().is_ok() {
+        // Drain the close (RTCP BYE, DTLS close_notify) onto the wire.
+        let until = Instant::now() + Duration::from_millis(300);
+        while rtc.is_alive() && Instant::now() < until {
+            match rtc.poll_output() {
+                Ok(Output::Transmit(t)) => {
+                    let _ = sock.send_to(&t.contents, t.destination);
+                }
+                Ok(Output::Timeout(_)) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    let _ = rtc.handle_input(Input::Timeout(Instant::now()));
+                }
+                Ok(Output::Event(_)) => {}
+                Err(_) => break,
+            }
         }
     }
     rtc.disconnect();

@@ -284,6 +284,13 @@ async fn start_capture(
 ) -> Result<(), String> {
     let mut state = CAPTURE_STATE.lock().await;
 
+    // The phone stream owns the virtual camera while it is live; the in-app camera (preview
+    // and recording both write to the same device) would interleave its frames with the
+    // phone's. Checked under the state lock: see remote::stream::handoff.
+    if crate::remote::stream::phone_owns_camera() {
+        return Err("The phone camera is live. Stop it before using the camera here.".into());
+    }
+
     // Stop existing process
     if let Some(task) = state.ffmpeg_task.take() {
         task.abort();

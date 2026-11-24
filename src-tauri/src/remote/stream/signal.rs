@@ -15,6 +15,10 @@ pub const MAX_SESSION_ID: usize = 64;
 pub const MAX_SDP_BYTES: usize = 14 * 1024;
 pub const MAX_CANDIDATE_BYTES: usize = 1024;
 pub const MAX_DEVICE_LABEL: usize = 64;
+/// Remote ICE candidates taken per session, counting those inside the offer. A phone has a
+/// handful; the cap bounds the pair table and the STUN checks a hostile peer (or relay) could
+/// make this machine send.
+pub const MAX_REMOTE_CANDIDATES: usize = 32;
 /// Relay frame size limit (UTF-8 bytes), enforced again on the way out.
 pub const MAX_RELAY_FRAME_BYTES: usize = 16 * 1024;
 
@@ -89,6 +93,9 @@ pub enum StopReason {
     IceFailed,
     Error,
     PeerOffline,
+    /// Desktop-local: the phone closed the peer connection (DTLS close) and no `stream_stop`
+    /// with a reason of its own followed. A normal ending, never sent to the phone.
+    PeerStopped,
     Timeout,
     Other(String),
 }
@@ -100,6 +107,7 @@ impl StopReason {
             StopReason::IceFailed => "ice_failed",
             StopReason::Error => "error",
             StopReason::PeerOffline => "peer_offline",
+            StopReason::PeerStopped => "peer_stopped",
             StopReason::Timeout => "timeout",
             StopReason::Other(s) => s,
         }
@@ -111,6 +119,7 @@ impl StopReason {
             "ice_failed" => StopReason::IceFailed,
             "error" => StopReason::Error,
             "peer_offline" => StopReason::PeerOffline,
+            "peer_stopped" => StopReason::PeerStopped,
             "timeout" => StopReason::Timeout,
             other => StopReason::Other(sanitize_label(other, 32).unwrap_or_else(|| "unknown".into())),
         }
@@ -118,7 +127,7 @@ impl StopReason {
 
     /// Whether this ending is a failure worth surfacing as `lastError`.
     pub fn is_failure(&self) -> bool {
-        !matches!(self, StopReason::User | StopReason::PeerOffline)
+        !matches!(self, StopReason::User | StopReason::PeerOffline | StopReason::PeerStopped)
     }
 }
 
@@ -171,9 +180,35 @@ pub fn valid_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_SESSION_ID && id.bytes().all(|b| b.is_ascii_graphic())
 }
 
-/// Trim, drop control characters, cap length; `None` if nothing printable is left.
+/// Unicode format characters (general category Cf, plus the line/paragraph separators):
+/// invisible, and the bidi
+/// controls among them can reorder the text around a name ("…wants to stream" spoofing).
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// Trim, drop control and invisible format characters (bidi overrides, zero-width, tags), cap
+/// length; `None` if nothing printable is left.
 pub fn sanitize_label(s: &str, max: usize) -> Option<String> {
-    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    let cleaned: String = s.chars().filter(|c| !c.is_control() && !is_invisible_format(*c)).collect();
     let t: String = cleaned.trim().chars().take(max).collect();
     let t = t.trim().to_string();
     (!t.is_empty()).then_some(t)
@@ -254,9 +289,10 @@ pub struct StopData {
     pub reason: StopReason,
 }
 
-/// Lenient: a missing `data`, `sessionId` or `reason` still stops (the relay allows a bare
-/// `{"type":"stream_stop"}`); an invalid `sessionId` is treated as absent… except that the
-/// caller must then decide whether a session-less stop applies (it does: one session at a time).
+/// Lenient about shape: a missing `data`, `sessionId` or `reason` still parses (the relay
+/// allows a bare `{"type":"stream_stop"}`), and an invalid `sessionId` is treated as absent.
+/// Whether a session-less stop applies is the machine's decision: only to a request the user
+/// has not answered yet, never to an accepted session.
 pub fn parse_stop(data: Option<&Value>) -> StopData {
     let obj = data.and_then(Value::as_object);
     let session_id = obj
@@ -272,6 +308,17 @@ pub fn parse_stop(data: Option<&Value>) -> StopData {
     StopData { session_id, reason }
 }
 
+/// A frame queued while the relay socket was down is still sent after the reconnect if it is
+/// younger than this…
+pub const OUTBOUND_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// …and it is about the session that is current now, or it ends a session (the phone must
+/// learn about a stop or a rejection even if the desktop has moved on). Everything else
+/// belongs to a moment that has passed.
+pub fn worth_sending_after_reconnect(frame: &OutboundFrame, age: std::time::Duration, current_session: Option<&str>) -> bool {
+    age <= OUTBOUND_MAX_AGE && (frame.is_terminal() || current_session == Some(frame.session_id()))
+}
+
 /// A frame for the relay, already in its wire shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundFrame {
@@ -280,6 +327,19 @@ pub enum OutboundFrame {
 }
 
 impl OutboundFrame {
+    pub fn session_id(&self) -> &str {
+        match self {
+            OutboundFrame::Signal(sig) => sig.session_id(),
+            OutboundFrame::StreamStop { session_id, .. } => session_id,
+        }
+    }
+
+    /// Frames that end a session. They stay meaningful to the phone after the session is gone
+    /// here, so they survive a relay reconnect when the rest of a dead session's frames do not.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, OutboundFrame::StreamStop { .. } | OutboundFrame::Signal(StreamSignal::StreamReject { .. }))
+    }
+
     /// The complete relay frame. `None` if it would exceed the relay's frame limit (the relay
     /// would answer `too_large` and count a protocol violation).
     pub fn to_json(&self) -> Option<String> {
@@ -330,6 +390,35 @@ mod tests {
                 sdp_m_line_index: Some(0),
             }
         );
+    }
+
+    #[test]
+    fn labels_lose_invisible_and_bidi_characters() {
+        // RLO + zero-width + BOM + soft hyphen around a name: only the visible text survives.
+        assert_eq!(sanitize_label("\u{202e}Pix\u{200b}el\u{feff}\u{ad} 9\u{2066}", 64).as_deref(), Some("Pixel 9"));
+        assert_eq!(sanitize_label("\u{202e}\u{200f}\u{2028}", 64), None);
+        // Ordinary non-ASCII names are untouched.
+        assert_eq!(sanitize_label("טלפון של עמית 📱", 64).as_deref(), Some("טלפון של עמית 📱"));
+    }
+
+    #[test]
+    fn frames_queued_while_the_relay_was_down() {
+        use std::time::Duration;
+        let answer = OutboundFrame::Signal(StreamSignal::Answer { session_id: "cur".into(), sdp: "v=0".into() });
+        let stale_answer = OutboundFrame::Signal(StreamSignal::Answer { session_id: "old".into(), sdp: "v=0".into() });
+        let stop_old = OutboundFrame::StreamStop { session_id: "old".into(), reason: StopReason::Error };
+        let reject_old = OutboundFrame::Signal(StreamSignal::StreamReject { session_id: "old".into(), reason: RejectReason::Busy });
+        let s = Duration::from_secs;
+        // The current session's frames survive a blip; another session's do not…
+        assert!(worth_sending_after_reconnect(&answer, s(3), Some("cur")));
+        assert!(!worth_sending_after_reconnect(&stale_answer, s(3), Some("cur")));
+        assert!(!worth_sending_after_reconnect(&answer, s(3), None));
+        // …except the ones that tell the phone a session is over.
+        assert!(worth_sending_after_reconnect(&stop_old, s(3), Some("cur")));
+        assert!(worth_sending_after_reconnect(&reject_old, s(3), None));
+        // Nothing survives a long outage.
+        assert!(!worth_sending_after_reconnect(&answer, OUTBOUND_MAX_AGE + s(1), Some("cur")));
+        assert!(!worth_sending_after_reconnect(&stop_old, OUTBOUND_MAX_AGE + s(1), None));
     }
 
     #[test]

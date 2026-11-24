@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::machine::{Action, DecisionError, Machine, StreamRequest, StreamStatus};
 use super::runner::{SessionCommand, SessionEvent};
-use super::signal::{parse_signal, parse_stop, OutboundFrame, StopReason};
+use super::signal::{parse_signal, parse_stop, sanitize_label, OutboundFrame, StopReason, MAX_DEVICE_LABEL};
 
 /// Where "may this phone stream?" goes. The app's implementation (`commands::UiDecisions`)
 /// shows a confirm dialog; the user's answer comes back through [`StreamManager::accept`] / [`StreamManager::reject`].
@@ -163,7 +163,7 @@ async fn run(
                         }
                     },
                     Input::RemoteStop(data) => m.on_remote_stop(parse_stop(data.as_ref()), now),
-                    Input::PeerOnline(true) => vec![],
+                    Input::PeerOnline(true) => m.on_peer_online(now),
                     Input::PeerOnline(false) => m.on_peer_offline(now),
                     Input::RelayError(code) => {
                         match code.as_str() {
@@ -192,7 +192,8 @@ async fn run(
                         a
                     }
                     Input::SetDeviceName(name) => {
-                        m.default_device_name = name;
+                        // From the relay's `hello`: as untrusted as a request's label.
+                        m.default_device_name = name.and_then(|n| sanitize_label(&n, MAX_DEVICE_LABEL));
                         vec![]
                     }
                     Input::Session(id, ev) => {
@@ -340,10 +341,34 @@ mod tests {
         m.on_relay_signal(json!({"kind":"stream_request","sessionId":"intruder"}));
         assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"intruder","reason":"busy"}));
 
+        // The phone's relay socket flaps: a live peer-to-peer stream is not touched.
         m.on_peer_online(false);
+        m.on_peer_online(true);
+        // A bare stop (no sessionId) cannot end an accepted session either.
+        m.on_relay_stream_stop(None);
+        m.on_relay_stream_stop(Some(json!({"sessionId":"older","reason":"user"})));
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"intruder2"}));
+        assert_eq!(next_frame(&mut out).await["data"]["reason"], "busy");
+        assert_eq!(m.status().state, Phase::Live);
+
+        // The phone's own stop ends it, quietly: idle, no error, flagged as the phone's doing.
+        m.on_relay_stream_stop(Some(json!({"sessionId":"abc","reason":"user"})));
         wait_state(&m, Phase::Idle).await;
+        let st = m.status();
+        assert_eq!((st.last_error, st.ended_by_phone), (None, true));
         let log = backend.commands.lock().unwrap().clone();
-        assert!(log.iter().any(|c| c.contains("PeerOffline")), "{log:?}");
+        assert!(log.iter().any(|c| c.contains("Stop(User)")), "{log:?}");
+        assert!(out.try_recv().is_err(), "no stream_stop is echoed to the phone");
+    }
+
+    #[tokio::test]
+    async fn the_paired_name_from_hello_is_sanitized() {
+        let (dtx, mut drx) = mpsc::unbounded_channel();
+        let (m, _out) = StreamManager::spawn(Arc::new(FakeBackend::default()), Arc::new(ChannelDecisions(dtx)));
+        m.set_device_name(Some("Pixel\u{202e}\u{7}evil".into()));
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"n"}));
+        let DecisionEvent::Request(req) = drx.recv().await.unwrap() else { panic!() };
+        assert_eq!(req.device_name.as_deref(), Some("Pixelevil"));
     }
 
     #[tokio::test]

@@ -5,6 +5,10 @@
 //! preview, start the virtual camera if it is off (Linux: load v4l2loopback first — at most
 //! one polkit prompt; Windows: make sure softcam is registered — at most one UAC prompt on
 //! the Store build). Release: undo exactly what acquire did, in reverse.
+//!
+//! While the phone holds the camera ([`phone_owns_camera`]) the other writers refuse to
+//! start: video playback (`video_processor::start_streaming`) and the in-app camera preview
+//! and recording (`camera_capture::start_capture`).
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, Result};
@@ -38,18 +42,30 @@ pub struct AppCamera {
 impl AppCamera {
     async fn acquire_inner(&self) -> Result<CameraTarget> {
         let mut undo = self.undo.lock().await;
+        if undo.claimed {
+            // A previous session was given up on (stop watchdog) and has not released yet.
+            // Its release will find nothing left: this session's release undoes it all.
+            return Err(anyhow!("the previous phone session is still shutting down"));
+        }
+        // Claim first, look second: the in-app camera checks the claim under its own lock
+        // before it starts (camera_capture::start_capture), so either it sees the claim and
+        // refuses, or it started before and is seen here. Checking first would leave a window
+        // for a recording to start in between.
+        PHONE_OWNS_CAMERA.store(true, Ordering::SeqCst);
+        undo.claimed = true;
         let (capture_running, recording) = crate::camera_capture::capture_activity().await;
         if recording {
             return Err(anyhow!("a camera recording is in progress"));
         }
-        PHONE_OWNS_CAMERA.store(true, Ordering::SeqCst);
-        undo.claimed = true;
 
         if crate::video_processor::get_video_stream_status().await.is_playing {
             undo.resume_playback = true;
             crate::video_processor::pause_video_stream().await?;
         }
         if !crate::video_processor::wait_for_playback_exit(std::time::Duration::from_secs(5)).await {
+            // The old playback task is still alive. Starting playback again on release would
+            // put two writers on the camera, so it is not resumed.
+            undo.resume_playback = false;
             return Err(anyhow!("video playback did not stop"));
         }
         if capture_running {
@@ -62,8 +78,11 @@ impl AppCamera {
             prepare_platform_camera().await?;
             let (width, height) = virtual_camera::output_resolution();
             let config = VirtualCameraConfig { width, height, fps: 30, ..VirtualCameraConfig::default() };
-            virtual_camera::start_virtual_camera_with(Some(config), None).await?;
+            // Noted before the start, not after: a start that fails half way (or a session
+            // that ends meanwhile) must still be undone. `release` copes with a camera that
+            // never came up.
             undo.stop_camera = true;
+            virtual_camera::start_virtual_camera_with(Some(config), None).await?;
         }
         let (sink, geometry) = virtual_camera::active_sink().await;
         let geometry = geometry.ok_or_else(|| anyhow!("the virtual camera did not start"))?;
@@ -80,7 +99,7 @@ impl CameraControl for AppCamera {
         Box::pin(async move {
             let mut undo = self.undo.lock().await;
             let u = std::mem::take(&mut *undo);
-            if u.stop_camera {
+            if u.stop_camera && virtual_camera::get_virtual_camera_status().await.is_active {
                 if let Err(e) = virtual_camera::stop_virtual_camera().await {
                     eprintln!("phone stream: could not stop the virtual camera: {e}");
                 }
