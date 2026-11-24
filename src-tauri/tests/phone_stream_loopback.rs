@@ -42,9 +42,14 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 /// An "ffmpeg" that records its stdin to `<dir>/capture-<pid>.es` and runs the real one.
-fn tee_ffmpeg(dir: &Path) -> PathBuf {
+const TEE_FFMPEG: &str = "#!/bin/sh\ntee \"$(dirname \"$0\")/capture-$$.es\" | ffmpeg \"$@\"\n";
+
+/// Like [`TEE_FFMPEG`], but the first launch dies after reading ~40 KB, as a crashing ffmpeg would.
+const CRASH_ONCE_FFMPEG: &str = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nif [ ! -e \"$d/crashed\" ]; then\n  touch \"$d/crashed\"\n  head -c 40000 > \"$d/crashed\"\n  exit 1\nfi\ntee \"$d/capture-$$.es\" | ffmpeg \"$@\"\n";
+
+fn tee_ffmpeg(dir: &Path, script: &str) -> PathBuf {
     let path = dir.join("ffmpeg-tee.sh");
-    std::fs::write(&path, "#!/bin/sh\ntee \"$(dirname \"$0\")/capture-$$.es\" | ffmpeg \"$@\"\n").unwrap();
+    std::fs::write(&path, script).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
@@ -77,7 +82,7 @@ async fn next_out(out: &mut mpsc::UnboundedReceiver<OutboundFrame>) -> OutboundF
     tokio::time::timeout(Duration::from_secs(20), out.recv()).await.expect("frame for the phone in time").unwrap()
 }
 
-async fn run_loopback(codec: EncodedCodec, frames: Vec<Vec<u8>>) {
+async fn run_loopback(codec: EncodedCodec, frames: Vec<Vec<u8>>, script: &str) {
     if !tool_available("ffmpeg") || !tool_available("ffprobe") {
         eprintln!("skipping: ffmpeg/ffprobe not on PATH");
         return;
@@ -88,7 +93,7 @@ async fn run_loopback(codec: EncodedCodec, frames: Vec<Vec<u8>>) {
         geometry: Geometry { width: 1280, height: 720, fps: 30 },
         preview: false,
     };
-    let mut deps = SessionDeps::new(tee_ffmpeg(dir.path()), Arc::new(FixedCamera(target)), Arc::new(NoStun));
+    let mut deps = SessionDeps::new(tee_ffmpeg(dir.path(), script), Arc::new(FixedCamera(target)), Arc::new(NoStun));
     deps.rtc = RtcOptions { bind_ips: Some(vec![Ipv4Addr::LOCALHOST]), ..RtcOptions::default() };
     let (dtx, mut decisions) = mpsc::unbounded_channel();
     let (manager, mut out) = StreamManager::spawn(Arc::new(Arc::new(deps)), Arc::new(ChannelDecisions(dtx)));
@@ -144,9 +149,10 @@ async fn run_loopback(codec: EncodedCodec, frames: Vec<Vec<u8>>) {
     assert!(report.connected);
     assert!(report.keyframe_requests >= 1, "the receiver asks for a keyframe at start: {report:?}");
 
-    // Exactly one ffmpeg ran (no crash restarts), and what it was fed decodes.
+    // One ffmpeg for the whole session (after the crash, if one was staged), and what it was
+    // fed decodes — a restarted decoder starts on a fresh keyframe.
     let caps = captures(dir.path());
-    assert_eq!(caps.len(), 1, "one decoder for the whole session: {caps:?}");
+    assert_eq!(caps.len(), 1, "one surviving decoder: {caps:?}");
     let (decoded, info) = decode_count(&caps[0], codec.demuxer());
     eprintln!("{codec:?}: {decoded} frames decoded from {} bytes ({info})", std::fs::metadata(&caps[0]).unwrap().len());
     assert!(decoded >= 30, "only {decoded} decodable frames: {info}");
@@ -155,10 +161,15 @@ async fn run_loopback(codec: EncodedCodec, frames: Vec<Vec<u8>>) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h264_phone_stream_decodes_through_the_pipeline() {
-    run_loopback(EncodedCodec::H264, h264_access_units(&fixture("h264-640x360.h264"))).await;
+    run_loopback(EncodedCodec::H264, h264_access_units(&fixture("h264-640x360.h264")), TEE_FFMPEG).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn vp8_phone_stream_decodes_through_the_pipeline() {
-    run_loopback(EncodedCodec::Vp8, ivf_frames(&fixture("vp8-640x360.ivf"))).await;
+    run_loopback(EncodedCodec::Vp8, ivf_frames(&fixture("vp8-640x360.ivf")), TEE_FFMPEG).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crashed_ffmpeg_is_restarted_and_resumes_on_a_keyframe() {
+    run_loopback(EncodedCodec::H264, h264_access_units(&fixture("h264-640x360.h264")), CRASH_ONCE_FFMPEG).await;
 }
