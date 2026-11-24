@@ -563,6 +563,71 @@ builds them).
 
 <!-- Newest entries first. -->
 
+### Phone camera stream into v4l2 with the headless CLI (remote v2, phase 1)
+_Added 2026-11-24 · Linux · `src-tauri/src/remote/stream/`, `src-tauri/examples/phone_stream_cli.rs`_
+
+A phone streams its camera over WebRTC and the stream becomes the v4l2loopback camera, with
+no app UI involved (the confirm dialog and stop button come with the UI task). The CLI
+accepts the first request by itself; the app never does.
+
+**Already automated, don't repeat by hand:** `cargo test --test phone_stream_loopback` runs a
+simulated phone through the real receiver and ffmpeg for H.264 and VP8 and requires ≥ 30
+decodable frames, also after a staged ffmpeg crash (restart + keyframe). `cargo test --lib` covers the signaling rules (busy, 60 s timeout, stale
+session ids) and the ffmpeg arguments per sink. These steps cover what needs a real phone,
+a real network and eyes.
+
+**Setup:**
+- Linux with v4l2loopback: `sudo modprobe v4l2loopback devices=1 video_nr=10
+  card_label="CamLooper Virtual Camera" exclusive_caps=1`. `v4l2-ctl --list-devices` lists
+  `CamLooper Virtual Camera` at `/dev/video10`. Also `ffmpeg`/`ffplay` and `v4l2-utils`.
+- An Android phone with Chrome on the **same Wi-Fi** as the computer, with the CamLooper phone
+  stream page open. It shows a 6-digit code.
+- In `src-tauri/`: `cargo build --example phone_stream_cli`.
+
+**Steps:**
+1. `./target/debug/examples/phone_stream_cli --code <6 digits> --device /dev/video10 --seconds 120 2> >(tee /tmp/cli-plain.err >&2) | tee /tmp/cli.jsonl`
+2. On the phone tap the button that starts streaming and allow camera access.
+3. In a second terminal: `ffplay -f v4l2 /dev/video10`. Hold the phone in portrait, then landscape.
+4. Watch the `"event":"status"` lines in the first terminal for 30 s.
+5. `v4l2-ctl -d /dev/video10 --get-fmt-video` and `ffmpeg -f v4l2 -i /dev/video10 -frames:v 90 -f null - 2>&1 | grep frame=`.
+6. Stop streaming on the phone.
+7. Run step 1 again with a new code, start streaming, then switch the phone's Wi-Fi off.
+8. Run step 1 again with `--debug` added and stderr sent to `/tmp/cli-debug.err` instead; stream
+   for 10 s and stop. Then:
+   `grep -cE 'a=candidate|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' /tmp/cli-plain.err /tmp/cli-debug.err` and
+   `grep -ciE 'token|bearer' /tmp/cli.jsonl /tmp/cli-plain.err /tmp/cli-debug.err`.
+
+**Expected:**
+- Step 1: `{"event":"paired",…}`, `{"event":"connected","protocol":2}` and a `hello` line.
+  stderr prints no token.
+- Step 2: within ~3 s: `stream_request` (`"autoAccept":true`), state `connecting`,
+  `send stream_accept`, `send status`, `send answer`, then state `live`. stderr shows
+  `phone stream: live (H264 …)`. Only a phone without H.264 shows `VP8`.
+- Step 3: the phone's picture plays in ffplay at 1280x720 within ~1 s of connecting. Portrait
+  is **pillarboxed** (black bars left and right), never stretched; landscape fills the frame.
+- Step 4: `"fps"` stays between 24 and 31; `"size"` may start small (e.g. `320x180`) and
+  should reach `1280x720` (or the phone camera's 16:9 size) within ~20 s on a good network.
+  `"frames"` keeps increasing.
+- Step 5: `Width/Height 1280/720`, `Pixel Format 'RGB3'`; ffmpeg reads 90 frames in about 3 s.
+- Step 6: states `stopping`, `idle`, then `{"event":"unpaired","revoked":true}`; the CLI exits
+  with status 0 and the phone page returns to its unlinked screen.
+- Step 7: within ~10 s the CLI logs `phone stream: ended (timeout)` or `(peer_offline)`,
+  state goes to `error` or `idle`, and the CLI exits.
+- Step 8: the first grep prints `0` for `cli-plain.err` (no SDP or IP address without
+  `--debug`) and a number > 0 for `cli-debug.err`. The second grep prints `0` for every file.
+
+**Known gotchas:**
+- A low starting resolution (320x180 for a few seconds) is Chrome ramping its bitrate, not a
+  failure. It should climb; if it stays low for a minute, note the network.
+- No TURN: phone and computer on different networks (phone on mobile data) may fail with
+  `ice_failed` after 15 s. That is expected in phase 1.
+- `ffplay` shows the frozen last frame for up to 10 s after the phone vanishes; that is
+  the media timeout.
+- `--null` instead of `--device` needs no v4l2loopback at all (decode and discard). Without
+  either flag the CLI uses the app's own handoff: it finds the CamLooper device and may ask
+  polkit to load the module once.
+- Codes expire after five minutes.
+
 ### Start at login via XDG autostart (deb and AppImage) for the phone remote
 _Added 2026-11-08 · Linux · `tauri-plugin-autostart`_
 
