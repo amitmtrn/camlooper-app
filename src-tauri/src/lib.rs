@@ -396,7 +396,12 @@ pub fn run() {
             // Then the tray, which also decides whether the (hidden-by-default) window shows.
             remote::init(app.handle().clone());
             meeting::init(app.handle().clone());
-            tray::init(app)?;
+            // The window starts hidden; if there is no tray (e.g. Linux without AppIndicator)
+            // show it instead of aborting or leaving the app invisible.
+            if let Err(e) = tray::init(app) {
+                eprintln!("tray: could not create tray icon, showing window instead: {e}");
+                tray::show_main_window(app.handle());
+            }
             
             // The softcam DirectShow driver is now bundled with the app and registered
             // by the installer (or on first use via `ensure_softcam_registered`), so there

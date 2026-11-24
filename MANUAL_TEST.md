@@ -222,8 +222,15 @@ default) or no tray icon can be drawn.
    (AppImage: `./camlooper_*.AppImage --hidden`; Windows: `camlooper.exe --hidden`).
    Wait ten seconds.
 7. Choose **Quit** from the tray menu.
+8. Linux only, no tray: disable the AppIndicator extension
+   (`gnome-extensions disable ubuntu-appindicators@ubuntu.com`, or use vanilla GNOME), then
+   run `camlooper --hidden` from a terminal.
 
-**Expected:** step 1 shows a menu with **Show CamLooper**, **Link phone…**, **Start at
+**Expected:** step 8 still opens the main window (the app does not exit and does not stay
+invisible), and the terminal prints
+`tray: could not create tray icon, showing window instead: …`. If the tray is created
+anyway (some desktops create it with no host), the window stays hidden — that is not this
+fix failing. Step 1 shows a menu with **Show CamLooper**, **Link phone…**, **Start at
 login** (checkbox) and **Quit**, in the app's UI language; step 2 quits the process
 (`pgrep camlooper` empty); step 3 hides the window but the process stays alive; step 4
 brings the window back at 1200×760, focused; step 5 opens no second window — the existing
