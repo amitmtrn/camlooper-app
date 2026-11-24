@@ -32,7 +32,7 @@ use super::protocol::{
     ApiErrorBody, ClientMessage, IceServersResponse, PairClaimRequest, PairClaimResponse, ServerMessage, PROTOCOL_V2_QUERY,
 };
 use super::store::{Pairing, Store, STORE_VERSION};
-use super::stream::signal::{worth_sending_after_reconnect, OutboundFrame, StopReason};
+use super::stream::signal::{worth_sending_after_reconnect, OutboundFrame, PairScope, StopReason};
 use super::stream::StreamManager;
 
 const DEFAULT_API_BASE: &str = "https://api.camlooper.com/";
@@ -308,7 +308,7 @@ pub async fn link(app: AppHandle, code: String) -> Result<RemoteState, LinkError
     if let Some(old) = previous {
         // Revoke the old phone first so it cannot keep pushing links to this computer.
         let _ = delete_pair(&base, &old).await;
-        forget_pairing(&app, None);
+        forget_pairing(&app, None, None);
     }
 
     {
@@ -427,7 +427,7 @@ pub async fn unlink(app: AppHandle) -> anyhow::Result<RemoteState> {
     if let (Some(p), Some(base)) = (pairing, api_base()) {
         let _ = delete_pair(&base, &p).await;
     }
-    forget_pairing(&app, None);
+    forget_pairing(&app, None, None);
     Ok(snapshot())
 }
 
@@ -450,9 +450,17 @@ pub async fn delete_pair(base: &Url, pairing: &Pairing) -> Result<(), ()> {
 
 /// Local teardown shared by unlink, revocation and replacement. `server_reason` is set when
 /// the server ended the pairing (phone unlinked, code room expired, idle cleanup).
-fn forget_pairing(app: &AppHandle, server_reason: Option<&str>) {
+///
+/// `only_pair`: forget only if this is still the stored pairing. The relay task passes the
+/// pairing its socket was opened with — a "revoked" for that one must not wipe a pairing the
+/// user claimed in the meantime.
+fn forget_pairing(app: &AppHandle, server_reason: Option<&str>, only_pair: Option<&str>) {
     let tx = {
         let mut s = state();
+        if only_pair.is_some_and(|only| s.pairing.as_ref().map(|p| p.pair_id.as_str()) != Some(only)) {
+            eprintln!("remote: an earlier pairing was ended by the server; the current one is kept");
+            return;
+        }
         if let Some(store) = &s.store {
             if let Err(e) = store.delete() {
                 eprintln!("remote: could not delete pairing file: {e:#}");
@@ -507,6 +515,11 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
     let (stream, outbound) = super::stream::commands::install(app.clone());
     // Stamp each frame as it is queued, so that after a reconnect its age is known.
     let mut outbound = stamp_outbound(outbound);
+    // Frames taken from `outbound` and not sent yet, oldest first. A frame whose send failed
+    // stays at the front and goes out first on the next socket.
+    let mut backlog: VecDeque<(Instant, OutboundFrame)> = VecDeque::new();
+    // Which sessions frames may be about on the current pairing.
+    let mut scope = PairScope::default();
     loop {
         let pairing = { state().pairing.clone() };
         let Some(pairing) = pairing else {
@@ -530,35 +543,63 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
             }
         };
 
-        match connect(&base, &pairing).await {
+        // An unlink or a relink must not wait out a connect attempt (up to CONNECT_TIMEOUT)
+        // for a pairing that is already history.
+        let connected = {
+            let attempt = connect(&base, &pairing);
+            tokio::pin!(attempt);
+            loop {
+                tokio::select! {
+                    r = &mut attempt => break Some(r),
+                    ctrl = rx.recv() => match ctrl {
+                        None => return,
+                        // Nothing to send it on; the server re-sends an unacknowledged command.
+                        Some(Control::Ack(_)) => {}
+                        Some(Control::Reconnect) | Some(Control::Shutdown) => break None,
+                    },
+                }
+            }
+        };
+        let Some(connected) = connected else {
+            backoff.reset();
+            continue;
+        };
+
+        match connected {
             Ok(ws) => {
                 backoff.reset();
                 set_connected(&app, true);
                 stream.set_device_name(pairing.mobile_device_name.clone());
+                while let Ok(queued) = outbound.try_recv() {
+                    backlog.push_back(queued);
+                }
+                if scope.enter(&pairing.pair_id) && !backlog.is_empty() {
+                    // Another pairing than the one these frames were made for.
+                    eprintln!("remote: dropping {} queued frame(s) of the previous pairing", backlog.len());
+                    backlog.clear();
+                }
                 // Frames queued while disconnected: keep what the phone still needs (the
                 // answer or a stop for the session that is current, a recent rejection), drop
                 // what belongs to a moment that has passed.
                 let current = stream.status().session_id;
-                let mut carried = Vec::new();
-                while let Ok((queued_at, frame)) = outbound.try_recv() {
-                    if worth_sending_after_reconnect(&frame, queued_at.elapsed(), current.as_deref()) {
-                        carried.push(frame);
-                    }
-                }
-                let end = run_session(ws, &mut rx, &app, &stream, &mut outbound, carried).await;
+                backlog.retain(|(queued_at, frame)| {
+                    scope.allows(frame) && worth_sending_after_reconnect(frame, queued_at.elapsed(), current.as_deref())
+                });
+                let end = run_session(ws, &mut rx, &app, &stream, &mut outbound, &mut backlog, &mut scope).await;
                 set_connected(&app, false);
                 match end {
                     SessionEnd::Revoked(reason) => {
                         stream.stop(StopReason::PeerOffline).await;
-                        forget_pairing(&app, Some(&reason));
+                        forget_pairing(&app, Some(&reason), Some(&pairing.pair_id));
                         continue;
                     }
-                    SessionEnd::Shutdown if state().pairing.is_none() => {
-                        // Unlinked from this computer while a stream may be live.
+                    SessionEnd::Shutdown => {
+                        // This pairing was ended from this computer (unlink, or replaced by a
+                        // new one — whose claim may already be stored) while a stream may be
+                        // live. Its frames to the phone no longer pass `scope` either way.
                         stream.stop(StopReason::User).await;
                         continue;
                     }
-                    SessionEnd::Shutdown => continue,
                     SessionEnd::Dropped => {}
                 }
             }
@@ -566,7 +607,7 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
                 // The pairing was revoked while the socket was down; a stream may still be
                 // live peer to peer.
                 stream.stop(StopReason::PeerOffline).await;
-                forget_pairing(&app, Some("revoked"));
+                forget_pairing(&app, Some("revoked"), Some(&pairing.pair_id));
                 continue;
             }
             Err(ConnectError::Other(msg)) => eprintln!("remote: connect failed: {msg}"),
@@ -582,6 +623,23 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
             }
         }
     }
+}
+
+/// Send the backlog, oldest first. A frame leaves it only once it has been written: when the
+/// socket fails, that frame is still at the front for the next one. Frames about a session
+/// the current pairing's phone never mentioned are dropped (see [`PairScope`]).
+async fn flush_backlog(ws: &mut WsStream, backlog: &mut VecDeque<(Instant, OutboundFrame)>, scope: &PairScope) -> Result<(), ()> {
+    while let Some((_, frame)) = backlog.front() {
+        if !scope.allows(frame) {
+            eprintln!("remote: not sending a {} frame for a session of another pairing", frame.describe());
+        } else if let Some(text) = frame.to_json() {
+            ws.send(Message::text(text)).await.map_err(|_| ())?;
+        } else {
+            eprintln!("remote: not sending an oversized {} frame", frame.describe());
+        }
+        backlog.pop_front();
+    }
+    Ok(())
 }
 
 fn stamp_outbound(mut raw: mpsc::UnboundedReceiver<OutboundFrame>) -> mpsc::UnboundedReceiver<(Instant, OutboundFrame)> {
@@ -633,14 +691,11 @@ async fn run_session(
     app: &AppHandle,
     stream: &StreamManager,
     outbound: &mut mpsc::UnboundedReceiver<(Instant, OutboundFrame)>,
-    carried: Vec<OutboundFrame>,
+    backlog: &mut VecDeque<(Instant, OutboundFrame)>,
+    scope: &mut PairScope,
 ) -> SessionEnd {
-    for frame in carried {
-        if let Some(text) = frame.to_json() {
-            if ws.send(Message::text(text)).await.is_err() {
-                return SessionEnd::Dropped;
-            }
-        }
+    if flush_backlog(&mut ws, backlog, scope).await.is_err() {
+        return SessionEnd::Dropped;
     }
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -655,6 +710,10 @@ async fn run_session(
                 match incoming {
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(text.as_str()) {
                         Ok(msg) => {
+                            // Before routing: the reply to this frame must find its session known.
+                            if let Some(id) = super::stream::inbound_session_id(&msg) {
+                                scope.note_inbound(id);
+                            }
                             let Some(msg) = super::stream::route_server_message(stream, msg) else { continue };
                             if let Some(end) = handle_server_message(msg, &mut ws, app).await {
                                 return end;
@@ -686,14 +745,10 @@ async fn run_session(
                 }
             }
             frame = outbound.recv() => {
-                let Some((_, frame)) = frame else { continue };
-                match frame.to_json() {
-                    Some(text) => {
-                        if ws.send(Message::text(text)).await.is_err() {
-                            return SessionEnd::Dropped;
-                        }
-                    }
-                    None => eprintln!("remote: not sending an oversized {} frame", frame.describe()),
+                let Some(frame) = frame else { continue };
+                backlog.push_back(frame);
+                if flush_backlog(&mut ws, backlog, scope).await.is_err() {
+                    return SessionEnd::Dropped;
                 }
             }
             _ = ping.tick() => {

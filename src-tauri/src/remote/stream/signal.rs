@@ -319,6 +319,49 @@ pub fn worth_sending_after_reconnect(frame: &OutboundFrame, age: std::time::Dura
     age <= OUTBOUND_MAX_AGE && (frame.is_terminal() || current_session == Some(frame.session_id()))
 }
 
+/// How many session ids a [`PairScope`] remembers (most recently heard first to stay).
+pub const MAX_KNOWN_SESSIONS: usize = 64;
+
+/// Which sessions outbound frames may be about on the relay socket's current pairing.
+///
+/// Every frame the desktop sends names a `sessionId` the phone introduced. The frames reach
+/// the socket through two queues, so one produced for phone A (the `stream_stop` of the
+/// stream that an unlink ended, an `answer` with this computer's addresses) can arrive after
+/// the socket has moved on to phone B. Timing cannot rule that out; this does: a frame is
+/// sent only if its session id was heard *from the phone of the current pairing*.
+#[derive(Debug, Default)]
+pub struct PairScope {
+    pair_id: Option<String>,
+    sessions: std::collections::VecDeque<String>,
+}
+
+impl PairScope {
+    /// A socket for `pair_id` is up. `true` if that is another pairing than before (or the
+    /// first): no session is known any more, and whatever was queued must be dropped.
+    pub fn enter(&mut self, pair_id: &str) -> bool {
+        if self.pair_id.as_deref() == Some(pair_id) {
+            return false;
+        }
+        self.pair_id = Some(pair_id.to_string());
+        self.sessions.clear();
+        true
+    }
+
+    /// The phone sent a frame naming this session.
+    pub fn note_inbound(&mut self, session_id: &str) {
+        if let Some(i) = self.sessions.iter().position(|s| s == session_id) {
+            self.sessions.remove(i);
+        } else if self.sessions.len() >= MAX_KNOWN_SESSIONS {
+            self.sessions.pop_front();
+        }
+        self.sessions.push_back(session_id.to_string());
+    }
+
+    pub fn allows(&self, frame: &OutboundFrame) -> bool {
+        self.sessions.iter().any(|s| s == frame.session_id())
+    }
+}
+
 /// A frame for the relay, already in its wire shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundFrame {
@@ -435,6 +478,52 @@ mod tests {
         // Nothing survives a long outage.
         assert!(!worth_sending_after_reconnect(&answer, OUTBOUND_MAX_AGE + s(1), Some("cur")));
         assert!(!worth_sending_after_reconnect(&stop_old, OUTBOUND_MAX_AGE + s(1), None));
+    }
+
+    #[test]
+    fn frames_for_another_pairing_are_never_sent() {
+        let stop = |id: &str| OutboundFrame::StreamStop { session_id: id.into(), reason: StopReason::User };
+        let answer = |id: &str| OutboundFrame::Signal(StreamSignal::Answer { session_id: id.into(), sdp: "v=0".into() });
+        let mut scope = PairScope::default();
+        assert!(!scope.allows(&stop("a1")), "nothing is known before a phone has spoken");
+
+        // Paired with phone A, which starts session a1.
+        assert!(scope.enter("pair-A"));
+        scope.note_inbound("a1");
+        assert!(scope.allows(&answer("a1")) && scope.allows(&stop("a1")));
+        assert!(!scope.allows(&answer("zz")));
+        // The socket reconnects for the same pairing: a1 is still A's.
+        assert!(!scope.enter("pair-A"));
+        assert!(scope.allows(&stop("a1")));
+
+        // Relinked to phone B mid-stream. The stop for A's session — terminal and fresh, so
+        // the age rule alone would send it — and A's answer must not go to B.
+        assert!(scope.enter("pair-B"));
+        assert!(!scope.allows(&stop("a1")));
+        assert!(!scope.allows(&answer("a1")));
+        scope.note_inbound("b1");
+        assert!(scope.allows(&answer("b1")));
+        // Back to A (revoke, quick re-pair): a new pairing in every respect.
+        assert!(scope.enter("pair-A"));
+        assert!(!scope.allows(&stop("a1")) && !scope.allows(&stop("b1")));
+    }
+
+    #[test]
+    fn the_known_sessions_are_bounded_and_the_active_one_stays() {
+        let mut scope = PairScope::default();
+        scope.enter("p");
+        scope.note_inbound("live");
+        for i in 0..(MAX_KNOWN_SESSIONS * 3) {
+            scope.note_inbound(&format!("other{i}"));
+            // The live session keeps talking (candidates, its eventual stop).
+            if i % 10 == 0 {
+                scope.note_inbound("live");
+            }
+        }
+        assert_eq!(scope.sessions.len(), MAX_KNOWN_SESSIONS);
+        let stop = |id: &str| OutboundFrame::StreamStop { session_id: id.into(), reason: StopReason::User };
+        assert!(scope.allows(&stop("live")));
+        assert!(!scope.allows(&stop("other0")));
     }
 
     #[test]

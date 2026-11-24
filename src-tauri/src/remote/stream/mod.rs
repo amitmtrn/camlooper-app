@@ -36,6 +36,20 @@ pub use runner::{CameraControl, CameraTarget, Cancel, FixedCamera, IceSource, No
 
 use super::protocol::ServerMessage;
 
+/// The session a frame from the phone is about, if it names a valid one (see
+/// [`signal::PairScope`]).
+pub fn inbound_session_id(msg: &ServerMessage) -> Option<&str> {
+    let (from, data) = match msg {
+        ServerMessage::Signal { from, data } => (from, Some(data)),
+        ServerMessage::StreamStop { from, data } => (from, data.as_ref()),
+        _ => return None,
+    };
+    if from.as_deref().is_some_and(|f| f != "mobile") {
+        return None;
+    }
+    data?.get("sessionId")?.as_str().filter(|id| signal::valid_session_id(id))
+}
+
 /// Hand the relay's v2 frames to the stream manager. Returns the message when the caller
 /// (the v1 handler) still needs to see it: everything except `peer`, `signal`, `stream_stop`
 /// and `error`. `hello` is both: its `peerOnline` goes to the manager, the rest to the caller.
@@ -91,6 +105,17 @@ mod tests {
 
     fn parse(s: &str) -> ServerMessage {
         serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn only_the_phones_frames_introduce_a_session() {
+        let id = |s: &str| inbound_session_id(&parse(s)).map(str::to_string);
+        assert_eq!(id(r#"{"type":"signal","from":"mobile","data":{"kind":"stream_request","sessionId":"s1"}}"#).as_deref(), Some("s1"));
+        assert_eq!(id(r#"{"type":"stream_stop","from":"mobile","data":{"sessionId":"s2","reason":"user"}}"#).as_deref(), Some("s2"));
+        assert_eq!(id(r#"{"type":"signal","from":"desktop","data":{"kind":"stream_request","sessionId":"s1"}}"#), None);
+        assert_eq!(id(r#"{"type":"stream_stop","from":"mobile"}"#), None);
+        assert_eq!(id(r#"{"type":"signal","from":"mobile","data":{"kind":"stream_request","sessionId":""}}"#), None);
+        assert_eq!(id(r#"{"type":"pong"}"#), None);
     }
 
     #[tokio::test]
