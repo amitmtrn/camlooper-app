@@ -622,7 +622,7 @@ builds them).
 <!-- Newest entries first. -->
 
 ### Phone camera stream into v4l2: confirm dialog, live banner, stop, tray, headless CLI (remote v2, phase 1)
-_Added 2026-11-24 · Linux · `src-tauri/src/remote/stream/`, `src-tauri/examples/phone_stream_cli.rs`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`_
+_Added 2026-11-24, dialog safety steps (15–21) added the same day · Linux · `src-tauri/src/remote/stream/`, `src-tauri/src/tray.rs`, `src-tauri/examples/phone_stream_cli.rs`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`_
 
 A phone streams its camera over WebRTC and the stream becomes the v4l2loopback camera. In
 the app the user must accept every request in a dialog; the headless CLI (part B) accepts
@@ -634,7 +634,12 @@ timeout, the 15 s quiet period after a decline, stale/cancelled requests, a `str
 without the session's id being ignored once accepted, the relay-flap grace period while live,
 the stop watchdog, the candidate cap and filter, the error code behind the error banner
 (`last_error_code` = `ice_failed` etc.), that a panic in the session still hands the camera
-back, and that the tray-label payload accepts the new `stopPhone`/`phoneLive` fields.
+back, and that the tray-label payload accepts the new `stopPhone`/`phoneLive`/`phoneConnecting`
+fields. It also covers: an Accept less than 800 ms after the request being refused
+(`too_soon`), the status carrying `expiresAt` while a request is pending and a `seq` that
+grows with every change, a second Stop ≥ 5 s into a hung stop forcing it, the tray tooltip
+saying "live" only when live, and the phone's name being cut to 40 characters with control
+and bidi-override characters removed.
 `cargo test --test phone_stream_loopback` covers the phone closing its connection (ends idle,
 no error) and junk datagrams sent at the receiver's ports. Part A covers what needs eyes.
 
@@ -674,16 +679,36 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
     **Accept** again before the countdown ends.
 14. Repeat step 5, and while live put the phone's browser in the background for ~5 s (home
     button), then return to the page.
+15. Stray keystroke. Put a text editor in front of CamLooper (CamLooper visible behind it or
+    hidden in the tray) and keep typing, pressing **Enter** and **Space** repeatedly, while
+    you tap **Start streaming** on the phone. Keep typing for 3 s after the dialog appears.
+    Then click into the CamLooper window and immediately click **Accept** as fast as you can.
+16. Keyboard. Tap **Start streaming** (15 s after the last decline). With the dialog up, press
+    **Tab** six times, then **Shift+Tab** twice, watching the focus ring. Then press **Esc**.
+17. Close with the dialog open. After 15 s tap **Start streaming**, and click the window's
+    close button (✕) while the dialog is showing. Open the window again from the tray.
+18. Quit while live. Repeat step 5, and once live choose **Quit** from the tray menu. Run
+    `pgrep -a ffmpeg` straight after.
+19. Long and odd names. On the phone page set the device name to
+    `WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW` (60 × W) and tap
+    **Start streaming**; decline. After 15 s set it to a Hebrew name (`הטלפון של עמית`), tap
+    **Start streaming**, **Accept**, and read the live banner with the app in English and
+    again in **עברית**.
+20. Shrink the window to its smallest size and repeat step 5 up to the dialog.
+21. Dismissed error. Produce the red message of step 10 (mobile data), click its **×**, then
+    click another window and back on CamLooper, and hide/show it from the tray.
 
 **Expected:**
 - Step 1: under "Linked with <phone>" a small grey line: "Stream your phone's camera: open
   the CamLooper Remote page on your phone and tap Start streaming." No other change to the card.
-- Step 2: within ~3 s the main window reappears in front, focused, with a dialog "Use your
-  phone as the camera?" — body "<phone name> wants to stream its camera to CamLooper. Your
-  current video will be paused while the phone is live." — **Accept** (highlighted, has
-  keyboard focus) and **Decline**, and "Declines automatically in 5x s" counting down once a
-  second. The rest of the window is dimmed and not clickable. Debug logs show
-  `phone stream: request from <phone>`.
+- Step 2: within ~3 s the main window reappears with a dialog "Use your phone as the
+  camera?" — body "<phone name> wants to stream its camera to CamLooper. Your current video
+  will be paused while the phone is live." — **Decline** and **Accept**, and "Declines
+  automatically in 5x s" counting down once a second with no number skipped or shown twice.
+  **Accept is greyed out for about a second** after the dialog appears (and again for about
+  a second each time the window gains focus), and **neither button has keyboard focus**. The
+  rest of the window is dimmed and cannot be clicked or reached with Tab. The taskbar / dock
+  entry asks for attention. stderr shows `phone stream: <phone> asks to stream its camera`.
 - Step 3: the dialog closes; the phone shows that the computer declined. The loop keeps
   playing. The second tap is declined on the phone straight away and **no dialog appears and
   the window is not raised** on the computer: for 15 s after a Decline (or an ignored dialog)
@@ -701,7 +726,8 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
   **Use this clip**.) ffplay shows the phone.
 - Step 7: the tray menu has **Stop phone camera** enabled (it is greyed out when nothing is
   streaming). The tooltip reads "CamLooper — phone camera live" where the desktop shows
-  tray tooltips (see gotchas).
+  tray tooltips (see gotchas); during "Connecting to <phone>…" it reads "CamLooper —
+  connecting to the phone…", not "live".
 - Step 8: the banner briefly says "Stopping the phone camera…", then disappears; the controls
   are enabled again, the loop resumes in the preview and in ffplay, the phone returns to its
   start screen.
@@ -729,6 +755,27 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
 - Step 14: the stream either carries on or freezes for those seconds and resumes; the banner
   stays "Phone camera live" throughout. The phone's relay connection dropping for a moment
   does not end a stream that is still delivering video.
+- Step 15: nothing you typed reaches the dialog: it is still open and counting down, the
+  stream has **not** started (no red banner, the loop still plays). The fast click on
+  **Accept** right after focusing the window does nothing — the button is grey for about a
+  second — and a second click once it is coloured again accepts.
+- Step 16: focus only ever moves between **Decline** and **Accept**; it never lands on a
+  control behind the dialog (the language picker, the Advanced switches). **Esc** closes the
+  dialog and the phone shows that the computer declined, exactly like clicking **Decline**.
+- Step 17: the window hides to the tray and the phone shows "declined" within a second or
+  two — not a timeout a minute later. Reopened, the window has no dialog.
+- Step 18: the phone returns to its start screen within ~3 s (it is told the stream stopped;
+  it does not sit on a frozen picture until its own timeout), the tray icon disappears, and
+  `pgrep` prints no CamLooper ffmpeg.
+- Step 19: the 60-W name is shown cut to 40 characters and wrapped inside the dialog;
+  **Decline** and **Accept** are fully visible. With the Hebrew name the banner reads, in both
+  languages, name first then "1280×720 · 30 fps · H.264 · 00:07" with the digits in that
+  order (never "720×1280" or "fps 30"), and "Connecting to הטלפון של עמית…" keeps the "…" at
+  the end of the sentence.
+- Step 20: the dialog scrolls inside the window if it does not fit; both buttons can be
+  reached.
+- Step 21: the red message stays gone after each of those. (It comes back only for a *new*
+  failure.)
 - Step 11: dialog and banner text are translated and laid out right-to-left (icon and title
   on the right, buttons on the left); in the banner the "1280×720 · 30 fps · H.264 · 00:12"
   part still reads left-to-right with no scrambled digits.
@@ -737,9 +784,21 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
 - Linux tray icons (AppIndicator) do not show tooltips at all; check the tooltip on Windows
   or macOS. On GNOME without the AppIndicator extension there is no tray: the window then
   never hides, and step 7/9 cannot be run.
-- If the window was hidden, some window managers raise it without giving it keyboard focus
-  (GNOME shows "CamLooper is ready" instead). The dialog is still there; that is not a failure.
-- There is no separate desktop notification; bringing the window forward is the alert.
+- A request deliberately does **not** take keyboard focus. If CamLooper was hidden in the
+  tray the window appears (most desktops put it in front); if it was open behind another
+  window it may stay behind and only flash in the taskbar / bounce in the Dock (GNOME shows
+  "CamLooper is ready"). That is intended, not a failure: click the window and answer.
+- There is no separate desktop notification; the window and the attention request are the alert.
+- The welcome page in the browser and the ad strip at the top wait while a request is on
+  screen (a hidden start followed by a phone request); they appear ~2 s after it is answered.
+- After a Decline or a timeout the window that was raised from the tray stays open; close it
+  again by hand.
+- A stop that hangs: if the banner still says "Stopping the phone camera…" after 5 s, its
+  **Stop** button (and the tray item) become clickable again and force the stop. This needs
+  a hung driver to see and is covered by `cargo test --lib` instead.
+- Screen readers: the dialog is announced with its text and "Declines automatically in 60 s",
+  then again at 30 s and 10 s only. The live banner announces "Phone camera live" once, not
+  the clock.
 - Accepting may trigger one polkit prompt the first time (loading v4l2loopback), or one UAC
   prompt on the Windows Store build (softcam registration). You have two minutes to answer
   it; the banner says "Connecting…" meanwhile. (The phone page may give up waiting earlier

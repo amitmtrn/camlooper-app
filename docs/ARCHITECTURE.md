@@ -230,8 +230,13 @@ protocol is in [remote-protocol.md](remote-protocol.md).
   relay mid-stream, 10 s stop watchdog); `manager.rs` runs it. There is no auto-accept in the app: a `DecisionSink`
   (the UI) must call `remote_stream_accept`.
 - **Commands / events:** `remote_stream_status`, `remote_stream_accept`, `remote_stream_reject`,
-  `remote_stream_stop`; `remote://stream-request`, `remote://stream-request-dismissed`,
-  `remote://stream-status`.
+  `remote_stream_stop`; `remote://stream-status` is the UI's single source of truth (it
+  carries a growing `seq`, and `sessionId`/`deviceName`/`expiresAt` while a request is
+  pending — the confirm dialog is derived from it). `remote://stream-request` and
+  `remote://stream-request-dismissed` are informational only.
+- **Consent guards:** a request raises the window without taking keyboard focus; the dialog
+  never focuses Accept and keeps it disabled ~1.2 s after it becomes visible/focused;
+  `remote_stream_accept` refuses other windows and anything under 800 ms after the request.
 - **Dev:** `cargo run --example phone_stream_cli -- --code 123456 --null` runs the whole path
   headless; `cargo test --test phone_stream_loopback` runs it against a simulated phone.
 - **Not done yet:** the offer is not authenticated end to end — a compromised relay could
