@@ -189,11 +189,14 @@
     "errorTitle": "Telefon kamerası durdu.",
     "errors": {
       "ice_failed": "Telefona doğrudan bağlanılamadı. Telefonu ve bilgisayarı aynı Wi-Fi ağına bağlayın veya bilgisayarı telefonun hotspot'una bağlayın.",
+      "ice_failed_windows": "Telefona doğrudan bağlanılamadı. Telefonu ve bilgisayarı aynı Wi-Fi ağına bağlayın veya bilgisayarı telefonun hotspot'una bağlayın. Ayrıca Windows Güvenlik Duvarı'nın özel ağlarda CamLooper'a izin verdiğinden emin olun.",
       "timeout": "Telefon video göndermeyi bıraktı. Telefonun hâlâ CamLooper Remote sayfasında olduğunu kontrol edip yayını yeniden başlatın.",
       "generic": "Telefon yayınında bir sorun oluştu. Yayını telefonunuzdan yeniden başlatın."
     },
     "dismiss": "Kapat",
     "expired": "Bu isteğin süresi zaten doldu. Telefonunuzda \"Start streaming\"e yeniden dokunun.",
+    "offline": "CamLooper şu anda telefon hizmetine bağlı değil. Birazdan tekrar deneyin.",
+    "stoppedByPhone": "Telefon yayını durdurdu.",
     "controlsLocked": "Telefonunuz CamLooper kamerasını kullanıyor. Bu denetimleri kullanmak için telefon kamerasını durdurun."
   },
   "tray": {

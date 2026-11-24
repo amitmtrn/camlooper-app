@@ -189,11 +189,14 @@
     "errorTitle": "A câmera do celular parou.",
     "errors": {
       "ice_failed": "Não foi possível conectar diretamente ao celular. Coloque o celular e o computador na mesma rede Wi-Fi ou conecte o computador ao roteador do celular.",
+      "ice_failed_windows": "Não foi possível conectar diretamente ao celular. Coloque o celular e o computador na mesma rede Wi-Fi ou conecte o computador ao roteador do celular. Verifique também se o Firewall do Windows permite o CamLooper em redes privadas.",
       "timeout": "O celular parou de enviar vídeo. Verifique se ele ainda está na página do CamLooper Remote e inicie a transmissão de novo.",
       "generic": "Algo deu errado na transmissão do celular. Inicie a transmissão de novo pelo celular."
     },
     "dismiss": "Fechar",
     "expired": "Essa solicitação já expirou. Toque em \"Start streaming\" no celular novamente.",
+    "offline": "O CamLooper não está conectado ao serviço do celular no momento. Tente novamente em instantes.",
+    "stoppedByPhone": "O celular parou de transmitir.",
     "controlsLocked": "Seu celular está usando a câmera do CamLooper. Pare a câmera do celular para usar estes controles."
   },
   "tray": {

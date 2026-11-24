@@ -189,11 +189,14 @@
     "errorTitle": "Kamera ponsel berhenti.",
     "errors": {
       "ice_failed": "Tidak dapat terhubung langsung ke ponsel. Sambungkan ponsel dan komputer ke Wi-Fi yang sama, atau sambungkan komputer ke hotspot ponsel.",
+      "ice_failed_windows": "Tidak dapat terhubung langsung ke ponsel. Sambungkan ponsel dan komputer ke Wi-Fi yang sama, atau sambungkan komputer ke hotspot ponsel. Pastikan juga Windows Firewall mengizinkan CamLooper di jaringan pribadi.",
       "timeout": "Ponsel berhenti mengirim video. Pastikan ponsel masih membuka halaman CamLooper Remote, lalu mulai streaming lagi.",
       "generic": "Terjadi masalah pada streaming ponsel. Mulai streaming lagi dari ponsel Anda."
     },
     "dismiss": "Tutup",
     "expired": "Permintaan itu sudah kedaluwarsa. Ketuk \"Start streaming\" di ponsel Anda lagi.",
+    "offline": "CamLooper sedang tidak terhubung ke layanan ponsel. Coba lagi sebentar lagi.",
+    "stoppedByPhone": "Ponsel berhenti melakukan streaming.",
     "controlsLocked": "Ponsel Anda sedang menggunakan kamera CamLooper. Hentikan kamera ponsel untuk menggunakan kontrol ini."
   },
   "tray": {

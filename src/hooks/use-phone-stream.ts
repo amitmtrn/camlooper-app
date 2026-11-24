@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -25,6 +25,8 @@ export interface PhoneStreamStatus {
   lastError: string | null;
   /** Stop reason behind `lastError`: `ice_failed`, `timeout`, `error`, … */
   lastErrorCode: string | null;
+  /** The last session ended normally because the phone stopped it. Never an error. */
+  endedByPhone: boolean;
 }
 
 export interface PhoneStreamRequest {
@@ -49,6 +51,7 @@ const IDLE: PhoneStreamStatus = {
   since: null,
   lastError: null,
   lastErrorCode: null,
+  endedByPhone: false,
 };
 
 /** The phone holds the camera: normal video start controls are off. */
@@ -59,7 +62,13 @@ export function phoneOwnsCamera(state: PhoneStreamPhase): boolean {
 /** Error codes with their own translated text; anything else uses the generic message. */
 const KNOWN_ERRORS = ["ice_failed", "timeout"] as const;
 
-export function phoneErrorKey(code: string | null): string {
+export function phoneErrorKey(
+  code: string | null,
+  windows: boolean = navigator.userAgent.includes("Windows"),
+): string {
+  // On Windows a failed direct connection is often the firewall prompt having been
+  // dismissed: inbound UDP on private networks is what the phone needs.
+  if (code === "ice_failed" && windows) return "phoneStream.errors.ice_failed_windows";
   return code && (KNOWN_ERRORS as readonly string[]).includes(code)
     ? `phoneStream.errors.${code}`
     : "phoneStream.errors.generic";
@@ -88,13 +97,26 @@ function requestFromStatus(s: PhoneStreamStatus): PhoneStreamRequest | null {
   return { sessionId: s.sessionId, deviceName: s.deviceName, receivedAt, expiresAt: receivedAt + DECISION_TIMEOUT_MS };
 }
 
-export function usePhoneStream() {
+/** `expired`: the request is gone. `offline`: not sent, the request is still pending. */
+export type AcceptResult = "ok" | "expired" | "offline";
+
+export function usePhoneStream(options: { onStoppedByPhone?: () => void } = {}) {
+  const onStoppedByPhone = useRef(options.onStoppedByPhone);
+  onStoppedByPhone.current = options.onStoppedByPhone;
+  const previous = useRef<PhoneStreamStatus>(IDLE);
   const [status, setStatus] = useState<PhoneStreamStatus>(IDLE);
   const [request, setRequest] = useState<PhoneStreamRequest | null>(null);
   /** The last failure, until the user dismisses it or a new stream starts. */
   const [error, setError] = useState<{ code: string | null; detail: string | null } | null>(null);
 
   const applyStatus = useCallback((s: PhoneStreamStatus) => {
+    // The phone ended a session that was up a moment ago: say so, neutrally. (Not on the
+    // first read after startup, where there is no "moment ago".)
+    const before = previous.current;
+    previous.current = s;
+    if (s.state === "idle" && s.endedByPhone && phoneOwnsCamera(before.state)) {
+      onStoppedByPhone.current?.();
+    }
     setStatus(s);
     // Close the dialog as soon as the backend has moved on (accepted, cancelled, timed out).
     setRequest((r) => (r && (s.state !== "requested" || s.sessionId !== r.sessionId) ? null : r));
@@ -138,15 +160,18 @@ export function usePhoneStream() {
     };
   }, [applyStatus]);
 
-  /** Resolves false when the request had already expired or been cancelled. */
-  const accept = useCallback(async (sessionId: string): Promise<boolean> => {
-    setRequest(null);
+  const accept = useCallback(async (sessionId: string): Promise<AcceptResult> => {
     try {
       await invoke("remote_stream_accept", { sessionId });
-      return true;
+      setRequest(null);
+      return "ok";
     } catch (err) {
       console.error("phone stream: accept failed:", err);
-      return false;
+      // The relay connection is down: the accept was not sent and the request is still
+      // pending in the backend, so the dialog stays for another try.
+      if (err === "offline") return "offline";
+      setRequest(null);
+      return "expired";
     }
   }, []);
 

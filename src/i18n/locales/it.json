@@ -189,11 +189,14 @@
     "errorTitle": "Fotocamera del telefono interrotta.",
     "errors": {
       "ice_failed": "Impossibile connettersi direttamente al telefono. Collega telefono e computer alla stessa rete Wi-Fi, oppure collega il computer all'hotspot del telefono.",
+      "ice_failed_windows": "Impossibile connettersi direttamente al telefono. Collega telefono e computer alla stessa rete Wi-Fi, oppure collega il computer all'hotspot del telefono. Verifica anche che Windows Firewall consenta CamLooper sulle reti private.",
       "timeout": "Il telefono ha smesso di inviare video. Controlla che sia ancora sulla pagina CamLooper Remote, poi riavvia lo streaming.",
       "generic": "Qualcosa è andato storto con lo streaming del telefono. Riavvialo dal telefono."
     },
     "dismiss": "Chiudi",
     "expired": "La richiesta è già scaduta. Tocca di nuovo \"Start streaming\" sul telefono.",
+    "offline": "CamLooper non è connesso al servizio del telefono in questo momento. Riprova tra un attimo.",
+    "stoppedByPhone": "Il telefono ha interrotto lo streaming.",
     "controlsLocked": "Il telefono sta usando la fotocamera di CamLooper. Interrompi la fotocamera del telefono per usare questi comandi."
   },
   "tray": {

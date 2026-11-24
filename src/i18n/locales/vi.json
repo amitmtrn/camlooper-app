@@ -189,11 +189,14 @@
     "errorTitle": "Camera điện thoại đã dừng.",
     "errors": {
       "ice_failed": "Không thể kết nối trực tiếp với điện thoại. Hãy kết nối điện thoại và máy tính vào cùng một mạng Wi-Fi, hoặc kết nối máy tính với điểm phát sóng của điện thoại.",
+      "ice_failed_windows": "Không thể kết nối trực tiếp với điện thoại. Hãy kết nối điện thoại và máy tính vào cùng một mạng Wi-Fi, hoặc kết nối máy tính với điểm phát sóng của điện thoại. Ngoài ra, hãy đảm bảo Tường lửa Windows cho phép CamLooper trên mạng riêng.",
       "timeout": "Điện thoại đã ngừng gửi video. Kiểm tra xem điện thoại vẫn đang mở trang CamLooper Remote, rồi bắt đầu truyền lại.",
       "generic": "Đã xảy ra lỗi khi truyền từ điện thoại. Hãy bắt đầu truyền lại từ điện thoại của bạn."
     },
     "dismiss": "Đóng",
     "expired": "Yêu cầu đó đã hết hạn. Hãy nhấn \"Start streaming\" trên điện thoại một lần nữa.",
+    "offline": "CamLooper hiện không kết nối với dịch vụ điện thoại. Hãy thử lại sau giây lát.",
+    "stoppedByPhone": "Điện thoại đã dừng phát trực tiếp.",
     "controlsLocked": "Điện thoại của bạn đang dùng camera CamLooper. Hãy dừng camera điện thoại để dùng các điều khiển này."
   },
   "tray": {

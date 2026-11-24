@@ -189,11 +189,14 @@
     "errorTitle": "La cámara del móvil se ha detenido.",
     "errors": {
       "ice_failed": "No se pudo conectar directamente con el móvil. Conecta el móvil y el ordenador a la misma red Wi-Fi, o conecta el ordenador al punto de acceso del móvil.",
+      "ice_failed_windows": "No se pudo conectar directamente con el móvil. Conecta el móvil y el ordenador a la misma red Wi-Fi, o conecta el ordenador al punto de acceso del móvil. Comprueba también que el Firewall de Windows permita CamLooper en redes privadas.",
       "timeout": "El móvil dejó de enviar vídeo. Comprueba que sigue en la página de CamLooper Remote y vuelve a iniciar la transmisión.",
       "generic": "Algo falló en la transmisión del móvil. Vuelve a iniciarla desde tu móvil."
     },
     "dismiss": "Cerrar",
     "expired": "Esa solicitud ya ha caducado. Vuelve a tocar «Start streaming» en tu móvil.",
+    "offline": "CamLooper no está conectado al servicio del móvil en este momento. Inténtalo de nuevo en un momento.",
+    "stoppedByPhone": "El móvil ha dejado de transmitir.",
     "controlsLocked": "Tu móvil está usando la cámara de CamLooper. Detén la cámara del móvil para usar estos controles."
   },
   "tray": {

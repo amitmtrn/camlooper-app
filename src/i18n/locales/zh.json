@@ -189,11 +189,14 @@
     "errorTitle": "手机摄像头已停止。",
     "errors": {
       "ice_failed": "无法直接连接到手机。请让手机和电脑连接同一个 Wi-Fi，或让电脑连接手机的热点。",
+      "ice_failed_windows": "无法直接连接到手机。请让手机和电脑连接同一个 Wi-Fi，或让电脑连接手机的热点。另请确认 Windows 防火墙允许 CamLooper 在专用网络上通信。",
       "timeout": "手机已停止发送视频。请确认手机仍停留在 CamLooper Remote 页面，然后重新开始推流。",
       "generic": "手机推流出现问题。请在手机上重新开始推流。"
     },
     "dismiss": "关闭",
     "expired": "该请求已过期。请在手机上再次点按“Start streaming”。",
+    "offline": "CamLooper 目前未连接到手机服务。请稍后再试。",
+    "stoppedByPhone": "手机已停止推流。",
     "controlsLocked": "你的手机正在使用 CamLooper 摄像头。停止手机摄像头后才能使用这些控件。"
   },
   "tray": {

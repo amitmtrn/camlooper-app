@@ -191,11 +191,14 @@
     "errorTitle": "Kamera telefonu została zatrzymana.",
     "errors": {
       "ice_failed": "Nie udało się połączyć bezpośrednio z telefonem. Podłącz telefon i komputer do tej samej sieci Wi-Fi albo połącz komputer z hotspotem telefonu.",
+      "ice_failed_windows": "Nie udało się połączyć bezpośrednio z telefonem. Podłącz telefon i komputer do tej samej sieci Wi-Fi albo połącz komputer z hotspotem telefonu. Upewnij się też, że Zapora systemu Windows zezwala aplikacji CamLooper na połączenia w sieciach prywatnych.",
       "timeout": "Telefon przestał wysyłać obraz. Sprawdź, czy wciąż jest otwarta strona CamLooper Remote, i ponownie rozpocznij przesyłanie.",
       "generic": "Coś poszło nie tak z przesyłaniem z telefonu. Rozpocznij je ponownie na telefonie."
     },
     "dismiss": "Zamknij",
     "expired": "Ta prośba już wygasła. Dotknij ponownie „Start streaming” na telefonie.",
+    "offline": "CamLooper nie jest teraz połączony z usługą telefonu. Spróbuj ponownie za chwilę.",
+    "stoppedByPhone": "Telefon zakończył przesyłanie obrazu.",
     "controlsLocked": "Telefon używa kamery CamLooper. Zatrzymaj kamerę telefonu, aby użyć tych elementów sterujących."
   },
   "tray": {

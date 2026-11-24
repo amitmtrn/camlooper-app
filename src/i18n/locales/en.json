@@ -231,11 +231,14 @@
     "errorTitle": "Phone camera stopped.",
     "errors": {
       "ice_failed": "Couldn't connect directly to the phone. Put the phone and computer on the same Wi-Fi, or connect the computer to the phone's hotspot.",
+      "ice_failed_windows": "Couldn't connect directly to the phone. Put the phone and computer on the same Wi-Fi, or connect the computer to the phone's hotspot. Also make sure Windows Firewall allows CamLooper on private networks.",
       "timeout": "The phone stopped sending video. Check that it is still on the CamLooper Remote page, then start streaming again.",
       "generic": "Something went wrong with the phone stream. Start streaming again from your phone."
     },
     "dismiss": "Dismiss",
     "expired": "That request has already expired. Tap Start streaming on your phone again.",
+    "offline": "CamLooper isn't connected to the phone service right now. Try again in a moment.",
+    "stoppedByPhone": "Phone stopped streaming.",
     "controlsLocked": "Your phone is using the CamLooper camera. Stop the phone camera to use these controls."
   },
   "tray": {

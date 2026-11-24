@@ -189,11 +189,14 @@
     "errorTitle": "Handykamera gestoppt.",
     "errors": {
       "ice_failed": "Keine direkte Verbindung zum Handy möglich. Verbinde Handy und Computer mit demselben WLAN oder verbinde den Computer mit dem Hotspot des Handys.",
+      "ice_failed_windows": "Keine direkte Verbindung zum Handy möglich. Verbinde Handy und Computer mit demselben WLAN oder verbinde den Computer mit dem Hotspot des Handys. Stelle außerdem sicher, dass die Windows-Firewall CamLooper in privaten Netzwerken zulässt.",
       "timeout": "Das Handy sendet kein Video mehr. Prüfe, ob die CamLooper-Remote-Seite noch geöffnet ist, und starte das Streaming erneut.",
       "generic": "Beim Handy-Stream ist etwas schiefgelaufen. Starte das Streaming auf deinem Handy erneut."
     },
     "dismiss": "Schließen",
     "expired": "Diese Anfrage ist bereits abgelaufen. Tippe auf deinem Handy erneut auf „Start streaming“.",
+    "offline": "CamLooper ist gerade nicht mit dem Handy-Dienst verbunden. Versuche es gleich noch einmal.",
+    "stoppedByPhone": "Das Handy hat das Streaming beendet.",
     "controlsLocked": "Dein Handy verwendet gerade die CamLooper-Kamera. Stoppe die Handykamera, um diese Steuerelemente zu verwenden."
   },
   "tray": {

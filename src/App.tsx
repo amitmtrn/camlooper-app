@@ -278,14 +278,17 @@ function CamLooper() {
 
   // Phone remote (Advanced → Phone remote). Networking lives in Rust: src-tauri/src/remote.
   const remote = useRemote();
-  const phoneStream = usePhoneStream();
+  const phoneStream = usePhoneStream({
+    // The phone's own Stop: back to idle with a neutral note, never an error.
+    onStoppedByPhone: () => toast(t('phoneStream.stoppedByPhone')),
+  });
   // While the phone streams, the backend refuses to start playback or the camera; grey the
   // controls and say why instead of letting the click fail.
   const phoneBusy = phoneOwnsCamera(phoneStream.status.state);
   const handlePhoneAccept = async (sessionId: string) => {
-    if (!(await phoneStream.accept(sessionId))) {
-      toast.error(t('phoneStream.expired'));
-    }
+    const result = await phoneStream.accept(sessionId);
+    if (result === 'expired') toast.error(t('phoneStream.expired'));
+    else if (result === 'offline') toast.warning(t('phoneStream.offline'));
   };
   const meeting = useMeeting();
   const remoteCardRef = React.useRef<RemoteCardHandle>(null);
