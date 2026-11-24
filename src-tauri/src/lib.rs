@@ -393,6 +393,8 @@ pub fn run() {
         // still reach this computer. Unlinked, close quits as before.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the window on a phone's "may I stream?" dialog is a "no".
+                remote::stream::commands::decline_pending_request();
                 if remote::is_linked() {
                     api.prevent_close();
                     let _ = window.hide();
@@ -427,6 +429,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            // Quitting (tray, app menu, last window closed) while a phone streams or waits
+            // for an answer: stop or decline first, so the phone is told. `tray::quit_app`
+            // exits for real once that is done.
+            if let tauri::RunEvent::ExitRequested { api, .. } = &_event {
+                if tray::defer_exit_for_phone_stream(_app) {
+                    api.prevent_exit();
+                }
+            }
             // macOS: clicking the Dock icon while the window is hidden brings it back.
             // (`Reopen` only exists on macOS.)
             #[cfg(target_os = "macos")]

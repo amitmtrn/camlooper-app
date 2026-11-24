@@ -5,6 +5,7 @@
 //! unlinked, close still quits as it always did. `--hidden` (passed by the autostart entry)
 //! starts without showing the window — unless nothing is linked, in which case hiding would
 //! leave the user with an icon and no explanation.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use once_cell::sync::OnceCell;
@@ -21,7 +22,8 @@ static STARTED_HIDDEN: OnceCell<bool> = OnceCell::new();
 pub struct TrayHandles {
     show: MenuItem<Wry>,
     link: MenuItem<Wry>,
-    /// "Stop phone camera": enabled only while a phone stream is connecting or live.
+    /// "Stop phone camera": enabled while the phone holds the camera (connecting, live, or a
+    /// stop that has not finished — a second click after a few seconds forces it).
     stop_phone: MenuItem<Wry>,
     autostart: CheckMenuItem<Wry>,
     quit: MenuItem<Wry>,
@@ -31,12 +33,36 @@ pub struct TrayHandles {
 /// What the tray shows for the phone stream; kept so a language change can re-apply the
 /// tooltip without waiting for the next stream transition.
 struct PhoneTrayState {
-    active: bool,
+    /// What the tray was last *successfully* switched to; `None` until the first update and
+    /// after a failed one, so the next status retries instead of trusting a stale flag.
+    applied: Option<PhoneTray>,
+    wanted: PhoneTray,
     live_tooltip: String,
+    connecting_tooltip: String,
+}
+
+/// The phone stream as the tray shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhoneTray {
+    Idle,
+    /// Accepted, no video yet: Stop works, but nothing is "live".
+    Connecting,
+    Live,
+    /// Shutting down: Stop stays available as the way out of a hung teardown.
+    Stopping,
+}
+
+impl PhoneTray {
+    fn stop_enabled(self) -> bool {
+        self != PhoneTray::Idle
+    }
 }
 
 const IDLE_TOOLTIP: &str = "CamLooper";
 const DEFAULT_LIVE_TOOLTIP: &str = "CamLooper — phone camera live";
+const DEFAULT_CONNECTING_TOOLTIP: &str = "CamLooper — connecting to the phone…";
+
+static QUITTING: AtomicBool = AtomicBool::new(false);
 
 pub fn init(app: &tauri::App) -> tauri::Result<()> {
     let hidden = std::env::args().skip(1).any(|a| a == HIDDEN_FLAG);
@@ -74,12 +100,17 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
                 let _ = app.emit("remote://show-linking", ());
             }
             "stop_phone" => {
-                tauri::async_runtime::spawn(async {
-                    let _ = crate::remote::stream::commands::remote_stream_stop().await;
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::remote::stream::commands::remote_stream_stop().await {
+                        // No window may be open to see it; the frontend toasts when it is.
+                        eprintln!("phone stream: stop from the tray failed: {e}");
+                        let _ = app.emit("remote://stream-stop-failed", e);
+                    }
                 });
             }
             "autostart" => crate::remote::toggle_autostart_from_tray(app),
-            "quit" => app.exit(0),
+            "quit" => quit_app(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -97,7 +128,12 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
         stop_phone,
         autostart,
         quit,
-        phone: Mutex::new(PhoneTrayState { active: false, live_tooltip: DEFAULT_LIVE_TOOLTIP.to_string() }),
+        phone: Mutex::new(PhoneTrayState {
+            applied: None,
+            wanted: PhoneTray::Idle,
+            live_tooltip: DEFAULT_LIVE_TOOLTIP.to_string(),
+            connecting_tooltip: DEFAULT_CONNECTING_TOOLTIP.to_string(),
+        }),
     });
 
     if !hidden || !crate::remote::is_linked() {
@@ -125,22 +161,82 @@ pub fn set_autostart_checked(app: &AppHandle, checked: bool) {
     }
 }
 
-/// Phone stream connecting/live: enable "Stop phone camera" and change the tooltip; idle
-/// reverts both. Cheap to call on every status update (only acts on a change).
-pub fn set_phone_stream_active(app: &AppHandle, active: bool) {
-    let Some(handles) = app.try_state::<TrayHandles>() else { return };
-    let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
-    if phone.active == active {
-        return;
+/// A phone asks to stream: put the window on screen and ask for attention, but do **not**
+/// take keyboard focus. Focus arriving mid-keystroke is how an Enter meant for another app
+/// would land on the confirm dialog. (Showing a hidden window may still activate it on some
+/// platforms; the dialog guards against that itself.)
+pub fn raise_main_window_for_request(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+        let _ = app.emit("app://shown", ());
     }
-    phone.active = active;
-    let _ = handles.stop_phone.set_enabled(active);
-    apply_tooltip(app, &phone);
 }
 
-fn apply_tooltip(app: &AppHandle, phone: &PhoneTrayState) {
-    if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(if phone.active { phone.live_tooltip.as_str() } else { IDLE_TOOLTIP }));
+/// The request was answered or went away: stop flashing the taskbar / bouncing the Dock.
+pub fn clear_attention(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.request_user_attention(None);
+    }
+}
+
+/// Quit from the tray (or the app menu): end a phone stream first — or decline a pending
+/// request — so the phone is told instead of being left to time out.
+pub fn quit_app(app: &AppHandle) {
+    if QUITTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        crate::remote::stream::commands::stop_for_exit().await;
+        app.exit(0);
+    });
+}
+
+/// For `RunEvent::ExitRequested`: `true` when the exit must wait for [`quit_app`] (which was
+/// just started); `false` when it may proceed (nothing to stop, or it is already under way).
+pub fn defer_exit_for_phone_stream(app: &AppHandle) -> bool {
+    if QUITTING.load(Ordering::SeqCst) || !crate::remote::stream::commands::stream_busy() {
+        return false;
+    }
+    quit_app(app);
+    true
+}
+
+/// Follow the phone stream: "Stop phone camera" enabled while the phone holds the camera,
+/// and a tooltip that says connecting or live. Cheap to call on every status update (only
+/// acts on a change), and a failed update is retried on the next call.
+pub fn set_phone_stream(app: &AppHandle, state: PhoneTray) {
+    let Some(handles) = app.try_state::<TrayHandles>() else { return };
+    let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
+    phone.wanted = state;
+    if phone.applied == Some(state) {
+        return;
+    }
+    let enabled = handles.stop_phone.set_enabled(state.stop_enabled());
+    let tooltip = apply_tooltip(app, &phone);
+    phone.applied = match enabled.and(tooltip) {
+        Ok(()) => Some(state),
+        Err(e) => {
+            eprintln!("tray: could not update the phone stream state: {e}");
+            None
+        }
+    };
+}
+
+fn tooltip_for(phone: &PhoneTrayState) -> &str {
+    match phone.wanted {
+        PhoneTray::Live => phone.live_tooltip.as_str(),
+        PhoneTray::Connecting => phone.connecting_tooltip.as_str(),
+        PhoneTray::Idle | PhoneTray::Stopping => IDLE_TOOLTIP,
+    }
+}
+
+fn apply_tooltip(app: &AppHandle, phone: &PhoneTrayState) -> tauri::Result<()> {
+    match app.tray_by_id("main") {
+        Some(tray) => tray.set_tooltip(Some(tooltip_for(phone))),
+        None => Ok(()),
     }
 }
 
@@ -171,29 +267,88 @@ pub struct TrayLabels {
     /// Tooltip while the phone camera is live.
     #[serde(default)]
     pub phone_live: Option<String>,
+    /// Tooltip between Accept and the first video frame.
+    #[serde(default)]
+    pub phone_connecting: Option<String>,
+}
+
+/// The first error of several independent updates, after all of them were attempted.
+fn first_error<E: std::fmt::Display>(results: impl IntoIterator<Item = Result<(), E>>) -> Result<(), String> {
+    let mut first = None;
+    for r in results {
+        if let Err(e) = r {
+            first.get_or_insert_with(|| e.to_string());
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 
 #[tauri::command]
 pub fn set_tray_labels(app: AppHandle, labels: TrayLabels) -> Result<(), String> {
     let handles = app.try_state::<TrayHandles>().ok_or("tray not initialised")?;
-    handles.show.set_text(&labels.show).map_err(|e| e.to_string())?;
-    handles.link.set_text(&labels.link).map_err(|e| e.to_string())?;
-    handles.autostart.set_text(&labels.autostart).map_err(|e| e.to_string())?;
-    handles.quit.set_text(&labels.quit).map_err(|e| e.to_string())?;
+    // Apply every label even if one fails: a half-translated menu with an untranslated
+    // tooltip is worse than one missing label.
+    let mut results = vec![
+        handles.show.set_text(&labels.show),
+        handles.link.set_text(&labels.link),
+        handles.autostart.set_text(&labels.autostart),
+        handles.quit.set_text(&labels.quit),
+    ];
     if let Some(text) = &labels.stop_phone {
-        handles.stop_phone.set_text(text).map_err(|e| e.to_string())?;
+        results.push(handles.stop_phone.set_text(text));
     }
-    if let Some(text) = labels.phone_live {
+    if labels.phone_live.is_some() || labels.phone_connecting.is_some() {
         let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
-        phone.live_tooltip = text;
-        apply_tooltip(&app, &phone);
+        if let Some(text) = labels.phone_live {
+            phone.live_tooltip = text;
+        }
+        if let Some(text) = labels.phone_connecting {
+            phone.connecting_tooltip = text;
+        }
+        results.push(apply_tooltip(&app, &phone));
     }
-    Ok(())
+    first_error(results)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::TrayLabels;
+    use super::{first_error, tooltip_for, PhoneTray, PhoneTrayState, TrayLabels, IDLE_TOOLTIP};
+
+    #[test]
+    fn every_label_is_attempted_and_the_first_error_reported() {
+        let mut attempted = 0;
+        let results = ["ok", "first", "ok", "second"].map(|r| {
+            attempted += 1;
+            if r == "ok" { Ok(()) } else { Err(r) }
+        });
+        assert_eq!(first_error(results), Err("first".to_string()));
+        assert_eq!(attempted, 4);
+        assert_eq!(first_error([Ok::<(), &str>(()), Ok(())]), Ok(()));
+    }
+
+    #[test]
+    fn the_tooltip_says_live_only_when_live() {
+        let mut phone = PhoneTrayState {
+            applied: None,
+            wanted: PhoneTray::Idle,
+            live_tooltip: "LIVE".into(),
+            connecting_tooltip: "CONNECTING".into(),
+        };
+        let mut seen = vec![];
+        for state in [PhoneTray::Idle, PhoneTray::Connecting, PhoneTray::Live, PhoneTray::Stopping] {
+            phone.wanted = state;
+            seen.push((tooltip_for(&phone).to_string(), state.stop_enabled()));
+        }
+        assert_eq!(
+            seen,
+            [
+                (IDLE_TOOLTIP.to_string(), false),
+                ("CONNECTING".to_string(), true),
+                ("LIVE".to_string(), true),
+                (IDLE_TOOLTIP.to_string(), true),
+            ]
+        );
+    }
 
     #[test]
     fn tray_labels_accept_old_and_new_payloads() {
@@ -202,12 +357,14 @@ mod tests {
             serde_json::from_str(r#"{"show":"S","link":"L","autostart":"A","quit":"Q"}"#).unwrap();
         assert_eq!(old.stop_phone, None);
         assert_eq!(old.phone_live, None);
+        assert_eq!(old.phone_connecting, None);
 
         let new: TrayLabels = serde_json::from_str(
-            r#"{"show":"S","link":"L","autostart":"A","quit":"Q","stopPhone":"Stop","phoneLive":"Live"}"#,
+            r#"{"show":"S","link":"L","autostart":"A","quit":"Q","stopPhone":"Stop","phoneLive":"Live","phoneConnecting":"Wait"}"#,
         )
         .unwrap();
         assert_eq!(new.stop_phone.as_deref(), Some("Stop"));
         assert_eq!(new.phone_live.as_deref(), Some("Live"));
+        assert_eq!(new.phone_connecting.as_deref(), Some("Wait"));
     }
 }
