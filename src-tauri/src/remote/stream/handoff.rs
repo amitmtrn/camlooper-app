@@ -56,6 +56,43 @@ impl Undo {
     }
 }
 
+/// How many early releases are remembered; see [`Claims::released_early`].
+const RELEASED_EARLY_KEPT: usize = 32;
+
+/// The claim on the camera, plus the sessions that were released before they claimed it.
+#[derive(Default, Debug)]
+struct Claims {
+    undo: Undo,
+    /// Sessions whose release found nothing of theirs to undo. Usually that is a session
+    /// whose acquire was refused. It can also be one that ended (a panic, say) before its
+    /// acquire — which runs in a task of its own — got as far as claiming: that acquire is
+    /// still on its way, and nobody is left to release what it would claim.
+    released_early: std::collections::VecDeque<u64>,
+}
+
+impl Claims {
+    /// [`Undo::claim`], refused as well for a session that was already released.
+    fn claim(&mut self, epoch: u64) -> Result<()> {
+        if let Some(i) = self.released_early.iter().position(|e| *e == epoch) {
+            self.released_early.remove(i);
+            return Err(anyhow!("the session ended before it took the camera"));
+        }
+        self.undo.claim(epoch)
+    }
+
+    /// [`Undo::take_for`]; a release with nothing to undo is remembered.
+    fn release(&mut self, epoch: u64) -> Option<Undo> {
+        let taken = self.undo.take_for(epoch);
+        if taken.is_none() && !self.released_early.contains(&epoch) {
+            if self.released_early.len() == RELEASED_EARLY_KEPT {
+                self.released_early.pop_front();
+            }
+            self.released_early.push_back(epoch);
+        }
+        taken
+    }
+}
+
 /// Clears the process-wide claim when dropped, so it is cleared even if stopping the camera
 /// panics: with the undo state already taken, nothing else would ever clear it, and video
 /// playback would be refused until the app is restarted.
@@ -69,13 +106,14 @@ impl Drop for ClaimGuard {
 
 #[derive(Default)]
 pub struct AppCamera {
-    undo: Mutex<Undo>,
+    claims: Mutex<Claims>,
 }
 
 impl AppCamera {
     async fn acquire_inner(&self, epoch: u64, cancel: Cancel) -> Result<CameraTarget> {
-        let mut undo = self.undo.lock().await;
-        undo.claim(epoch)?;
+        let mut claims = self.claims.lock().await;
+        claims.claim(epoch)?;
+        let undo = &mut claims.undo;
         // Claim first, look second: the in-app camera checks the claim under its own lock
         // before it starts (camera_capture::start_capture), so either it sees the claim and
         // refuses, or it started before and is seen here. Checking first would leave a window
@@ -136,10 +174,10 @@ impl CameraControl for AppCamera {
     fn release(&self, epoch: u64) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             // Waits for an acquire that is still running (it holds the lock throughout).
-            let mut undo = self.undo.lock().await;
-            let Some(u) = undo.take_for(epoch) else {
-                if undo.claimed {
-                    eprintln!("phone stream: session {epoch} never had the camera (session {} holds it); nothing to hand back", undo.epoch);
+            let mut claims = self.claims.lock().await;
+            let Some(u) = claims.release(epoch) else {
+                if claims.undo.claimed {
+                    eprintln!("phone stream: session {epoch} never had the camera (session {} holds it); nothing to hand back", claims.undo.epoch);
                 }
                 return;
             };
@@ -215,6 +253,35 @@ mod tests {
         assert_eq!(undo.take_for(2), None);
         assert!(undo.claimed && undo.stop_camera && undo.epoch == 3);
         assert!(undo.take_for(3).is_some());
+    }
+
+    #[test]
+    fn a_session_released_before_its_acquire_ran_cannot_claim_afterwards() {
+        let mut claims = Claims::default();
+        // S1 panicked before its prepare task reached the claim; the guard released it.
+        assert_eq!(claims.release(1), None);
+        // The late acquire is refused: nobody would ever release what it claims.
+        assert!(claims.claim(1).is_err());
+        assert!(!claims.undo.claimed);
+        // The next session is not affected, and its normal release is not remembered.
+        claims.claim(2).unwrap();
+        assert!(claims.release(2).is_some());
+        assert!(claims.released_early.is_empty());
+    }
+
+    #[test]
+    fn early_releases_are_remembered_within_bounds() {
+        let mut claims = Claims::default();
+        claims.claim(1).unwrap();
+        // Sessions refused while S1 holds the camera: each release finds nothing.
+        for epoch in 2..(2 + 2 * RELEASED_EARLY_KEPT as u64) {
+            assert!(claims.claim(epoch).is_err());
+            assert_eq!(claims.release(epoch), None);
+            assert_eq!(claims.release(epoch), None);
+        }
+        assert_eq!(claims.released_early.len(), RELEASED_EARLY_KEPT);
+        // S1 still holds its claim throughout.
+        assert!(claims.release(1).is_some());
     }
 
     #[test]
