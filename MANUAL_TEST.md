@@ -582,9 +582,9 @@ fields. Part A covers what needs eyes.
 - A dev build of the app (`npm run tauri:dev`) or an installed build, v4l2loopback loaded as
   in part B's setup, and a phone linked under **Advanced → Phone remote** (the card says
   "Linked with <phone>").
-- On the phone, the CamLooper phone stream page (not yet in this repo; for development run
-  `start-phone-tunnel.sh` from the phone-web project's `dev/` folder and open the printed
-  `https://….trycloudflare.com` URL in Chrome). Phone and computer on the **same Wi-Fi**.
+- On the phone, the CamLooper Remote page (`remote-web/`, not deployed yet): run
+  `remote-web/dev/start-phone-tunnel.sh` and open the printed `https://….trycloudflare.com`
+  URL in Chrome on the phone. Phone and computer on the **same Wi-Fi**.
 - Start a looping video in the app (step 3, "Loop") so you can see it pause and resume.
 
 **Steps:**
