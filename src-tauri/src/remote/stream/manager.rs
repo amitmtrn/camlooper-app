@@ -11,8 +11,8 @@ use super::machine::{Action, DecisionError, Machine, StreamRequest, StreamStatus
 use super::runner::{SessionCommand, SessionEvent};
 use super::signal::{parse_signal, parse_stop, OutboundFrame, StopReason};
 
-/// Where "may this phone stream?" goes. Task B's implementation shows a confirm dialog; the
-/// user's answer comes back through [`StreamManager::accept`] / [`StreamManager::reject`].
+/// Where "may this phone stream?" goes. The app's implementation (`commands::UiDecisions`)
+/// shows a confirm dialog; the user's answer comes back through [`StreamManager::accept`] / [`StreamManager::reject`].
 /// There is deliberately no auto-accept anywhere in the library: only the headless dev CLI
 /// (`examples/phone_stream_cli.rs`) accepts on its own.
 pub trait DecisionSink: Send + Sync {

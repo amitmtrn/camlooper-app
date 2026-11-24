@@ -171,12 +171,37 @@
       "timeoutTitle": "「参加」を自動でクリックできませんでした",
       "timeoutDesc": "会議ページは CamLooper のブラウザーウィンドウで開いています。そこから参加してください。",
       "failedTitle": "自動参加に失敗しました"
-    }
+    },
+    "streamHint": "スマホのカメラを配信：スマホで CamLooper Remote ページを開き、「Start streaming」をタップします。"
+  },
+  "phoneStream": {
+    "confirmTitle": "スマホをカメラとして使いますか？",
+    "confirmBody": "{{phone}} がカメラ映像を CamLooper に配信しようとしています。スマホの配信中は、現在の動画が一時停止します。",
+    "countdown": "{{seconds}} 秒後に自動的に拒否されます",
+    "accept": "許可",
+    "decline": "拒否",
+    "yourPhone": "あなたのスマホ",
+    "live": "スマホカメラ配信中",
+    "connecting": "{{phone}} に接続中…",
+    "stopping": "スマホカメラを停止中…",
+    "fps": "{{value}} fps",
+    "stop": "停止",
+    "errorTitle": "スマホカメラが停止しました。",
+    "errors": {
+      "ice_failed": "スマホに直接接続できませんでした。スマホとパソコンを同じ Wi-Fi に接続するか、パソコンをスマホのテザリングに接続してください。",
+      "timeout": "スマホから映像が届かなくなりました。スマホで CamLooper Remote ページが開いたままか確認し、もう一度配信を開始してください。",
+      "generic": "スマホの配信で問題が発生しました。スマホからもう一度配信を開始してください。"
+    },
+    "dismiss": "閉じる",
+    "expired": "このリクエストはすでに期限切れです。スマホでもう一度「Start streaming」をタップしてください。",
+    "controlsLocked": "スマホが CamLooper カメラを使用中です。これらの操作を使うには、スマホカメラを停止してください。"
   },
   "tray": {
     "show": "CamLooper を表示",
     "link": "スマホをリンク…",
     "autostart": "ログイン時に起動",
-    "quit": "終了"
+    "quit": "終了",
+    "stopPhone": "スマホカメラを停止",
+    "phoneLive": "CamLooper — スマホカメラ配信中"
   }
 }

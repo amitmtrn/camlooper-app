@@ -171,12 +171,37 @@
       "timeoutTitle": "Não foi possível clicar em Entrar automaticamente",
       "timeoutDesc": "A página da reunião está aberta na janela do navegador CamLooper; entre a partir daí.",
       "failedTitle": "A entrada automática falhou"
-    }
+    },
+    "streamHint": "Transmita a câmera do celular: abra a página do CamLooper Remote no celular e toque em \"Start streaming\"."
+  },
+  "phoneStream": {
+    "confirmTitle": "Usar seu celular como câmera?",
+    "confirmBody": "{{phone}} quer transmitir a câmera dele para o CamLooper. Seu vídeo atual será pausado enquanto o celular estiver ao vivo.",
+    "countdown": "Recusa automática em {{seconds}} s",
+    "accept": "Aceitar",
+    "decline": "Recusar",
+    "yourPhone": "Seu celular",
+    "live": "Câmera do celular ao vivo",
+    "connecting": "Conectando a {{phone}}…",
+    "stopping": "Parando a câmera do celular…",
+    "fps": "{{value}} fps",
+    "stop": "Parar",
+    "errorTitle": "A câmera do celular parou.",
+    "errors": {
+      "ice_failed": "Não foi possível conectar diretamente ao celular. Coloque o celular e o computador na mesma rede Wi-Fi ou conecte o computador ao roteador do celular.",
+      "timeout": "O celular parou de enviar vídeo. Verifique se ele ainda está na página do CamLooper Remote e inicie a transmissão de novo.",
+      "generic": "Algo deu errado na transmissão do celular. Inicie a transmissão de novo pelo celular."
+    },
+    "dismiss": "Fechar",
+    "expired": "Essa solicitação já expirou. Toque em \"Start streaming\" no celular novamente.",
+    "controlsLocked": "Seu celular está usando a câmera do CamLooper. Pare a câmera do celular para usar estes controles."
   },
   "tray": {
     "show": "Mostrar CamLooper",
     "link": "Vincular celular…",
     "autostart": "Iniciar ao fazer login",
-    "quit": "Sair"
+    "quit": "Sair",
+    "stopPhone": "Parar câmera do celular",
+    "phoneLive": "CamLooper — câmera do celular ao vivo"
   }
 }

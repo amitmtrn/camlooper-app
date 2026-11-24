@@ -171,12 +171,37 @@
       "timeoutTitle": "Impossible de cliquer sur Participer automatiquement",
       "timeoutDesc": "La page de la réunion est ouverte dans la fenêtre du navigateur CamLooper ; rejoignez-la depuis là.",
       "failedTitle": "Échec de la connexion automatique"
-    }
+    },
+    "streamHint": "Diffusez la caméra de votre téléphone : ouvrez la page CamLooper Remote sur le téléphone et touchez « Start streaming »."
+  },
+  "phoneStream": {
+    "confirmTitle": "Utiliser votre téléphone comme caméra ?",
+    "confirmBody": "{{phone}} souhaite diffuser sa caméra vers CamLooper. Votre vidéo actuelle sera mise en pause tant que le téléphone est en direct.",
+    "countdown": "Refus automatique dans {{seconds}} s",
+    "accept": "Accepter",
+    "decline": "Refuser",
+    "yourPhone": "Votre téléphone",
+    "live": "Caméra du téléphone en direct",
+    "connecting": "Connexion à {{phone}}…",
+    "stopping": "Arrêt de la caméra du téléphone…",
+    "fps": "{{value}} i/s",
+    "stop": "Arrêter",
+    "errorTitle": "La caméra du téléphone s'est arrêtée.",
+    "errors": {
+      "ice_failed": "Impossible de se connecter directement au téléphone. Mettez le téléphone et l'ordinateur sur le même Wi-Fi, ou connectez l'ordinateur au point d'accès du téléphone.",
+      "timeout": "Le téléphone n'envoie plus de vidéo. Vérifiez qu'il est toujours sur la page CamLooper Remote, puis relancez la diffusion.",
+      "generic": "Un problème est survenu avec la diffusion du téléphone. Relancez-la depuis votre téléphone."
+    },
+    "dismiss": "Fermer",
+    "expired": "Cette demande a déjà expiré. Touchez à nouveau « Start streaming » sur votre téléphone.",
+    "controlsLocked": "Votre téléphone utilise la caméra CamLooper. Arrêtez la caméra du téléphone pour utiliser ces commandes."
   },
   "tray": {
     "show": "Afficher CamLooper",
     "link": "Associer un téléphone…",
     "autostart": "Lancer à l'ouverture de session",
-    "quit": "Quitter"
+    "quit": "Quitter",
+    "stopPhone": "Arrêter la caméra du téléphone",
+    "phoneLive": "CamLooper — caméra du téléphone en direct"
   }
 }

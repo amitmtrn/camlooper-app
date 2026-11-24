@@ -563,14 +563,104 @@ builds them).
 
 <!-- Newest entries first. -->
 
-### Phone camera stream into v4l2 with the headless CLI (remote v2, phase 1)
-_Added 2026-11-24 · Linux · `src-tauri/src/remote/stream/`, `src-tauri/examples/phone_stream_cli.rs`_
+### Phone camera stream into v4l2: confirm dialog, live banner, stop, tray, headless CLI (remote v2, phase 1)
+_Added 2026-11-24 · Linux · `src-tauri/src/remote/stream/`, `src-tauri/examples/phone_stream_cli.rs`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`_
 
-A phone streams its camera over WebRTC and the stream becomes the v4l2loopback camera, with
-no app UI involved (the confirm dialog and stop button come with the UI task). The CLI
-accepts the first request by itself; the app never does.
+A phone streams its camera over WebRTC and the stream becomes the v4l2loopback camera. In
+the app the user must accept every request in a dialog; the headless CLI (part B) accepts
+the first request by itself and has no UI. The dialog, banner and tray item are the same
+code on Windows and macOS; only the camera sink differs.
 
-**Already automated, don't repeat by hand:** `cargo test --test phone_stream_loopback` runs a
+**Already automated, don't repeat by hand:** `cargo test --lib` covers the 60 s decision
+timeout, stale/cancelled requests, the error code behind the error banner (`last_error_code`
+= `ice_failed` etc.) and that the tray-label payload accepts the new `stopPhone`/`phoneLive`
+fields. Part A covers what needs eyes.
+
+#### Part A — in the app
+
+**Setup:**
+- A dev build of the app (`npm run tauri:dev`) or an installed build, v4l2loopback loaded as
+  in part B's setup, and a phone linked under **Advanced → Phone remote** (the card says
+  "Linked with <phone>").
+- On the phone, the CamLooper phone stream page (not yet in this repo; for development run
+  `start-phone-tunnel.sh` from the phone-web project's `dev/` folder and open the printed
+  `https://….trycloudflare.com` URL in Chrome). Phone and computer on the **same Wi-Fi**.
+- Start a looping video in the app (step 3, "Loop") so you can see it pause and resume.
+
+**Steps:**
+1. Open **Advanced** and look at the Phone remote card.
+2. Close the window (it hides to the tray because a phone is linked). On the phone tap
+   **Start streaming** and allow camera access.
+3. In the dialog, watch the countdown for 5 s, then click **Decline**.
+4. Tap **Start streaming** again; this time click nothing for 60 s.
+5. Tap **Start streaming** again and click **Accept**.
+6. While it is live, look at the step-3 card (**Jump in live** switch, **Record a new loop**)
+   and the **Advanced → Virtual camera → Enable virtual camera** switch. Open
+   `ffplay -f v4l2 /dev/video10`.
+7. Hover the tray icon and open the tray menu.
+8. Click **Stop** in the red banner.
+9. Repeat step 5, then stop from the tray menu with **Stop phone camera**.
+10. Put the phone on mobile data (Wi-Fi off), tap **Start streaming**, and click **Accept**.
+    Then, separately, repeat step 5 on Wi-Fi and switch the phone's Wi-Fi off while live.
+11. Switch the app language to **עברית** (Hebrew) and to **العربية** (Arabic) and repeat step 5.
+
+**Expected:**
+- Step 1: under "Linked with <phone>" a small grey line: "Stream your phone's camera: open
+  the CamLooper Remote page on your phone and tap Start streaming." No other change to the card.
+- Step 2: within ~3 s the main window reappears in front, focused, with a dialog "Use your
+  phone as the camera?" — body "<phone name> wants to stream its camera to CamLooper. Your
+  current video will be paused while the phone is live." — **Accept** (highlighted, has
+  keyboard focus) and **Decline**, and "Declines automatically in 5x s" counting down once a
+  second. The rest of the window is dimmed and not clickable. Debug logs show
+  `phone stream: request from <phone>`.
+- Step 3: the dialog closes; the phone shows that the computer declined. The loop keeps playing.
+- Step 4: the countdown reaches 0 and the dialog closes by itself (within ~1 s of 0); the
+  phone shows that the request timed out. Clicking nothing else is needed.
+- Step 5: the dialog closes, a red banner appears at the very top: spinner + "Connecting to
+  <phone>…" with a **Stop** button, then within a few seconds a pulsing red dot and "Phone
+  camera live · <phone> · 1280×720 · 30 fps · H.264 · 00:01", the clock counting up each
+  second. Resolution may start lower and climb (see gotchas); fps shows 24–31. The loop preview
+  stops updating.
+- Step 6: those controls are greyed out and the card shows "Your phone is using the
+  CamLooper camera. Stop the phone camera to use these controls." (Steps 1, 2 and the review
+  card do the same for **Start camera**, **Loop an existing video**, **Start recording** and
+  **Use this clip**.) ffplay shows the phone.
+- Step 7: the tray menu has **Stop phone camera** enabled (it is greyed out when nothing is
+  streaming). The tooltip reads "CamLooper — phone camera live" where the desktop shows
+  tray tooltips (see gotchas).
+- Step 8: the banner briefly says "Stopping the phone camera…", then disappears; the controls
+  are enabled again, the loop resumes in the preview and in ffplay, the phone returns to its
+  start screen.
+- Step 9: same as step 8, triggered from the tray; afterwards **Stop phone camera** is greyed
+  out again and the tooltip is back to "CamLooper".
+- Step 10, mobile data: "Connecting to <phone>…" for up to ~15 s, then the banner is replaced
+  by a red message that stays: "Phone camera stopped. Couldn't connect directly to the phone.
+  Put the phone and computer on the same Wi-Fi, or connect the computer to the phone's
+  hotspot." The **×** dismisses it; a new request also clears it. Wi-Fi off while live:
+  within ~10 s either the banner just disappears (the relay reported the phone offline — not
+  an error) or the message reads "…The phone stopped sending video…" (media timeout). Hovering
+  the message shows the technical detail as a tooltip.
+- Step 11: dialog and banner text are translated and laid out right-to-left (icon and title
+  on the right, buttons on the left); in the banner the "1280×720 · 30 fps · H.264 · 00:12"
+  part still reads left-to-right with no scrambled digits.
+
+**Known gotchas:**
+- Linux tray icons (AppIndicator) do not show tooltips at all; check the tooltip on Windows
+  or macOS. On GNOME without the AppIndicator extension there is no tray: the window then
+  never hides, and step 7/9 cannot be run.
+- If the window was hidden, some window managers raise it without giving it keyboard focus
+  (GNOME shows "CamLooper is ready" instead). The dialog is still there; that is not a failure.
+- There is no separate desktop notification; bringing the window forward is the alert.
+- Accepting may trigger one polkit prompt the first time (loading v4l2loopback), or one UAC
+  prompt on the Windows Store build (softcam registration).
+- If you click **Accept** in the last second, you may get the toast "That request has already
+  expired…" — the backend timed out first. Expected.
+- The phone page itself is English-only, so the translated hint and dialog name the phone's
+  button "Start streaming" in English.
+
+#### Part B — headless CLI (no app UI)
+
+**Also automated:** `cargo test --test phone_stream_loopback` runs a
 simulated phone through the real receiver and ffmpeg for H.264 and VP8 and requires ≥ 30
 decodable frames, also after a staged ffmpeg crash (restart + keyframe). `cargo test --lib` covers the signaling rules (busy, 60 s timeout, stale
 session ids) and the ffmpeg arguments per sink. These steps cover what needs a real phone,

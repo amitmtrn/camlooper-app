@@ -42,7 +42,7 @@ impl Phase {
     }
 }
 
-/// What the UI shows. Serialized camelCase for Task B's Tauri commands/events.
+/// What the UI shows. Serialized camelCase for the Tauri commands/events (`src/hooks/use-phone-stream.ts`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamStatus {
@@ -58,6 +58,9 @@ pub struct StreamStatus {
     /// Unix milliseconds when `state` was entered.
     pub since: Option<i64>,
     pub last_error: Option<String>,
+    /// The stop reason behind `last_error` (`ice_failed`, `timeout`, `error`, …) so the UI can
+    /// show translated, actionable text; `last_error` stays the technical detail for logs.
+    pub last_error_code: Option<String>,
 }
 
 impl Default for StreamStatus {
@@ -73,6 +76,7 @@ impl Default for StreamStatus {
             frames: 0,
             since: None,
             last_error: None,
+            last_error_code: None,
         }
     }
 }
@@ -162,10 +166,12 @@ impl Machine {
     }
 
     /// Back to idle (or error), forgetting the session.
-    fn finish(&mut self, error: Option<String>) {
+    fn finish(&mut self, error: Option<(StopReason, String)>) {
         self.session = None;
         let state = if error.is_some() { Phase::Error } else { Phase::Idle };
-        self.status = StreamStatus { state, last_error: error, since: Some(wall_ms()), ..StreamStatus::default() };
+        let (code, error) = error.map(|(r, e)| (r.as_str().to_string(), e)).unzip();
+        self.status =
+            StreamStatus { state, last_error: error, last_error_code: code, since: Some(wall_ms()), ..StreamStatus::default() };
     }
 
     fn is_current(&self, id: &str) -> bool {
@@ -400,13 +406,13 @@ impl Machine {
                 match requested {
                     // We (or the phone) asked for this stop; the phone already knows.
                     Some(_) => {
-                        self.finish(error.filter(|_| reason.is_failure()));
+                        self.finish(error.filter(|_| reason.is_failure()).map(|e| (reason, e)));
                         vec![]
                     }
                     // The session failed on its own (ICE, timeout, ffmpeg): tell the phone.
                     None => {
                         let message = error.unwrap_or_else(|| reason.to_string());
-                        self.finish(Some(message));
+                        self.finish(Some((reason.clone(), message)));
                         vec![Action::Send(OutboundFrame::StreamStop { session_id: id, reason })]
                     }
                 }
@@ -635,9 +641,11 @@ mod tests {
         assert_eq!(sent(&a), vec!["stop:ice_failed"]);
         assert_eq!(m.status().state, Phase::Error);
         assert_eq!(m.status().last_error.as_deref(), Some("no ICE connection"));
+        assert_eq!(m.status().last_error_code.as_deref(), Some("ice_failed"));
         // An error state does not block the next request.
         assert!(matches!(&m.on_signal(req("s2"), t)[..], [Action::AskUser(_)]));
         assert_eq!(m.status().last_error, None);
+        assert_eq!(m.status().last_error_code, None);
     }
 
     #[test]

@@ -213,12 +213,37 @@
       "timeoutTitle": "Couldn't click Join automatically",
       "timeoutDesc": "The meeting page is open in the CamLooper browser window; join from there.",
       "failedTitle": "Auto-join failed"
-    }
+    },
+    "streamHint": "Stream your phone's camera: open the CamLooper Remote page on your phone and tap Start streaming."
+  },
+  "phoneStream": {
+    "confirmTitle": "Use your phone as the camera?",
+    "confirmBody": "{{phone}} wants to stream its camera to CamLooper. Your current video will be paused while the phone is live.",
+    "countdown": "Declines automatically in {{seconds}} s",
+    "accept": "Accept",
+    "decline": "Decline",
+    "yourPhone": "Your phone",
+    "live": "Phone camera live",
+    "connecting": "Connecting to {{phone}}…",
+    "stopping": "Stopping the phone camera…",
+    "fps": "{{value}} fps",
+    "stop": "Stop",
+    "errorTitle": "Phone camera stopped.",
+    "errors": {
+      "ice_failed": "Couldn't connect directly to the phone. Put the phone and computer on the same Wi-Fi, or connect the computer to the phone's hotspot.",
+      "timeout": "The phone stopped sending video. Check that it is still on the CamLooper Remote page, then start streaming again.",
+      "generic": "Something went wrong with the phone stream. Start streaming again from your phone."
+    },
+    "dismiss": "Dismiss",
+    "expired": "That request has already expired. Tap Start streaming on your phone again.",
+    "controlsLocked": "Your phone is using the CamLooper camera. Stop the phone camera to use these controls."
   },
   "tray": {
     "show": "Show CamLooper",
     "link": "Link phone…",
     "autostart": "Start at login",
-    "quit": "Quit"
+    "quit": "Quit",
+    "stopPhone": "Stop phone camera",
+    "phoneLive": "CamLooper — phone camera live"
   }
 }

@@ -171,12 +171,37 @@
       "timeoutTitle": "참여 버튼을 자동으로 누르지 못했습니다",
       "timeoutDesc": "회의 페이지가 CamLooper 브라우저 창에 열려 있습니다. 거기서 참여하세요.",
       "failedTitle": "자동 참여 실패"
-    }
+    },
+    "streamHint": "휴대폰 카메라 스트리밍: 휴대폰에서 CamLooper Remote 페이지를 열고 \"Start streaming\"을 탭하세요."
+  },
+  "phoneStream": {
+    "confirmTitle": "휴대폰을 카메라로 사용할까요?",
+    "confirmBody": "{{phone}}에서 CamLooper로 카메라를 스트리밍하려고 합니다. 휴대폰이 라이브 중인 동안 현재 동영상은 일시 정지됩니다.",
+    "countdown": "{{seconds}}초 후 자동으로 거절됩니다",
+    "accept": "수락",
+    "decline": "거절",
+    "yourPhone": "내 휴대폰",
+    "live": "휴대폰 카메라 라이브",
+    "connecting": "{{phone}}에 연결하는 중…",
+    "stopping": "휴대폰 카메라를 중지하는 중…",
+    "fps": "{{value}} fps",
+    "stop": "중지",
+    "errorTitle": "휴대폰 카메라가 중지되었습니다.",
+    "errors": {
+      "ice_failed": "휴대폰에 직접 연결할 수 없습니다. 휴대폰과 컴퓨터를 같은 Wi-Fi에 연결하거나 컴퓨터를 휴대폰의 핫스팟에 연결하세요.",
+      "timeout": "휴대폰에서 영상이 더 이상 오지 않습니다. 휴대폰에 CamLooper Remote 페이지가 열려 있는지 확인한 뒤 스트리밍을 다시 시작하세요.",
+      "generic": "휴대폰 스트리밍에 문제가 발생했습니다. 휴대폰에서 스트리밍을 다시 시작하세요."
+    },
+    "dismiss": "닫기",
+    "expired": "이 요청은 이미 만료되었습니다. 휴대폰에서 \"Start streaming\"을 다시 탭하세요.",
+    "controlsLocked": "휴대폰이 CamLooper 카메라를 사용 중입니다. 이 컨트롤을 사용하려면 휴대폰 카메라를 중지하세요."
   },
   "tray": {
     "show": "CamLooper 표시",
     "link": "휴대폰 연결…",
     "autostart": "로그인 시 시작",
-    "quit": "종료"
+    "quit": "종료",
+    "stopPhone": "휴대폰 카메라 중지",
+    "phoneLive": "CamLooper — 휴대폰 카메라 라이브"
   }
 }

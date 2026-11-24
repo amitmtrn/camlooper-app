@@ -42,6 +42,8 @@ import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { useWindowShown } from "./hooks/use-window-shown";
 import { useRemote, useRemoteCommands, type OpenMeetingCommand } from "./hooks/use-remote";
 import { RemoteCard, type RemoteCardHandle } from "./components/RemoteCard";
+import { usePhoneStream, phoneOwnsCamera } from "./hooks/use-phone-stream";
+import { PhoneStreamBanner, PhoneStreamDialog } from "./components/PhoneStream";
 import { useMeeting, useMeetingStatus } from "@/hooks/use-meeting";
 import { Stepper } from "./components/flow/Stepper";
 import { SUPPORTED_LANGUAGES, loadLanguage } from "./i18n";
@@ -276,6 +278,15 @@ function CamLooper() {
 
   // Phone remote (Advanced → Phone remote). Networking lives in Rust: src-tauri/src/remote.
   const remote = useRemote();
+  const phoneStream = usePhoneStream();
+  // While the phone streams, the backend refuses to start playback or the camera; grey the
+  // controls and say why instead of letting the click fail.
+  const phoneBusy = phoneOwnsCamera(phoneStream.status.state);
+  const handlePhoneAccept = async (sessionId: string) => {
+    if (!(await phoneStream.accept(sessionId))) {
+      toast.error(t('phoneStream.expired'));
+    }
+  };
   const meeting = useMeeting();
   const remoteCardRef = React.useRef<RemoteCardHandle>(null);
   const [linkingRequest, setLinkingRequest] = useState(0);
@@ -916,7 +927,14 @@ function CamLooper() {
   useEffect(() => {
     const push = () => {
       void invoke('set_tray_labels', {
-        labels: { show: t('tray.show'), link: t('tray.link'), autostart: t('tray.autostart'), quit: t('tray.quit') },
+        labels: {
+          show: t('tray.show'),
+          link: t('tray.link'),
+          autostart: t('tray.autostart'),
+          quit: t('tray.quit'),
+          stopPhone: t('tray.stopPhone'),
+          phoneLive: t('tray.phoneLive'),
+        },
       }).catch(() => {
         /* no tray (e.g. GNOME without the AppIndicator extension) — nothing to label */
       });
@@ -1240,6 +1258,19 @@ function CamLooper() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <PhoneStreamBanner
+        status={phoneStream.status}
+        error={phoneStream.error}
+        onStop={() => void phoneStream.stop()}
+        onDismissError={phoneStream.dismissError}
+      />
+      {phoneStream.request && (
+        <PhoneStreamDialog
+          request={phoneStream.request}
+          onAccept={(id) => void handlePhoneAccept(id)}
+          onDecline={(id) => void phoneStream.reject(id)}
+        />
+      )}
       {macExtensionPending && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 backdrop-blur-sm p-6"
@@ -1447,7 +1478,7 @@ function CamLooper() {
                 variant="hero"
                 className="w-full"
                 onClick={startLiveCamera}
-                disabled={isLiveLoading || liveDevices.length === 0}
+                disabled={isLiveLoading || liveDevices.length === 0 || phoneBusy}
               >
                 {isLiveLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Camera className="h-4 w-4 mr-2" />}
                 {t('step1.startCamera')}
@@ -1461,11 +1492,15 @@ function CamLooper() {
             <button
               type="button"
               onClick={triggerFileInput}
-              className="w-full text-xs text-muted-foreground hover:text-primary transition-colors inline-flex items-center justify-center gap-1"
+              disabled={phoneBusy}
+              className="w-full text-xs text-muted-foreground hover:text-primary transition-colors inline-flex items-center justify-center gap-1 disabled:opacity-40 disabled:pointer-events-none"
             >
               <Upload className="h-3 w-3" /> {t('step1.loopExisting')}
             </button>
 
+            {phoneBusy && (
+              <p className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">{t('phoneStream.controlsLocked')}</p>
+            )}
             {uploadError && (
               <div className="p-3 bg-red-500/20 text-red-400 border border-red-500/40 rounded text-sm">
                 {uploadError}
@@ -1485,7 +1520,7 @@ function CamLooper() {
             </div>
 
             {!isLiveRecording ? (
-              <Button variant="destructive" className="w-full" onClick={handleStartRecording}>
+              <Button variant="destructive" className="w-full" onClick={handleStartRecording} disabled={phoneBusy}>
                 <Circle className="h-4 w-4 mr-2 fill-current" /> {t('step2.start')}
               </Button>
             ) : (
@@ -1502,6 +1537,9 @@ function CamLooper() {
             >
               {t('step2.back')}
             </button>
+            {phoneBusy && (
+              <p className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">{t('phoneStream.controlsLocked')}</p>
+            )}
           </Card>
         )}
 
@@ -1518,10 +1556,13 @@ function CamLooper() {
               <Button variant="outline" className="flex-1" onClick={handleRetake}>
                 <RotateCcw className="h-4 w-4 mr-2" /> {t('review.retake')}
               </Button>
-              <Button variant="hero" className="flex-1" onClick={handleUseClip}>
+              <Button variant="hero" className="flex-1" onClick={handleUseClip} disabled={phoneBusy}>
                 {t('review.use')} <ArrowRight className="h-4 w-4 ml-2" />
               </Button>
             </div>
+            {phoneBusy && (
+              <p className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">{t('phoneStream.controlsLocked')}</p>
+            )}
           </Card>
         )}
 
@@ -1546,6 +1587,10 @@ function CamLooper() {
               </div>
             </div>
 
+            {phoneBusy && (
+              <p className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">{t('phoneStream.controlsLocked')}</p>
+            )}
+
             {/* Jump between the loop and the real camera on the fly */}
             <div className="flex items-center justify-between rounded-lg border border-border p-3">
               <div className="pe-3">
@@ -1560,12 +1605,12 @@ function CamLooper() {
               <Switch
                 checked={isLiveCamera}
                 onCheckedChange={handleGoLiveToggle}
-                disabled={isLiveLoading}
+                disabled={isLiveLoading || phoneBusy}
               />
             </div>
 
             <div className="flex flex-col gap-2">
-              <Button variant="outline" className="flex-1" onClick={handleRecordNewLoop}>
+              <Button variant="outline" className="flex-1" onClick={handleRecordNewLoop} disabled={phoneBusy}>
                 <RotateCcw className="h-4 w-4 mr-2" /> {t('loop.recordNew')}
               </Button>
               <Button variant="ghost" className="flex-1" onClick={handleStopEverything}>
@@ -1609,7 +1654,7 @@ function CamLooper() {
                       <Switch
                         checked={isVirtualCamActive}
                         onCheckedChange={handleVirtualCameraToggle}
-                        disabled={isVirtualCamLoading}
+                        disabled={isVirtualCamLoading || phoneBusy}
                       />
                     </div>
 

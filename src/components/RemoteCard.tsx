@@ -162,6 +162,8 @@ export const RemoteCard = forwardRef<RemoteCardHandle, RemoteCardProps>(function
               )}
             </div>
 
+            <p className="text-xs text-muted-foreground">{t("remote.streamHint")}</p>
+
             <p className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">{t("remote.trayHint")}</p>
 
             <div className="flex flex-wrap gap-2">

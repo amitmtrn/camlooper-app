@@ -171,12 +171,37 @@
       "timeoutTitle": "Không thể tự động bấm Tham gia",
       "timeoutDesc": "Trang cuộc họp đang mở trong cửa sổ trình duyệt CamLooper; hãy tham gia từ đó.",
       "failedTitle": "Tự động tham gia thất bại"
-    }
+    },
+    "streamHint": "Truyền camera điện thoại: mở trang CamLooper Remote trên điện thoại và nhấn \"Start streaming\"."
+  },
+  "phoneStream": {
+    "confirmTitle": "Dùng điện thoại của bạn làm camera?",
+    "confirmBody": "{{phone}} muốn truyền camera của nó tới CamLooper. Video hiện tại của bạn sẽ tạm dừng khi điện thoại đang phát trực tiếp.",
+    "countdown": "Tự động từ chối sau {{seconds}} giây",
+    "accept": "Chấp nhận",
+    "decline": "Từ chối",
+    "yourPhone": "Điện thoại của bạn",
+    "live": "Camera điện thoại đang phát",
+    "connecting": "Đang kết nối với {{phone}}…",
+    "stopping": "Đang dừng camera điện thoại…",
+    "fps": "{{value}} fps",
+    "stop": "Dừng",
+    "errorTitle": "Camera điện thoại đã dừng.",
+    "errors": {
+      "ice_failed": "Không thể kết nối trực tiếp với điện thoại. Hãy kết nối điện thoại và máy tính vào cùng một mạng Wi-Fi, hoặc kết nối máy tính với điểm phát sóng của điện thoại.",
+      "timeout": "Điện thoại đã ngừng gửi video. Kiểm tra xem điện thoại vẫn đang mở trang CamLooper Remote, rồi bắt đầu truyền lại.",
+      "generic": "Đã xảy ra lỗi khi truyền từ điện thoại. Hãy bắt đầu truyền lại từ điện thoại của bạn."
+    },
+    "dismiss": "Đóng",
+    "expired": "Yêu cầu đó đã hết hạn. Hãy nhấn \"Start streaming\" trên điện thoại một lần nữa.",
+    "controlsLocked": "Điện thoại của bạn đang dùng camera CamLooper. Hãy dừng camera điện thoại để dùng các điều khiển này."
   },
   "tray": {
     "show": "Hiện CamLooper",
     "link": "Liên kết điện thoại…",
     "autostart": "Khởi động khi đăng nhập",
-    "quit": "Thoát"
+    "quit": "Thoát",
+    "stopPhone": "Dừng camera điện thoại",
+    "phoneLive": "CamLooper — camera điện thoại đang phát"
   }
 }

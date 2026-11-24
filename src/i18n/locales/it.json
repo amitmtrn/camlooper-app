@@ -171,12 +171,37 @@
       "timeoutTitle": "Impossibile fare clic su Partecipa automaticamente",
       "timeoutDesc": "La pagina della riunione è aperta nella finestra del browser CamLooper; partecipa da lì.",
       "failedTitle": "Partecipazione automatica non riuscita"
-    }
+    },
+    "streamHint": "Trasmetti la fotocamera del telefono: apri la pagina CamLooper Remote sul telefono e tocca \"Start streaming\"."
+  },
+  "phoneStream": {
+    "confirmTitle": "Usare il telefono come fotocamera?",
+    "confirmBody": "{{phone}} vuole trasmettere la sua fotocamera a CamLooper. Il video attuale verrà messo in pausa finché il telefono è in diretta.",
+    "countdown": "Rifiuto automatico tra {{seconds}} s",
+    "accept": "Accetta",
+    "decline": "Rifiuta",
+    "yourPhone": "Il tuo telefono",
+    "live": "Fotocamera del telefono in diretta",
+    "connecting": "Connessione a {{phone}}…",
+    "stopping": "Arresto della fotocamera del telefono…",
+    "fps": "{{value}} fps",
+    "stop": "Interrompi",
+    "errorTitle": "Fotocamera del telefono interrotta.",
+    "errors": {
+      "ice_failed": "Impossibile connettersi direttamente al telefono. Collega telefono e computer alla stessa rete Wi-Fi, oppure collega il computer all'hotspot del telefono.",
+      "timeout": "Il telefono ha smesso di inviare video. Controlla che sia ancora sulla pagina CamLooper Remote, poi riavvia lo streaming.",
+      "generic": "Qualcosa è andato storto con lo streaming del telefono. Riavvialo dal telefono."
+    },
+    "dismiss": "Chiudi",
+    "expired": "La richiesta è già scaduta. Tocca di nuovo \"Start streaming\" sul telefono.",
+    "controlsLocked": "Il telefono sta usando la fotocamera di CamLooper. Interrompi la fotocamera del telefono per usare questi comandi."
   },
   "tray": {
     "show": "Mostra CamLooper",
     "link": "Collega telefono…",
     "autostart": "Avvia all'accesso",
-    "quit": "Esci"
+    "quit": "Esci",
+    "stopPhone": "Interrompi fotocamera del telefono",
+    "phoneLive": "CamLooper — fotocamera del telefono in diretta"
   }
 }

@@ -171,12 +171,37 @@
       "timeoutTitle": "„Teilnehmen“ konnte nicht automatisch geklickt werden",
       "timeoutDesc": "Die Meeting-Seite ist im CamLooper-Browserfenster geöffnet; tritt dort bei.",
       "failedTitle": "Automatischer Beitritt fehlgeschlagen"
-    }
+    },
+    "streamHint": "Kamera deines Handys streamen: Öffne auf dem Handy die CamLooper-Remote-Seite und tippe auf „Start streaming“."
+  },
+  "phoneStream": {
+    "confirmTitle": "Dein Handy als Kamera verwenden?",
+    "confirmBody": "{{phone}} möchte seine Kamera an CamLooper streamen. Dein aktuelles Video wird pausiert, solange das Handy live ist.",
+    "countdown": "Wird in {{seconds}} s automatisch abgelehnt",
+    "accept": "Annehmen",
+    "decline": "Ablehnen",
+    "yourPhone": "Dein Handy",
+    "live": "Handykamera live",
+    "connecting": "Verbinde mit {{phone}}…",
+    "stopping": "Handykamera wird gestoppt…",
+    "fps": "{{value}} fps",
+    "stop": "Stopp",
+    "errorTitle": "Handykamera gestoppt.",
+    "errors": {
+      "ice_failed": "Keine direkte Verbindung zum Handy möglich. Verbinde Handy und Computer mit demselben WLAN oder verbinde den Computer mit dem Hotspot des Handys.",
+      "timeout": "Das Handy sendet kein Video mehr. Prüfe, ob die CamLooper-Remote-Seite noch geöffnet ist, und starte das Streaming erneut.",
+      "generic": "Beim Handy-Stream ist etwas schiefgelaufen. Starte das Streaming auf deinem Handy erneut."
+    },
+    "dismiss": "Schließen",
+    "expired": "Diese Anfrage ist bereits abgelaufen. Tippe auf deinem Handy erneut auf „Start streaming“.",
+    "controlsLocked": "Dein Handy verwendet gerade die CamLooper-Kamera. Stoppe die Handykamera, um diese Steuerelemente zu verwenden."
   },
   "tray": {
     "show": "CamLooper anzeigen",
     "link": "Handy verknüpfen…",
     "autostart": "Bei der Anmeldung starten",
-    "quit": "Beenden"
+    "quit": "Beenden",
+    "stopPhone": "Handykamera stoppen",
+    "phoneLive": "CamLooper — Handykamera live"
   }
 }

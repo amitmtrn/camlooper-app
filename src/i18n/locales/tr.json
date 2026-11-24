@@ -171,12 +171,37 @@
       "timeoutTitle": "Katıl otomatik olarak tıklanamadı",
       "timeoutDesc": "Toplantı sayfası CamLooper tarayıcı penceresinde açık; oradan katılın.",
       "failedTitle": "Otomatik katılım başarısız oldu"
-    }
+    },
+    "streamHint": "Telefonunuzun kamerasını yayınlayın: telefonda CamLooper Remote sayfasını açıp \"Start streaming\"e dokunun."
+  },
+  "phoneStream": {
+    "confirmTitle": "Telefonunuz kamera olarak kullanılsın mı?",
+    "confirmBody": "{{phone}}, kamerasını CamLooper'a yayınlamak istiyor. Telefon yayındayken mevcut videonuz duraklatılır.",
+    "countdown": "{{seconds}} sn içinde otomatik olarak reddedilecek",
+    "accept": "Kabul et",
+    "decline": "Reddet",
+    "yourPhone": "Telefonunuz",
+    "live": "Telefon kamerası yayında",
+    "connecting": "{{phone}} cihazına bağlanılıyor…",
+    "stopping": "Telefon kamerası durduruluyor…",
+    "fps": "{{value}} fps",
+    "stop": "Durdur",
+    "errorTitle": "Telefon kamerası durdu.",
+    "errors": {
+      "ice_failed": "Telefona doğrudan bağlanılamadı. Telefonu ve bilgisayarı aynı Wi-Fi ağına bağlayın veya bilgisayarı telefonun hotspot'una bağlayın.",
+      "timeout": "Telefon video göndermeyi bıraktı. Telefonun hâlâ CamLooper Remote sayfasında olduğunu kontrol edip yayını yeniden başlatın.",
+      "generic": "Telefon yayınında bir sorun oluştu. Yayını telefonunuzdan yeniden başlatın."
+    },
+    "dismiss": "Kapat",
+    "expired": "Bu isteğin süresi zaten doldu. Telefonunuzda \"Start streaming\"e yeniden dokunun.",
+    "controlsLocked": "Telefonunuz CamLooper kamerasını kullanıyor. Bu denetimleri kullanmak için telefon kamerasını durdurun."
   },
   "tray": {
     "show": "CamLooper'ı göster",
     "link": "Telefon bağla…",
     "autostart": "Oturum açıldığında başlat",
-    "quit": "Çıkış"
+    "quit": "Çıkış",
+    "stopPhone": "Telefon kamerasını durdur",
+    "phoneLive": "CamLooper — telefon kamerası yayında"
   }
 }

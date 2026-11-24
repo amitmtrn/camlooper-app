@@ -5,6 +5,8 @@
 //! unlinked, close still quits as it always did. `--hidden` (passed by the autostart entry)
 //! starts without showing the window — unless nothing is linked, in which case hiding would
 //! leave the user with an icon and no explanation.
+use std::sync::Mutex;
+
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -19,9 +21,22 @@ static STARTED_HIDDEN: OnceCell<bool> = OnceCell::new();
 pub struct TrayHandles {
     show: MenuItem<Wry>,
     link: MenuItem<Wry>,
+    /// "Stop phone camera": enabled only while a phone stream is connecting or live.
+    stop_phone: MenuItem<Wry>,
     autostart: CheckMenuItem<Wry>,
     quit: MenuItem<Wry>,
+    phone: Mutex<PhoneTrayState>,
 }
+
+/// What the tray shows for the phone stream; kept so a language change can re-apply the
+/// tooltip without waiting for the next stream transition.
+struct PhoneTrayState {
+    active: bool,
+    live_tooltip: String,
+}
+
+const IDLE_TOOLTIP: &str = "CamLooper";
+const DEFAULT_LIVE_TOOLTIP: &str = "CamLooper — phone camera live";
 
 pub fn init(app: &tauri::App) -> tauri::Result<()> {
     let hidden = std::env::args().skip(1).any(|a| a == HIDDEN_FLAG);
@@ -32,6 +47,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
     // English defaults; the frontend pushes translated labels via `set_tray_labels`.
     let show = MenuItem::with_id(handle, "show", "Show CamLooper", true, None::<&str>)?;
     let link = MenuItem::with_id(handle, "link", "Link phone…", true, None::<&str>)?;
+    let stop_phone = MenuItem::with_id(handle, "stop_phone", "Stop phone camera", false, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(handle, "autostart", "Start at login", true, autostart_on, None::<&str>)?;
     let quit = MenuItem::with_id(handle, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -39,6 +55,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
         &[
             &show,
             &link,
+            &stop_phone,
             &PredefinedMenuItem::separator(handle)?,
             &autostart,
             &PredefinedMenuItem::separator(handle)?,
@@ -47,7 +64,7 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
     )?;
 
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("CamLooper")
+        .tooltip(IDLE_TOOLTIP)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -55,6 +72,11 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
             "link" => {
                 show_main_window(app);
                 let _ = app.emit("remote://show-linking", ());
+            }
+            "stop_phone" => {
+                tauri::async_runtime::spawn(async {
+                    let _ = crate::remote::stream::commands::remote_stream_stop().await;
+                });
             }
             "autostart" => crate::remote::toggle_autostart_from_tray(app),
             "quit" => app.exit(0),
@@ -69,7 +91,14 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
         builder = builder.icon(icon);
     }
     builder.build(app)?;
-    app.manage(TrayHandles { show, link, autostart, quit });
+    app.manage(TrayHandles {
+        show,
+        link,
+        stop_phone,
+        autostart,
+        quit,
+        phone: Mutex::new(PhoneTrayState { active: false, live_tooltip: DEFAULT_LIVE_TOOLTIP.to_string() }),
+    });
 
     if !hidden || !crate::remote::is_linked() {
         show_main_window(handle);
@@ -96,6 +125,25 @@ pub fn set_autostart_checked(app: &AppHandle, checked: bool) {
     }
 }
 
+/// Phone stream connecting/live: enable "Stop phone camera" and change the tooltip; idle
+/// reverts both. Cheap to call on every status update (only acts on a change).
+pub fn set_phone_stream_active(app: &AppHandle, active: bool) {
+    let Some(handles) = app.try_state::<TrayHandles>() else { return };
+    let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
+    if phone.active == active {
+        return;
+    }
+    phone.active = active;
+    let _ = handles.stop_phone.set_enabled(active);
+    apply_tooltip(app, &phone);
+}
+
+fn apply_tooltip(app: &AppHandle, phone: &PhoneTrayState) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(if phone.active { phone.live_tooltip.as_str() } else { IDLE_TOOLTIP }));
+    }
+}
+
 pub fn autostart_checked(app: &AppHandle) -> Option<bool> {
     app.try_state::<TrayHandles>().and_then(|h| h.autostart.is_checked().ok())
 }
@@ -112,11 +160,17 @@ pub fn get_startup_mode() -> &'static str {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TrayLabels {
     pub show: String,
     pub link: String,
     pub autostart: String,
     pub quit: String,
+    #[serde(default)]
+    pub stop_phone: Option<String>,
+    /// Tooltip while the phone camera is live.
+    #[serde(default)]
+    pub phone_live: Option<String>,
 }
 
 #[tauri::command]
@@ -126,5 +180,34 @@ pub fn set_tray_labels(app: AppHandle, labels: TrayLabels) -> Result<(), String>
     handles.link.set_text(&labels.link).map_err(|e| e.to_string())?;
     handles.autostart.set_text(&labels.autostart).map_err(|e| e.to_string())?;
     handles.quit.set_text(&labels.quit).map_err(|e| e.to_string())?;
+    if let Some(text) = &labels.stop_phone {
+        handles.stop_phone.set_text(text).map_err(|e| e.to_string())?;
+    }
+    if let Some(text) = labels.phone_live {
+        let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
+        phone.live_tooltip = text;
+        apply_tooltip(&app, &phone);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TrayLabels;
+
+    #[test]
+    fn tray_labels_accept_old_and_new_payloads() {
+        // An older frontend sends only the four menu labels.
+        let old: TrayLabels =
+            serde_json::from_str(r#"{"show":"S","link":"L","autostart":"A","quit":"Q"}"#).unwrap();
+        assert_eq!(old.stop_phone, None);
+        assert_eq!(old.phone_live, None);
+
+        let new: TrayLabels = serde_json::from_str(
+            r#"{"show":"S","link":"L","autostart":"A","quit":"Q","stopPhone":"Stop","phoneLive":"Live"}"#,
+        )
+        .unwrap();
+        assert_eq!(new.stop_phone.as_deref(), Some("Stop"));
+        assert_eq!(new.phone_live.as_deref(), Some("Live"));
+    }
 }

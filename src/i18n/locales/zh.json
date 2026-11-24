@@ -171,12 +171,37 @@
       "timeoutTitle": "无法自动点击“加入”",
       "timeoutDesc": "会议页面已在 CamLooper 浏览器窗口中打开，请从那里加入。",
       "failedTitle": "自动加入失败"
-    }
+    },
+    "streamHint": "推流手机摄像头：在手机上打开 CamLooper Remote 页面并点按“Start streaming”。"
+  },
+  "phoneStream": {
+    "confirmTitle": "用你的手机作为摄像头？",
+    "confirmBody": "{{phone}} 想把它的摄像头画面推流到 CamLooper。手机直播期间，你当前的视频会暂停。",
+    "countdown": "{{seconds}} 秒后自动拒绝",
+    "accept": "接受",
+    "decline": "拒绝",
+    "yourPhone": "你的手机",
+    "live": "手机摄像头直播中",
+    "connecting": "正在连接 {{phone}}…",
+    "stopping": "正在停止手机摄像头…",
+    "fps": "{{value}} fps",
+    "stop": "停止",
+    "errorTitle": "手机摄像头已停止。",
+    "errors": {
+      "ice_failed": "无法直接连接到手机。请让手机和电脑连接同一个 Wi-Fi，或让电脑连接手机的热点。",
+      "timeout": "手机已停止发送视频。请确认手机仍停留在 CamLooper Remote 页面，然后重新开始推流。",
+      "generic": "手机推流出现问题。请在手机上重新开始推流。"
+    },
+    "dismiss": "关闭",
+    "expired": "该请求已过期。请在手机上再次点按“Start streaming”。",
+    "controlsLocked": "你的手机正在使用 CamLooper 摄像头。停止手机摄像头后才能使用这些控件。"
   },
   "tray": {
     "show": "显示 CamLooper",
     "link": "关联手机…",
     "autostart": "登录时启动",
-    "quit": "退出"
+    "quit": "退出",
+    "stopPhone": "停止手机摄像头",
+    "phoneLive": "CamLooper — 手机摄像头直播中"
   }
 }

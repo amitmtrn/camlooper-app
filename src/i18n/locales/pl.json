@@ -173,12 +173,37 @@
       "timeoutTitle": "Nie udało się automatycznie kliknąć Dołącz",
       "timeoutDesc": "Strona spotkania jest otwarta w oknie przeglądarki CamLooper; dołącz stamtąd.",
       "failedTitle": "Automatyczne dołączanie nie powiodło się"
-    }
+    },
+    "streamHint": "Przesyłaj obraz z kamery telefonu: otwórz na telefonie stronę CamLooper Remote i dotknij „Start streaming”."
+  },
+  "phoneStream": {
+    "confirmTitle": "Użyć telefonu jako kamery?",
+    "confirmBody": "{{phone}} chce przesyłać obraz z kamery do CamLooper. Bieżące wideo zostanie wstrzymane, dopóki telefon nadaje na żywo.",
+    "countdown": "Automatyczne odrzucenie za {{seconds}} s",
+    "accept": "Akceptuj",
+    "decline": "Odrzuć",
+    "yourPhone": "Twój telefon",
+    "live": "Kamera telefonu na żywo",
+    "connecting": "Łączenie z {{phone}}…",
+    "stopping": "Zatrzymywanie kamery telefonu…",
+    "fps": "{{value}} kl./s",
+    "stop": "Zatrzymaj",
+    "errorTitle": "Kamera telefonu została zatrzymana.",
+    "errors": {
+      "ice_failed": "Nie udało się połączyć bezpośrednio z telefonem. Podłącz telefon i komputer do tej samej sieci Wi-Fi albo połącz komputer z hotspotem telefonu.",
+      "timeout": "Telefon przestał wysyłać obraz. Sprawdź, czy wciąż jest otwarta strona CamLooper Remote, i ponownie rozpocznij przesyłanie.",
+      "generic": "Coś poszło nie tak z przesyłaniem z telefonu. Rozpocznij je ponownie na telefonie."
+    },
+    "dismiss": "Zamknij",
+    "expired": "Ta prośba już wygasła. Dotknij ponownie „Start streaming” na telefonie.",
+    "controlsLocked": "Telefon używa kamery CamLooper. Zatrzymaj kamerę telefonu, aby użyć tych elementów sterujących."
   },
   "tray": {
     "show": "Pokaż CamLooper",
     "link": "Powiąż telefon…",
     "autostart": "Uruchamiaj przy logowaniu",
-    "quit": "Zakończ"
+    "quit": "Zakończ",
+    "stopPhone": "Zatrzymaj kamerę telefonu",
+    "phoneLive": "CamLooper — kamera telefonu na żywo"
   }
 }

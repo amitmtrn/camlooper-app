@@ -1,6 +1,7 @@
 //! Tauri glue for the phone stream: the app-wide [`StreamManager`], the decision sink that
-//! asks the UI, and thin commands. The confirm dialog, live indicator and stop button are
-//! Task B; these are the hooks it binds to.
+//! asks the UI, and thin commands. The UI side (confirm dialog, live banner, stop button) is
+//! `src/hooks/use-phone-stream.ts` and `src/components/PhoneStream*.tsx`; the tray's
+//! "Stop phone camera" item calls [`remote_stream_stop`] too.
 //!
 //! Events (all payloads camelCase):
 //! * `remote://stream-request` — [`StreamRequest`]: show "Pixel 9 wants to stream its camera".
@@ -17,7 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 use super::handoff::AppCamera;
-use super::machine::{StreamRequest, StreamStatus};
+use super::machine::{Phase, StreamRequest, StreamStatus};
 use super::manager::{DecisionSink, StreamManager};
 use super::runner::{IceSource, SessionDeps};
 use super::signal::{OutboundFrame, StopReason};
@@ -74,6 +75,7 @@ pub(crate) fn install(app: AppHandle) -> (StreamManager, mpsc::UnboundedReceiver
     tokio::spawn(async move {
         while status.changed().await.is_ok() {
             let s = status.borrow_and_update().clone();
+            crate::tray::set_phone_stream_active(&app, matches!(s.state, Phase::Connecting | Phase::Live));
             let _ = app.emit("remote://stream-status", s);
         }
     });

@@ -171,12 +171,37 @@
       "timeoutTitle": "Tidak dapat mengeklik Gabung secara otomatis",
       "timeoutDesc": "Halaman rapat terbuka di jendela browser CamLooper; bergabunglah dari sana.",
       "failedTitle": "Gabung otomatis gagal"
-    }
+    },
+    "streamHint": "Streaming kamera ponsel Anda: buka halaman CamLooper Remote di ponsel dan ketuk \"Start streaming\"."
+  },
+  "phoneStream": {
+    "confirmTitle": "Gunakan ponsel Anda sebagai kamera?",
+    "confirmBody": "{{phone}} ingin men-streaming kameranya ke CamLooper. Video Anda saat ini akan dijeda selama ponsel sedang live.",
+    "countdown": "Ditolak otomatis dalam {{seconds}} dtk",
+    "accept": "Terima",
+    "decline": "Tolak",
+    "yourPhone": "Ponsel Anda",
+    "live": "Kamera ponsel live",
+    "connecting": "Menghubungkan ke {{phone}}…",
+    "stopping": "Menghentikan kamera ponsel…",
+    "fps": "{{value}} fps",
+    "stop": "Hentikan",
+    "errorTitle": "Kamera ponsel berhenti.",
+    "errors": {
+      "ice_failed": "Tidak dapat terhubung langsung ke ponsel. Sambungkan ponsel dan komputer ke Wi-Fi yang sama, atau sambungkan komputer ke hotspot ponsel.",
+      "timeout": "Ponsel berhenti mengirim video. Pastikan ponsel masih membuka halaman CamLooper Remote, lalu mulai streaming lagi.",
+      "generic": "Terjadi masalah pada streaming ponsel. Mulai streaming lagi dari ponsel Anda."
+    },
+    "dismiss": "Tutup",
+    "expired": "Permintaan itu sudah kedaluwarsa. Ketuk \"Start streaming\" di ponsel Anda lagi.",
+    "controlsLocked": "Ponsel Anda sedang menggunakan kamera CamLooper. Hentikan kamera ponsel untuk menggunakan kontrol ini."
   },
   "tray": {
     "show": "Tampilkan CamLooper",
     "link": "Tautkan ponsel…",
     "autostart": "Jalankan saat login",
-    "quit": "Keluar"
+    "quit": "Keluar",
+    "stopPhone": "Hentikan kamera ponsel",
+    "phoneLive": "CamLooper — kamera ponsel live"
   }
 }

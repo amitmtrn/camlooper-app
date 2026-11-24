@@ -317,7 +317,7 @@ pub fn run() {
                     remote::remote_ack_command,
                     remote::remote_set_autostart,
                     remote::remote_get_autostart,
-                    // Phone camera stream (UI in Task B)
+                    // Phone camera stream
                     remote::stream::commands::remote_stream_status,
                     remote::stream::commands::remote_stream_accept,
                     remote::stream::commands::remote_stream_reject,
@@ -375,7 +375,7 @@ pub fn run() {
                     remote::remote_ack_command,
                     remote::remote_set_autostart,
                     remote::remote_get_autostart,
-                    // Phone camera stream (UI in Task B)
+                    // Phone camera stream
                     remote::stream::commands::remote_stream_status,
                     remote::stream::commands::remote_stream_accept,
                     remote::stream::commands::remote_stream_reject,
