@@ -14,7 +14,7 @@ pub const MAX_SESSION_ID: usize = 64;
 /// whole frame comfortably below the limit.
 pub const MAX_SDP_BYTES: usize = 14 * 1024;
 pub const MAX_CANDIDATE_BYTES: usize = 1024;
-pub const MAX_DEVICE_LABEL: usize = 64;
+pub const MAX_DEVICE_LABEL: usize = 40;
 /// Remote ICE candidates taken per session, counting those inside the offer. A phone has a
 /// handful; the cap bounds the pair table and the STUN checks a hostile peer (or relay) could
 /// make this machine send.
@@ -366,6 +366,22 @@ impl OutboundFrame {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_device_label_is_cut_to_40_characters_and_cannot_reorder_the_dialog() {
+        // Long enough to push the dialog's buttons off screen, with a newline and a
+        // right-to-left override that would let it rewrite the sentence it is shown in.
+        let label = format!("\u{202e}Update required\n{}", "W".repeat(100));
+        let StreamSignal::StreamRequest { device_label: Some(shown), .. } =
+            parse_signal(&json!({"kind":"stream_request","sessionId":"s1","deviceLabel":label})).unwrap()
+        else {
+            panic!("not a request")
+        };
+        assert_eq!(shown.chars().count(), MAX_DEVICE_LABEL);
+        assert_eq!(MAX_DEVICE_LABEL, 40);
+        assert!(shown.starts_with("Update requiredWWW"), "{shown:?}");
+        assert!(!shown.chars().any(|c| c.is_control() || c == '\u{202e}'));
+    }
 
     #[test]
     fn parses_every_phone_message() {

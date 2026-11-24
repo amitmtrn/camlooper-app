@@ -241,15 +241,19 @@ async fn run(
                 },
             }
         }
-        status.send_if_modified(|s| {
-            if s != m.status() {
-                *s = m.status().clone();
-                true
-            } else {
-                false
-            }
-        });
+        status.send_if_modified(|s| publish(s, m.status()));
     }
+}
+
+/// Copy the machine's status into the published one if it differs, stamping the next `seq`.
+/// The machine never touches `seq`; it only ever grows here, once per published change.
+fn publish(published: &mut StreamStatus, current: &StreamStatus) -> bool {
+    let next = StreamStatus { seq: published.seq, ..current.clone() };
+    if *published == next {
+        return false;
+    }
+    *published = StreamStatus { seq: published.seq + 1, ..next };
+    true
 }
 
 fn split(r: Result<Vec<Action>, DecisionError>) -> (Result<(), DecisionError>, Vec<Action>) {
@@ -359,6 +363,27 @@ mod tests {
         let log = backend.commands.lock().unwrap().clone();
         assert!(log.iter().any(|c| c.contains("Stop(User)")), "{log:?}");
         assert!(out.try_recv().is_err(), "no stream_stop is echoed to the phone");
+    }
+
+    #[test]
+    fn seq_grows_with_every_published_change_and_only_then() {
+        let mut published = StreamStatus::default();
+        let mut m = Machine::new();
+        let t = Instant::now();
+        assert!(!publish(&mut published, m.status()), "nothing changed yet");
+        assert_eq!(published.seq, 0);
+
+        m.on_signal(StreamSignal::StreamRequest { session_id: "s".into(), device_label: None }, t);
+        assert!(publish(&mut published, m.status()));
+        assert_eq!((published.seq, published.state), (1, Phase::Requested));
+        assert!(!publish(&mut published, m.status()), "same status, same seq");
+        assert_eq!(published.seq, 1);
+
+        // Back to an idle status that is field-for-field the default: still a newer seq, so
+        // the UI can tell it from the idle it saw before the request.
+        m.reject("s", t).unwrap();
+        assert!(publish(&mut published, m.status()));
+        assert_eq!((published.seq, published.state, published.expires_at), (2, Phase::Idle, None));
     }
 
     #[tokio::test]

@@ -39,6 +39,9 @@ pub const DECLINE_COOLDOWN: Duration = Duration::from_secs(15);
 pub const PEER_OFFLINE_GRACE: Duration = Duration::from_secs(10);
 /// A session asked to stop must report `Closed` within this long.
 pub const STOPPING_WATCHDOG: Duration = Duration::from_secs(10);
+/// A second Stop from the user this long into a stop that has not finished gives up on the
+/// session at once instead of waiting for the watchdog.
+pub const FORCE_STOP_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +65,10 @@ impl Phase {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamStatus {
+    /// Increases with every published change (set by the manager; always 0 inside the
+    /// machine). Events and command replies reach the UI on different channels, so it uses
+    /// this to drop a snapshot older than one it already applied.
+    pub seq: u64,
     pub state: Phase,
     pub session_id: Option<String>,
     /// The phone's label from `stream_request` (falls back to the paired phone's name).
@@ -73,6 +80,9 @@ pub struct StreamStatus {
     pub frames: u64,
     /// Unix milliseconds when `state` was entered.
     pub since: Option<i64>,
+    /// While `requested`: Unix milliseconds at which the request auto-declines. With
+    /// `session_id` and `device_name` this is all the UI needs to show the confirm dialog.
+    pub expires_at: Option<i64>,
     pub last_error: Option<String>,
     /// The stop reason behind `last_error` (`ice_failed`, `timeout`, `error`, …) so the UI can
     /// show translated, actionable text; `last_error` stays the technical detail for logs.
@@ -85,6 +95,7 @@ pub struct StreamStatus {
 impl Default for StreamStatus {
     fn default() -> Self {
         Self {
+            seq: 0,
             state: Phase::Idle,
             session_id: None,
             device_name: None,
@@ -94,6 +105,7 @@ impl Default for StreamStatus {
             fps: None,
             frames: 0,
             since: None,
+            expires_at: None,
             last_error: None,
             last_error_code: None,
             ended_by_phone: false,
@@ -191,6 +203,9 @@ impl Machine {
         if self.status.state != phase {
             self.status.state = phase;
             self.status.since = Some(wall_ms());
+        }
+        if phase != Phase::Requested {
+            self.status.expires_at = None;
         }
     }
 
@@ -290,12 +305,9 @@ impl Machine {
             ..StreamStatus::default()
         };
         self.enter(Phase::Requested);
-        vec![Action::AskUser(StreamRequest {
-            session_id,
-            device_name,
-            received_at,
-            expires_at: received_at + DECISION_TIMEOUT.as_millis() as i64,
-        })]
+        let expires_at = received_at + DECISION_TIMEOUT.as_millis() as i64;
+        self.status.expires_at = Some(expires_at);
+        vec![Action::AskUser(StreamRequest { session_id, device_name, received_at, expires_at })]
     }
 
     /// `stream_stop` from the phone. Once the session is accepted the stop must name it: a
@@ -409,6 +421,13 @@ impl Machine {
             ];
         }
         if s.stop_reason.is_some() {
+            // Already stopping. A repeated Stop after [`FORCE_STOP_AFTER`] is the user's way
+            // out of a teardown that hangs: give up on the session now, as the watchdog
+            // would a little later.
+            if s.stop_requested_at.is_some_and(|t| now.duration_since(t) >= FORCE_STOP_AFTER) {
+                eprintln!("phone stream: forced stop; giving up on a session that is still shutting down");
+                self.finish(None);
+            }
             return vec![];
         }
         s.stop_reason = Some(reason.clone());
@@ -938,6 +957,43 @@ mod tests {
         assert_eq!(sent(&a), vec!["reject:Declined"]);
         assert_eq!(m.status().state, Phase::Idle);
         assert!(m.stop(StopReason::User, t).is_empty());
+    }
+
+    #[test]
+    fn the_status_alone_describes_a_pending_request() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        let a = m.on_signal(req("s1"), t);
+        let [Action::AskUser(r)] = &a[..] else { panic!("{a:?}") };
+        let st = m.status().clone();
+        assert_eq!((st.state, st.session_id.as_deref(), st.device_name.as_deref()), (Phase::Requested, Some("s1"), Some("Pixel")));
+        assert_eq!(st.expires_at, Some(r.expires_at));
+        assert_eq!(r.expires_at - r.received_at, DECISION_TIMEOUT.as_millis() as i64);
+        // Leaving `requested` — accepted, declined, timed out — clears the deadline.
+        m.accept("s1", t).unwrap();
+        assert_eq!((m.status().state, m.status().expires_at), (Phase::Connecting, None));
+        let mut m = Machine::new();
+        m.on_signal(req("s2"), t);
+        m.reject("s2", t).unwrap();
+        assert_eq!((m.status().state, m.status().expires_at), (Phase::Idle, None));
+    }
+
+    #[test]
+    fn a_second_stop_after_five_seconds_forces_a_hung_teardown() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        assert_eq!(sent(&m.stop(StopReason::User, t)), vec!["stop:user"]);
+        assert_eq!(m.status().state, Phase::Stopping);
+        // Too early: an impatient double click changes nothing.
+        assert!(m.stop(StopReason::User, t + FORCE_STOP_AFTER - Duration::from_millis(1)).is_empty());
+        assert_eq!(m.status().state, Phase::Stopping);
+        // From 5 s on, Stop gives up on the session without waiting for the watchdog.
+        assert!(m.stop(StopReason::User, t + FORCE_STOP_AFTER).is_empty());
+        assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
+        // The abandoned session's late `Closed` is ignored, and a new request is taken.
+        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t + FORCE_STOP_AFTER);
+        assert!(matches!(&m.on_signal(req("s2"), t + FORCE_STOP_AFTER)[..], [Action::AskUser(_)]));
     }
 
     #[test]

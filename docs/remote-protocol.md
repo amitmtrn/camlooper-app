@@ -30,7 +30,7 @@ attempt: 1–64 printable ASCII characters, no spaces (e.g. 16 random base64url 
 
 | `kind` | Direction | Fields | Meaning |
 |---|---|---|---|
-| `stream_request` | phone → desktop | `sessionId`, `deviceLabel?` (≤ 64 chars) | "May I stream my camera?" The desktop asks its user. |
+| `stream_request` | phone → desktop | `sessionId`, `deviceLabel?` (the desktop strips control and invisible/bidi format characters and keeps the first 40 characters) | "May I stream my camera?" The desktop asks its user. |
 | `stream_accept` | desktop → phone | `sessionId` | The user accepted. Send the offer now. |
 | `stream_reject` | desktop → phone | `sessionId`, `reason`: `declined` \| `busy` \| `timeout` \| `unsupported` | No stream. `busy`: another session is active. `timeout`: nobody answered within 60 s. |
 | `offer` | phone → desktop | `sessionId`, `sdp` (≤ 14 KB) | The phone's SDP offer (video sendonly; an audio m-line is accepted and ignored). |
