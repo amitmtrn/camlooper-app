@@ -209,20 +209,59 @@ pub fn defer_exit_for_phone_stream(app: &AppHandle) -> bool {
 /// acts on a change), and a failed update is retried on the next call.
 pub fn set_phone_stream(app: &AppHandle, state: PhoneTray) {
     let Some(handles) = app.try_state::<TrayHandles>() else { return };
-    let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
-    phone.wanted = state;
-    if phone.applied == Some(state) {
-        return;
-    }
-    let enabled = handles.stop_phone.set_enabled(state.stop_enabled());
-    let tooltip = apply_tooltip(app, &phone);
-    phone.applied = match enabled.and(tooltip) {
-        Ok(()) => Some(state),
-        Err(e) => {
-            eprintln!("tray: could not update the phone stream state: {e}");
-            None
+    {
+        let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
+        phone.wanted = state;
+        if phone.applied == Some(state) {
+            return;
         }
-    };
+    }
+    if let Err(e) = apply_phone_tray(app, &handles) {
+        eprintln!("tray: could not update the phone stream state: {e}");
+    }
+}
+
+fn apply_phone_tray(app: &AppHandle, handles: &TrayHandles) -> tauri::Result<()> {
+    sync_phone_tray(&handles.phone, |state, tooltip| {
+        let enabled = handles.stop_phone.set_enabled(state.stop_enabled());
+        let tooltip = match app.tray_by_id("main") {
+            Some(tray) => tray.set_tooltip(Some(tooltip)),
+            None => Ok(()),
+        };
+        enabled.and(tooltip)
+    })
+}
+
+/// How often [`sync_phone_tray`] starts over because the state changed under it.
+const TRAY_SYNC_ATTEMPTS: usize = 4;
+
+/// Bring the tray in line with `phone.wanted` and the current tooltip texts.
+///
+/// `apply` is called **without** the lock held. Tray and menu calls block until the main
+/// thread has run them, and the main thread may itself be waiting for this lock
+/// ([`set_tray_labels`] is a sync command): holding it across the call would freeze the app.
+/// Because the lock is released, the wanted state or the texts can change during the call;
+/// what was applied is then out of date and is applied again.
+fn sync_phone_tray<E>(
+    phone: &Mutex<PhoneTrayState>,
+    mut apply: impl FnMut(PhoneTray, &str) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut result = Ok(());
+    for _ in 0..TRAY_SYNC_ATTEMPTS {
+        let (state, tooltip) = {
+            let phone = phone.lock().unwrap_or_else(|e| e.into_inner());
+            (phone.wanted, tooltip_for(&phone).to_owned())
+        };
+        result = apply(state, &tooltip);
+        let mut phone = phone.lock().unwrap_or_else(|e| e.into_inner());
+        if phone.wanted == state && tooltip_for(&phone) == tooltip {
+            phone.applied = result.is_ok().then_some(state);
+            return result;
+        }
+        // Changed meanwhile: not known to be applied until the next round says so.
+        phone.applied = None;
+    }
+    result
 }
 
 fn tooltip_for(phone: &PhoneTrayState) -> &str {
@@ -230,13 +269,6 @@ fn tooltip_for(phone: &PhoneTrayState) -> &str {
         PhoneTray::Live => phone.live_tooltip.as_str(),
         PhoneTray::Connecting => phone.connecting_tooltip.as_str(),
         PhoneTray::Idle | PhoneTray::Stopping => IDLE_TOOLTIP,
-    }
-}
-
-fn apply_tooltip(app: &AppHandle, phone: &PhoneTrayState) -> tauri::Result<()> {
-    match app.tray_by_id("main") {
-        Some(tray) => tray.set_tooltip(Some(tooltip_for(phone))),
-        None => Ok(()),
     }
 }
 
@@ -298,21 +330,79 @@ pub fn set_tray_labels(app: AppHandle, labels: TrayLabels) -> Result<(), String>
         results.push(handles.stop_phone.set_text(text));
     }
     if labels.phone_live.is_some() || labels.phone_connecting.is_some() {
-        let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(text) = labels.phone_live {
-            phone.live_tooltip = text;
+        {
+            let mut phone = handles.phone.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(text) = labels.phone_live {
+                phone.live_tooltip = text;
+            }
+            if let Some(text) = labels.phone_connecting {
+                phone.connecting_tooltip = text;
+            }
         }
-        if let Some(text) = labels.phone_connecting {
-            phone.connecting_tooltip = text;
-        }
-        results.push(apply_tooltip(&app, &phone));
+        // Not under the lock: see `sync_phone_tray`.
+        results.push(apply_phone_tray(&app, &handles));
     }
     first_error(results)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{first_error, tooltip_for, PhoneTray, PhoneTrayState, TrayLabels, IDLE_TOOLTIP};
+    use super::{first_error, sync_phone_tray, tooltip_for, PhoneTray, PhoneTrayState, TrayLabels, IDLE_TOOLTIP};
+    use std::sync::Mutex;
+
+    fn phone_state(wanted: PhoneTray) -> Mutex<PhoneTrayState> {
+        Mutex::new(PhoneTrayState {
+            applied: None,
+            wanted,
+            live_tooltip: "LIVE".into(),
+            connecting_tooltip: "CONNECTING".into(),
+        })
+    }
+
+    #[test]
+    fn the_tray_is_updated_without_the_lock_held() {
+        let phone = phone_state(PhoneTray::Live);
+        let mut calls = vec![];
+        let r: Result<(), &str> = sync_phone_tray(&phone, |state, tooltip| {
+            // The main thread must be able to take the lock while this call waits for it.
+            assert!(phone.try_lock().is_ok(), "lock held across the tray call");
+            calls.push((state, tooltip.to_string()));
+            Ok(())
+        });
+        assert_eq!(r, Ok(()));
+        assert_eq!(calls, [(PhoneTray::Live, "LIVE".to_string())]);
+        assert_eq!(phone.lock().unwrap().applied, Some(PhoneTray::Live));
+    }
+
+    #[test]
+    fn a_change_during_the_tray_call_is_applied_too() {
+        let phone = phone_state(PhoneTray::Connecting);
+        let mut calls = vec![];
+        let r: Result<(), &str> = sync_phone_tray(&phone, |state, tooltip| {
+            if calls.is_empty() {
+                // Meanwhile: the stream went live and the language changed.
+                let mut p = phone.lock().unwrap();
+                p.wanted = PhoneTray::Live;
+                p.live_tooltip = "EN DIRECT".into();
+            }
+            calls.push((state, tooltip.to_string()));
+            Ok(())
+        });
+        assert_eq!(r, Ok(()));
+        assert_eq!(
+            calls,
+            [(PhoneTray::Connecting, "CONNECTING".to_string()), (PhoneTray::Live, "EN DIRECT".to_string())]
+        );
+        assert_eq!(phone.lock().unwrap().applied, Some(PhoneTray::Live));
+    }
+
+    #[test]
+    fn a_failed_tray_update_is_not_recorded_as_applied() {
+        let phone = phone_state(PhoneTray::Live);
+        phone.lock().unwrap().applied = Some(PhoneTray::Connecting);
+        assert_eq!(sync_phone_tray(&phone, |_, _| Err("no tray")), Err("no tray"));
+        assert_eq!(phone.lock().unwrap().applied, None);
+    }
 
     #[test]
     fn every_label_is_attempted_and_the_first_error_reported() {
