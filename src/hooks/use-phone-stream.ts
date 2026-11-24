@@ -125,6 +125,14 @@ export function requestFromStatus(s: PhoneStreamStatus): PhoneStreamRequest | nu
 }
 
 /**
+ * Identity of one request. The phone chooses the session id and may use it again, so the id
+ * alone does not tell a request that was declined here from a new one; the deadline does.
+ */
+export function requestKey(r: Pick<PhoneStreamRequest, "sessionId" | "expiresAt">): string {
+  return `${r.sessionId}@${r.expiresAt}`;
+}
+
+/**
  * - `expired`: the request is gone.
  * - `offline` / `too_soon`: not accepted, the request is still pending and the dialog stays.
  * - `failed`: anything else (backend not ready, …); the status is re-read.
@@ -153,10 +161,10 @@ export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopF
   callbacks.current = options;
   const latest = useRef<PhoneStreamStatus>(IDLE);
   const [status, setStatus] = useState<PhoneStreamStatus>(IDLE);
-  /** A session whose dialog was closed here (declined, or its countdown ran out). */
-  const [closedSession, setClosedSession] = useState<string | null>(null);
-  /** A session whose accept is on its way, or done and waiting for the status to move on. */
-  const [acceptingSession, setAcceptingSession] = useState<string | null>(null);
+  /** The request ([`requestKey`]) whose dialog was closed here (declined, or its countdown ran out). */
+  const [closedRequest, setClosedRequest] = useState<string | null>(null);
+  /** The request whose accept is on its way, or done and waiting for the status to move on. */
+  const [acceptingRequest, setAcceptingRequest] = useState<string | null>(null);
   const [dismissedErrorSince, setDismissedErrorSince] = useState<number | null>(readDismissedError);
 
   const applyStatus = useCallback((s: PhoneStreamStatus) => {
@@ -170,7 +178,19 @@ export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopF
     if (s.state === "idle" && s.endedByPhone && phoneOwnsCamera(before.state)) {
       callbacks.current.onStoppedByPhone?.();
     }
+    // Both marks are about one pending request. Once the status has moved on, drop them,
+    // so they cannot apply to a later request that uses the same session id.
+    if (s.state !== "requested") {
+      setClosedRequest(null);
+      setAcceptingRequest(null);
+    }
     setStatus(s);
+  }, []);
+
+  /** The key of the pending request `sessionId` names, as far as the latest status knows. */
+  const pendingKey = useCallback((sessionId: string): string | null => {
+    const r = requestFromStatus(latest.current);
+    return r && r.sessionId === sessionId ? requestKey(r) : null;
   }, []);
 
   /** Re-read the status: at startup, and as a self-heal for an event that never arrived. */
@@ -215,9 +235,9 @@ export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopF
 
   const request = useMemo(() => {
     const r = requestFromStatus(status);
-    return r && r.sessionId !== closedSession ? r : null;
-  }, [status, closedSession]);
-  const accepting = request !== null && request.sessionId === acceptingSession;
+    return r && requestKey(r) !== closedRequest ? r : null;
+  }, [status, closedRequest]);
+  const accepting = request !== null && requestKey(request) === acceptingRequest;
 
   /** The last failure, until the user dismisses it or a new stream starts. */
   const error = useMemo<PhoneStreamError | null>(
@@ -232,26 +252,26 @@ export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopF
     async (sessionId: string): Promise<AcceptResult> => {
       // The dialog stays, busy, until the status leaves `requested` — accepting can sit
       // behind a system prompt for a while, and a failure must not leave nothing on screen.
-      setAcceptingSession(sessionId);
+      setAcceptingRequest(pendingKey(sessionId));
       let result: AcceptResult = "ok";
       try {
         await invoke("remote_stream_accept", { sessionId });
       } catch (err) {
         console.error("phone stream: accept failed:", err);
         result = acceptResult(err);
-        setAcceptingSession(null);
+        setAcceptingRequest(null);
       }
       // Whatever happened, show what the backend now says (the dialog again if the request
       // is still pending, nothing if it is gone).
       await refresh();
       return result;
     },
-    [refresh],
+    [refresh, pendingKey],
   );
 
   const reject = useCallback(
     async (sessionId: string) => {
-      setClosedSession(sessionId);
+      setClosedRequest(pendingKey(sessionId));
       try {
         await invoke("remote_stream_reject", { sessionId });
       } catch (err) {
@@ -260,16 +280,16 @@ export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopF
         void refresh();
       }
     },
-    [refresh],
+    [refresh, pendingKey],
   );
 
   /** The dialog's own countdown ran out: close it now; the backend's timeout is what counts. */
   const expire = useCallback(
     (sessionId: string) => {
-      setClosedSession(sessionId);
+      setClosedRequest(pendingKey(sessionId));
       void refresh();
     },
-    [refresh],
+    [refresh, pendingKey],
   );
 
   /** Also the way out of a stop that hangs: a repeat after ~5 s forces it. */

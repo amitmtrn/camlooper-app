@@ -101,8 +101,8 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabin
  * A real modal: rendered in a portal on `<body>` with the app root made `inert`, so nothing
  * behind it can be reached by Tab or click and no other overlay can cover it. Deny by
  * default: focus starts on the dialog itself (never on Accept), Escape declines, and the
- * countdown running out closes it. Mount it with `key={request.sessionId}` so every request
- * gets a fresh guard.
+ * countdown running out closes it. Mount it with `key={requestKey(request)}` so every request
+ * gets a fresh guard, also one that reuses a session id.
  */
 export function PhoneStreamDialog({
   request,

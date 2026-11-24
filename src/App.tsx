@@ -42,7 +42,7 @@ import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { useWindowShown } from "./hooks/use-window-shown";
 import { useRemote, useRemoteCommands, type OpenMeetingCommand } from "./hooks/use-remote";
 import { RemoteCard, type RemoteCardHandle } from "./components/RemoteCard";
-import { usePhoneStream, phoneOwnsCamera } from "./hooks/use-phone-stream";
+import { usePhoneStream, phoneOwnsCamera, requestKey } from "./hooks/use-phone-stream";
 import { PhoneStreamBanner, PhoneStreamDialog } from "./components/PhoneStream";
 import { useMeeting, useMeetingStatus } from "@/hooks/use-meeting";
 import { Stepper } from "./components/flow/Stepper";
@@ -1281,7 +1281,7 @@ function CamLooper() {
       />
       {phoneStream.request && (
         <PhoneStreamDialog
-          key={phoneStream.request.sessionId}
+          key={requestKey(phoneStream.request)}
           request={phoneStream.request}
           busy={phoneStream.accepting}
           onAccept={(id) => void handlePhoneAccept(id)}
