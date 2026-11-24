@@ -12,6 +12,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  SelectSuppressedContext,
 } from "@/components/ui/select";
 import {
   Square,
@@ -1272,6 +1273,7 @@ function CamLooper() {
   const stepIndex = step === 'live' ? 1 : step === 'loop' ? 3 : 2;
 
   return (
+    <SelectSuppressedContext.Provider value={phoneRequestPending}>
     <div className="min-h-screen bg-background text-foreground">
       <PhoneStreamBanner
         status={phoneStream.status}
@@ -1904,6 +1906,7 @@ function CamLooper() {
         </div>
       </div>
     </div>
+    </SelectSuppressedContext.Provider>
   );
 }
 

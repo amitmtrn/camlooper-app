@@ -4,7 +4,32 @@ import { Check, ChevronDown, ChevronUp } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
-const Select = SelectPrimitive.Root
+/**
+ * `true` while something more important than any dropdown is on screen (the phone stream
+ * confirm dialog). An open Select makes the rest of the page unclickable
+ * (`pointer-events: none` on `<body>`) and traps focus in its list, so it is closed and
+ * kept closed for that time.
+ */
+const SelectSuppressedContext = React.createContext(false)
+
+const Select = ({ open, defaultOpen, onOpenChange, ...props }: React.ComponentProps<typeof SelectPrimitive.Root>) => {
+  const suppressed = React.useContext(SelectSuppressedContext)
+  const [ownOpen, setOwnOpen] = React.useState(defaultOpen ?? false)
+  // Closed for good, not reopened once the suppression ends.
+  React.useEffect(() => {
+    if (suppressed) setOwnOpen(false)
+  }, [suppressed])
+  return (
+    <SelectPrimitive.Root
+      {...props}
+      open={(open ?? ownOpen) && !suppressed}
+      onOpenChange={(next) => {
+        setOwnOpen(next)
+        onOpenChange?.(next)
+      }}
+    />
+  )
+}
 
 const SelectGroup = SelectPrimitive.Group
 
@@ -146,6 +171,7 @@ SelectSeparator.displayName = SelectPrimitive.Separator.displayName
 
 export {
   Select,
+  SelectSuppressedContext,
   SelectGroup,
   SelectValue,
   SelectTrigger,

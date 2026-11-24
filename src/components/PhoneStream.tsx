@@ -99,7 +99,8 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabin
  * "Use your phone as the camera?" — shown while the backend waits for a decision (60 s).
  *
  * A real modal: rendered in a portal on `<body>` with the app root made `inert`, so nothing
- * behind it can be reached by Tab or click and no other overlay can cover it. Deny by
+ * behind it can be reached by Tab or click and no other overlay can cover it. (Dropdowns
+ * live in their own portals outside the root; `SelectSuppressedContext` closes those.) Deny by
  * default: focus starts on the dialog itself (never on Accept), Escape declines, and the
  * countdown running out closes it. Mount it with `key={requestKey(request)}` so every request
  * gets a fresh guard, also one that reuses a session id.
@@ -183,7 +184,9 @@ export function PhoneStreamDialog({
       ref={dialogRef}
       tabIndex={-1}
       onKeyDownCapture={onKeyDown}
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm p-6 outline-none"
+      // `pointer-events-auto`: an overlay that was open when the request arrived may have
+      // set `pointer-events: none` on <body>, which this portal would inherit.
+      className="pointer-events-auto fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm p-6 outline-none"
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="phone-stream-dialog-title"
