@@ -1,7 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod virtual_camera;
 mod frame_walk;
-mod pipeline;
+pub mod pipeline;
 mod preview;
 mod video_processor;
 mod video_upload;
@@ -10,12 +10,17 @@ mod installer_language;
 #[cfg(target_os = "macos")]
 mod macos_virtual_camera;
 mod meeting;
-mod remote;
+pub mod remote;
 mod tray;
 #[cfg(target_os = "windows")]
 mod softcam_register;
 #[cfg(target_os = "windows")]
 mod windows_virtual_camera;
+
+/// The ffmpeg the app runs off Windows (PATH on Linux, the bundled build on macOS). Public
+/// for the headless dev tools in `examples/`.
+#[cfg(not(target_os = "windows"))]
+pub use camera_capture::system_ffmpeg;
 
 use tauri::Emitter;
 use virtual_camera::{VirtualCameraConfig, VirtualCameraStatus};
@@ -312,6 +317,11 @@ pub fn run() {
                     remote::remote_ack_command,
                     remote::remote_set_autostart,
                     remote::remote_get_autostart,
+                    // Phone camera stream (UI in Task B)
+                    remote::stream::commands::remote_stream_status,
+                    remote::stream::commands::remote_stream_accept,
+                    remote::stream::commands::remote_stream_reject,
+                    remote::stream::commands::remote_stream_stop,
                     tray::get_startup_mode,
                     tray::set_tray_labels,
                     // Auto-join (CamLooper-driven browser)
@@ -365,6 +375,11 @@ pub fn run() {
                     remote::remote_ack_command,
                     remote::remote_set_autostart,
                     remote::remote_get_autostart,
+                    // Phone camera stream (UI in Task B)
+                    remote::stream::commands::remote_stream_status,
+                    remote::stream::commands::remote_stream_accept,
+                    remote::stream::commands::remote_stream_reject,
+                    remote::stream::commands::remote_stream_stop,
                     tray::get_startup_mode,
                     tray::set_tray_labels,
                     // Auto-join (CamLooper-driven browser)

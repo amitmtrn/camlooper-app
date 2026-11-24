@@ -1,6 +1,8 @@
 //! Phone remote: lets the companion mobile app ("CamLooper Remote") push a Zoom / Teams /
 //! Meet link to this computer through the relay at api.camlooper.com.
 //!
+//! Since remote v2 the same link also carries the phone's camera: see [`stream`].
+//!
 //! Privacy invariant: this module performs **no network activity at all** until the user
 //! types a pairing code into the Remote card (`remote_link`). No HTTP client exists, no DNS
 //! lookup happens and no socket is opened before that. Unlinking (from either side)
@@ -9,6 +11,7 @@ pub mod client;
 pub mod meeting_url;
 pub mod protocol;
 pub mod store;
+pub mod stream;
 
 pub use client::{OpenMeetingCommand, RemoteState};
 

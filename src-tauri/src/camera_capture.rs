@@ -21,6 +21,13 @@ struct CaptureState {
     latest_frame: Option<String>,
 }
 
+/// `(running, recording)` for the in-app camera, which also feeds the virtual camera.
+pub(crate) async fn capture_activity() -> (bool, bool) {
+    let state = CAPTURE_STATE.lock().await;
+    let running = state.ffmpeg_task.as_ref().is_some_and(|t| !t.is_finished());
+    (running, state.is_recording)
+}
+
 #[tauri::command]
 pub async fn start_camera_preview(app: AppHandle, device_id: Option<String>) -> Result<(), String> {
     start_ffmpeg_process(app, false, device_id).await

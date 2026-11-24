@@ -18,6 +18,38 @@ use crate::preview::{JpegStreamReader, PreviewEncoder};
 
 static FRAME_QUEUE: Lazy<Arc<Mutex<VecDeque<FrameBatch>>>> = Lazy::new(|| Arc::new(Mutex::new(VecDeque::new())));
 
+/// Playback tasks currently alive (and so possibly still writing to the camera). Pausing only
+/// *asks* a task to stop; the phone stream waits for this to reach zero before it writes to
+/// the same device, so two writers never interleave frames.
+static ACTIVE_PIPELINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct PipelineGuard;
+
+impl PipelineGuard {
+    fn new() -> Self {
+        ACTIVE_PIPELINES.fetch_add(1, Ordering::SeqCst);
+        PipelineGuard
+    }
+}
+
+impl Drop for PipelineGuard {
+    fn drop(&mut self) {
+        ACTIVE_PIPELINES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Wait until no playback task is running. `false` if one is still alive after `timeout`.
+pub async fn wait_for_playback_exit(timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while ACTIVE_PIPELINES.load(Ordering::SeqCst) > 0 {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    true
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -435,6 +467,11 @@ impl VideoProcessor {
         if self.is_streaming.load(Ordering::Relaxed) {
             return Ok(());
         }
+        // The phone stream owns the camera while it is live; playing a clip now would put a
+        // second writer on the same device.
+        if crate::remote::stream::phone_owns_camera() {
+            return Err(anyhow!("The phone camera is live. Stop it before playing a video."));
+        }
 
         let video_path = self.video_path.clone()
             .ok_or_else(|| anyhow!("No video file loaded"))?;
@@ -481,7 +518,9 @@ impl VideoProcessor {
                 q.clear();
             }
 
+            let guard = PipelineGuard::new();
             tokio::task::spawn(async move {
+                let _guard = guard;
                 let settings = *loop_settings.read().await;
 
                 let result = if settings.natural_motion {
@@ -1216,7 +1255,7 @@ impl VideoProcessor {
     /// Which stream that is depends on the sink: a push sink (Windows softcam) sends raw
     /// frames back for Rust to forward, while a device sink has already delivered the frames
     /// itself and sends only the preview MJPEG.
-    fn spawn_sink_reader(
+    pub(crate) fn spawn_sink_reader(
         mut stdout: tokio::process::ChildStdout,
         sink: pipeline::CameraSink,
         geometry: Geometry,
@@ -1407,6 +1446,22 @@ pub async fn set_video_loop_settings(settings: LoopSettings) -> Result<()> {
 pub async fn get_performance_metrics() -> Result<PerformanceMetrics> {
     let processor = VIDEO_PROCESSOR.lock().await;
     Ok(processor.get_performance_metrics().await)
+}
+
+/// [`VideoProcessor::spawn_sink_reader`] for other producers of camera frames (the phone
+/// stream): forwards raw frames to a push sink, or drains the preview MJPEG of a device sink.
+pub(crate) fn spawn_sink_reader(
+    stdout: tokio::process::ChildStdout,
+    sink: pipeline::CameraSink,
+    geometry: Geometry,
+    running: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    VideoProcessor::spawn_sink_reader(stdout, sink, geometry, running)
+}
+
+/// Whether a clip is loaded (so playback can be resumed after the phone stream).
+pub async fn has_video_loaded() -> bool {
+    VIDEO_PROCESSOR.lock().await.video_path.is_some()
 }
 
 pub async fn init_video_processor(app_handle: AppHandle) {

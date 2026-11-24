@@ -6,6 +6,13 @@
 //! claim (the first connection the app ever makes), persists the pairing and wakes the task,
 //! which keeps a WebSocket to the relay with exponential-backoff reconnects. `unlink`, a
 //! `pair_revoked` answer or an `unpaired` frame tear everything down and park the task again.
+//!
+//! The socket is opened with `?protocol=2`, so besides the v1 frames it carries the phone
+//! camera stream's signaling (`peer`, `signal`, `stream_stop`, `error`), which is routed to the
+//! [`StreamManager`]; frames the manager wants to send go out on the same socket.
+//!
+//! The HTTP/WebSocket calls themselves (`claim_pairing`, `connect`, `delete_pair`,
+//! `fetch_ice_servers`) take no `AppHandle`, so the headless dev CLI uses them too.
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,8 +28,12 @@ use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http::Head
 use url::Url;
 
 use super::meeting_url::{provider, validate_meeting_url};
-use super::protocol::{ApiErrorBody, ClientMessage, PairClaimRequest, PairClaimResponse, ServerMessage};
+use super::protocol::{
+    ApiErrorBody, ClientMessage, IceServersResponse, PairClaimRequest, PairClaimResponse, ServerMessage, PROTOCOL_V2_QUERY,
+};
 use super::store::{Pairing, Store, STORE_VERSION};
+use super::stream::signal::{OutboundFrame, StopReason};
+use super::stream::StreamManager;
 
 const DEFAULT_API_BASE: &str = "https://api.camlooper.com/";
 /// Dev override, e.g. `CAMLOOPER_API_URL=http://127.0.0.1:8787` (wrangler dev).
@@ -37,7 +48,7 @@ const STALE_COMMAND_MS: i64 = 10 * 60 * 1000;
 const RECENT_IDS: usize = 32;
 const MAX_DESKTOP_NAME: usize = 64;
 
-type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+pub type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,7 +131,7 @@ fn state() -> MutexGuard<'static, Inner> {
     STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn http() -> &'static reqwest::Client {
+pub fn http() -> &'static reqwest::Client {
     HTTP.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -156,6 +167,14 @@ pub fn ws_url_for(base: &Url) -> Option<Url> {
     Some(ws)
 }
 
+/// The desktop socket with v2 frames: header auth (native client, no `Origin`) plus
+/// `?protocol=2`. v1 frames are unchanged on it.
+pub fn ws_url_v2_for(base: &Url) -> Option<Url> {
+    let mut ws = ws_url_for(base)?;
+    ws.set_query(Some(PROTOCOL_V2_QUERY));
+    Some(ws)
+}
+
 pub fn snapshot() -> RemoteState {
     let s = state();
     RemoteState {
@@ -174,6 +193,11 @@ fn emit_status(app: &AppHandle) {
 
 pub fn is_linked() -> bool {
     state().pairing.is_some()
+}
+
+/// The stored pairing (for authenticated calls made outside this module).
+pub(crate) fn current_pairing() -> Option<Pairing> {
+    state().pairing.clone()
 }
 
 pub fn pending_command() -> Option<OpenMeetingCommand> {
@@ -294,49 +318,9 @@ pub async fn link(app: AppHandle, code: String) -> Result<RemoteState, LinkError
     }
     emit_status(&app);
 
-    let desktop_name = desktop_name();
-    let request = PairClaimRequest {
-        code: &code,
-        platform: std::env::consts::OS,
-        app_version: env!("CARGO_PKG_VERSION"),
-        desktop_name: &desktop_name,
-    };
-    let endpoint = match base.join("v1/desktop/pair/claim") {
-        Ok(u) => u,
-        Err(_) => return fail(&app, LinkError::Disabled),
-    };
-
-    let response = match http().post(endpoint).json(&request).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("remote: claim request failed: {e}");
-            return fail(&app, LinkError::Network);
-        }
-    };
-    let claim: PairClaimResponse = match response.status().as_u16() {
-        200 => match response.json().await {
-            Ok(c) => c,
-            Err(_) => return fail(&app, LinkError::Server),
-        },
-        404 | 409 => return fail(&app, LinkError::CodeInvalid),
-        429 => return fail(&app, LinkError::RateLimited),
-        other => {
-            let body = response.json::<ApiErrorBody>().await.ok();
-            eprintln!(
-                "remote: claim answered HTTP {other} ({})",
-                body.map(|b| format!("{} {}", b.error, b.message.unwrap_or_default())).unwrap_or_default()
-            );
-            return fail(&app, LinkError::Server);
-        }
-    };
-
-    let pairing = Pairing {
-        version: STORE_VERSION,
-        pair_id: claim.pair_id,
-        desktop_token: claim.desktop_token,
-        desktop_name,
-        mobile_device_name: claim.mobile_device_name,
-        paired_at: format_rfc3339(now_ms()),
+    let pairing = match claim_pairing(&base, &code, desktop_name()).await {
+        Ok(p) => p,
+        Err(e) => return fail(&app, e),
     };
     let tx = {
         let mut s = state();
@@ -365,6 +349,62 @@ pub async fn link(app: AppHandle, code: String) -> Result<RemoteState, LinkError
     Ok(snapshot())
 }
 
+/// `POST /v1/desktop/pair/claim`. No local state is touched; the caller persists the result.
+pub async fn claim_pairing(base: &Url, code: &str, desktop_name: String) -> Result<Pairing, LinkError> {
+    let request = PairClaimRequest {
+        code,
+        platform: std::env::consts::OS,
+        app_version: env!("CARGO_PKG_VERSION"),
+        desktop_name: &desktop_name,
+    };
+    let endpoint = base.join("v1/desktop/pair/claim").map_err(|_| LinkError::Disabled)?;
+    let response = match http().post(endpoint).json(&request).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("remote: claim request failed: {e}");
+            return Err(LinkError::Network);
+        }
+    };
+    let claim: PairClaimResponse = match response.status().as_u16() {
+        200 => response.json().await.map_err(|_| LinkError::Server)?,
+        404 | 409 => return Err(LinkError::CodeInvalid),
+        429 => return Err(LinkError::RateLimited),
+        other => {
+            let body = response.json::<ApiErrorBody>().await.ok();
+            eprintln!(
+                "remote: claim answered HTTP {other} ({})",
+                body.map(|b| format!("{} {}", b.error, b.message.unwrap_or_default())).unwrap_or_default()
+            );
+            return Err(LinkError::Server);
+        }
+    };
+    Ok(Pairing {
+        version: STORE_VERSION,
+        pair_id: claim.pair_id,
+        desktop_token: claim.desktop_token,
+        desktop_name,
+        mobile_device_name: claim.mobile_device_name,
+        paired_at: format_rfc3339(now_ms()),
+    })
+}
+
+/// `GET /v1/ice-servers` with the desktop's headers: the STUN URLs to use for the srflx
+/// candidate. TURN credentials, if the relay ever returns them, are ignored.
+pub async fn fetch_ice_servers(base: &Url, pairing: &Pairing) -> anyhow::Result<Vec<String>> {
+    let endpoint = base.join("v1/ice-servers")?;
+    let response = http()
+        .get(endpoint)
+        .header("authorization", format!("Bearer {}", pairing.desktop_token))
+        .header("x-camlooper-pair", &pairing.pair_id)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!("ice-servers answered HTTP {}", response.status());
+    }
+    Ok(response.json::<IceServersResponse>().await?.stun_urls())
+}
+
 fn fail(app: &AppHandle, err: LinkError) -> Result<RemoteState, LinkError> {
     {
         let mut s = state();
@@ -391,7 +431,8 @@ pub async fn unlink(app: AppHandle) -> anyhow::Result<RemoteState> {
     Ok(snapshot())
 }
 
-async fn delete_pair(base: &Url, pairing: &Pairing) -> Result<(), ()> {
+#[allow(clippy::result_unit_err)] // callers only care whether it worked
+pub async fn delete_pair(base: &Url, pairing: &Pairing) -> Result<(), ()> {
     let endpoint = base.join("v1/desktop/pair").map_err(|_| ())?;
     let response = http()
         .delete(endpoint)
@@ -445,7 +486,7 @@ fn set_connected(app: &AppHandle, connected: bool) {
     emit_status(app);
 }
 
-enum ConnectError {
+pub enum ConnectError {
     Revoked,
     Other(String),
 }
@@ -458,6 +499,7 @@ enum SessionEnd {
 
 async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
     let mut backoff = Backoff::default();
+    let (stream, mut outbound) = super::stream::commands::install(app.clone());
     loop {
         let pairing = { state().pairing.clone() };
         let Some(pairing) = pairing else {
@@ -481,11 +523,20 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
             Ok(ws) => {
                 backoff.reset();
                 set_connected(&app, true);
-                let end = run_session(ws, &mut rx, &app).await;
+                stream.set_device_name(pairing.mobile_device_name.clone());
+                // Frames queued while disconnected belong to a moment that has passed.
+                while outbound.try_recv().is_ok() {}
+                let end = run_session(ws, &mut rx, &app, &stream, &mut outbound).await;
                 set_connected(&app, false);
                 match end {
                     SessionEnd::Revoked(reason) => {
+                        stream.stop(StopReason::PeerOffline).await;
                         forget_pairing(&app, Some(&reason));
+                        continue;
+                    }
+                    SessionEnd::Shutdown if state().pairing.is_none() => {
+                        // Unlinked from this computer while a stream may be live.
+                        stream.stop(StopReason::User).await;
                         continue;
                     }
                     SessionEnd::Shutdown => continue,
@@ -511,8 +562,9 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
     }
 }
 
-async fn connect(base: &Url, pairing: &Pairing) -> Result<WsStream, ConnectError> {
-    let ws_url = ws_url_for(base).ok_or_else(|| ConnectError::Other("unusable API URL".into()))?;
+/// Open the desktop WebSocket (v2 frames, header auth).
+pub async fn connect(base: &Url, pairing: &Pairing) -> Result<WsStream, ConnectError> {
+    let ws_url = ws_url_v2_for(base).ok_or_else(|| ConnectError::Other("unusable API URL".into()))?;
     let mut request = ws_url
         .as_str()
         .into_client_request()
@@ -541,7 +593,13 @@ async fn connect(base: &Url, pairing: &Pairing) -> Result<WsStream, ConnectError
     }
 }
 
-async fn run_session(mut ws: WsStream, rx: &mut mpsc::UnboundedReceiver<Control>, app: &AppHandle) -> SessionEnd {
+async fn run_session(
+    mut ws: WsStream,
+    rx: &mut mpsc::UnboundedReceiver<Control>,
+    app: &AppHandle,
+    stream: &StreamManager,
+    outbound: &mut mpsc::UnboundedReceiver<OutboundFrame>,
+) -> SessionEnd {
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping.tick().await; // the first tick completes immediately
@@ -555,6 +613,7 @@ async fn run_session(mut ws: WsStream, rx: &mut mpsc::UnboundedReceiver<Control>
                 match incoming {
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(text.as_str()) {
                         Ok(msg) => {
+                            let Some(msg) = super::stream::route_server_message(stream, msg) else { continue };
                             if let Some(end) = handle_server_message(msg, &mut ws, app).await {
                                 return end;
                             }
@@ -582,6 +641,17 @@ async fn run_session(mut ws: WsStream, rx: &mut mpsc::UnboundedReceiver<Control>
                         return SessionEnd::Dropped;
                     }
                     None => return SessionEnd::Dropped,
+                }
+            }
+            frame = outbound.recv() => {
+                let Some(frame) = frame else { continue };
+                match frame.to_json() {
+                    Some(text) => {
+                        if ws.send(Message::text(text)).await.is_err() {
+                            return SessionEnd::Dropped;
+                        }
+                    }
+                    None => eprintln!("remote: not sending an oversized {} frame", frame.describe()),
                 }
             }
             _ = ping.tick() => {
@@ -687,7 +757,13 @@ async fn handle_server_message(msg: ServerMessage, ws: &mut WsStream, app: &AppH
             None
         }
         ServerMessage::Unpaired { reason } => Some(SessionEnd::Revoked(reason.unwrap_or_else(|| "revoked".into()))),
-        ServerMessage::Pong | ServerMessage::Unknown => None,
+        // v2 frames are consumed by `stream::route_server_message` before this point.
+        ServerMessage::Pong
+        | ServerMessage::Unknown
+        | ServerMessage::Peer { .. }
+        | ServerMessage::Signal { .. }
+        | ServerMessage::StreamStop { .. }
+        | ServerMessage::Error { .. } => None,
     }
 }
 
@@ -745,6 +821,7 @@ impl Backoff {
     }
 
     /// 1 s, 2 s, 4 s … capped at 60 s, each multiplied by a uniform jitter in [0.5, 1.5).
+    #[allow(clippy::should_implement_trait)] // an endless schedule, not an iterator
     pub fn next(&mut self) -> Duration {
         let base = (1u64 << self.attempt.min(6)).min(MAX_BACKOFF_SECS);
         self.attempt = self.attempt.saturating_add(1);
@@ -845,6 +922,14 @@ mod tests {
         assert_eq!(ws_url_for(&http).unwrap().as_str(), "ws://127.0.0.1:8787/v1/desktop/ws");
         let prefixed = Url::parse("https://example.test/api/").unwrap();
         assert_eq!(ws_url_for(&prefixed).unwrap().as_str(), "wss://example.test/api/v1/desktop/ws");
+    }
+
+    #[test]
+    fn v2_socket_url_asks_for_protocol_2() {
+        let https = Url::parse("https://api.camlooper.com/").unwrap();
+        assert_eq!(ws_url_v2_for(&https).unwrap().as_str(), "wss://api.camlooper.com/v1/desktop/ws?protocol=2");
+        let prefixed = Url::parse("http://127.0.0.1:8787/api/").unwrap();
+        assert_eq!(ws_url_v2_for(&prefixed).unwrap().as_str(), "ws://127.0.0.1:8787/api/v1/desktop/ws?protocol=2");
     }
 
     #[test]

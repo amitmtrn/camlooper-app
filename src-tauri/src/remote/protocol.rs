@@ -1,6 +1,9 @@
-//! Wire types for protocol v1 of the phone remote. Field names are camelCase on the wire;
-//! messages are tagged by `type`. Unknown message types deserialize to `Unknown` so a newer
-//! server never breaks an older desktop.
+//! Wire types for the phone remote's relay protocol: v1 (pairing, `open_meeting`) plus the
+//! v2 frames a desktop receives when it connects with `?protocol=2` (`peer`, `signal`,
+//! `stream_stop`, `error`). Field names are camelCase on the wire; messages are tagged by
+//! `type`. Unknown message types deserialize to `Unknown` so a newer server never breaks an
+//! older desktop. The content of `signal.data` is the app-level phone-stream protocol, see
+//! `stream::signal`.
 use serde::{Deserialize, Serialize};
 
 /// Server -> desktop WebSocket frames.
@@ -12,6 +15,9 @@ pub enum ServerMessage {
         protocol: u32,
         #[serde(default)]
         mobile_device_name: Option<String>,
+        /// v2 only: whether the phone is connected to the relay right now.
+        #[serde(default)]
+        peer_online: Option<bool>,
     },
     OpenMeeting {
         command_id: String,
@@ -26,6 +32,28 @@ pub enum ServerMessage {
         reason: Option<String>,
     },
     Pong,
+    /// v2: the other side connected or disconnected.
+    Peer {
+        role: String,
+        online: bool,
+    },
+    /// v2: relayed verbatim from the other side; `data` is always a JSON object.
+    Signal {
+        #[serde(default)]
+        from: Option<String>,
+        data: serde_json::Value,
+    },
+    /// v2: the other side ended a stream; `data` is optional.
+    StreamStop {
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default)]
+        data: Option<serde_json::Value>,
+    },
+    /// v2: the relay refused one of our frames (`peer_offline`, `too_large`, …).
+    Error {
+        error: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -37,6 +65,51 @@ pub enum ServerMessage {
 pub enum ClientMessage {
     Ack { command_id: String },
     Ping,
+}
+
+/// Query string that asks the relay for v2 frames on a header-authenticated desktop socket.
+pub const PROTOCOL_V2_QUERY: &str = "protocol=2";
+
+/// `GET /v1/ice-servers`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IceServersResponse {
+    #[serde(default)]
+    pub ice_servers: Vec<IceServer>,
+    #[serde(default)]
+    pub turn: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IceServer {
+    /// A string or an array of strings, as in `RTCIceServer`.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub urls: Vec<String>,
+}
+
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
+
+impl IceServersResponse {
+    /// Every `stun:` URL, in order. TURN entries are ignored (the desktop has no TURN client).
+    pub fn stun_urls(&self) -> Vec<String> {
+        self.ice_servers
+            .iter()
+            .flat_map(|s| s.urls.iter())
+            .filter(|u| u.starts_with("stun:"))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -74,11 +147,11 @@ mod tests {
             serde_json::from_str(r#"{"type":"hello","protocol":1,"mobileDeviceName":"Pixel 9"}"#).unwrap();
         assert_eq!(
             hello,
-            ServerMessage::Hello { protocol: 1, mobile_device_name: Some("Pixel 9".into()) }
+            ServerMessage::Hello { protocol: 1, mobile_device_name: Some("Pixel 9".into()), peer_online: None }
         );
         let hello_null: ServerMessage =
             serde_json::from_str(r#"{"type":"hello","protocol":1,"mobileDeviceName":null}"#).unwrap();
-        assert_eq!(hello_null, ServerMessage::Hello { protocol: 1, mobile_device_name: None });
+        assert_eq!(hello_null, ServerMessage::Hello { protocol: 1, mobile_device_name: None, peer_online: None });
 
         let open: ServerMessage = serde_json::from_str(
             r#"{"type":"open_meeting","commandId":"c1","url":"https://zoom.us/j/1","createdAt":"2026-11-08T10:00:00.000Z","sentAt":"2026-11-08T10:00:01.000Z"}"#,
@@ -104,6 +177,50 @@ mod tests {
         let unknown: ServerMessage =
             serde_json::from_str(r#"{"type":"brand_new_thing","x":1}"#).unwrap();
         assert_eq!(unknown, ServerMessage::Unknown);
+    }
+
+    #[test]
+    fn deserializes_v2_frames() {
+        let hello: ServerMessage =
+            serde_json::from_str(r#"{"type":"hello","protocol":2,"mobileDeviceName":"Pixel 9","peerOnline":true}"#)
+                .unwrap();
+        assert_eq!(
+            hello,
+            ServerMessage::Hello { protocol: 2, mobile_device_name: Some("Pixel 9".into()), peer_online: Some(true) }
+        );
+        let peer: ServerMessage = serde_json::from_str(r#"{"type":"peer","role":"mobile","online":false}"#).unwrap();
+        assert_eq!(peer, ServerMessage::Peer { role: "mobile".into(), online: false });
+        let signal: ServerMessage = serde_json::from_str(
+            r#"{"type":"signal","from":"mobile","data":{"kind":"stream_request","sessionId":"s1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            signal,
+            ServerMessage::Signal {
+                from: Some("mobile".into()),
+                data: serde_json::json!({"kind":"stream_request","sessionId":"s1"}),
+            }
+        );
+        let stop: ServerMessage = serde_json::from_str(r#"{"type":"stream_stop","from":"mobile"}"#).unwrap();
+        assert_eq!(stop, ServerMessage::StreamStop { from: Some("mobile".into()), data: None });
+        let stop: ServerMessage =
+            serde_json::from_str(r#"{"type":"stream_stop","from":"mobile","data":{"sessionId":"s1","reason":"user"}}"#)
+                .unwrap();
+        assert!(matches!(stop, ServerMessage::StreamStop { data: Some(_), .. }));
+        let err: ServerMessage = serde_json::from_str(r#"{"type":"error","error":"peer_offline"}"#).unwrap();
+        assert_eq!(err, ServerMessage::Error { error: "peer_offline".into() });
+        // A malformed known type is an error (the caller logs and ignores it), not a panic.
+        assert!(serde_json::from_str::<ServerMessage>(r#"{"type":"peer"}"#).is_err());
+    }
+
+    #[test]
+    fn ice_servers_response() {
+        let r: IceServersResponse = serde_json::from_str(
+            r#"{"iceServers":[{"urls":["stun:stun.cloudflare.com:3478","stun:stun.l.google.com:19302"]},{"urls":"turn:t.example:3478","username":"u","credential":"c"}],"turn":"disabled","ttl":900}"#,
+        )
+        .unwrap();
+        assert_eq!(r.stun_urls(), vec!["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"]);
+        assert_eq!(r.turn.as_deref(), Some("disabled"));
     }
 
     #[test]
