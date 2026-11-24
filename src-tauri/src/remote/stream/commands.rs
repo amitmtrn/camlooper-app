@@ -118,9 +118,10 @@ fn manager() -> Result<&'static StreamManager, String> {
     MANAGER.get().ok_or_else(|| "not_ready".to_string())
 }
 
-/// A request is pending or a session is up: quitting now would leave the phone guessing.
+/// A request is pending or a session is up (quitting now would leave the phone guessing),
+/// or a given-up session still holds the camera.
 pub fn stream_busy() -> bool {
-    MANAGER.get().is_some_and(|m| !m.status().state.is_free())
+    MANAGER.get().is_some_and(|m| m.status().is_busy())
 }
 
 /// The window is being closed with the confirm dialog open: that is a "no". Without this the
@@ -139,12 +140,13 @@ pub fn decline_pending_request() {
 /// `stream_stop` to the phone. Bounded, so a hung teardown cannot keep the app from quitting.
 pub async fn stop_for_exit() {
     let Some(m) = MANAGER.get() else { return };
-    if m.status().state.is_free() {
+    if !m.status().is_busy() {
         return;
     }
     m.stop(StopReason::User).await;
     let mut status = m.subscribe();
-    let _ = tokio::time::timeout(Duration::from_secs(3), status.wait_for(|s| s.state.is_free())).await;
+    // Also the last chance for a given-up session to hand the camera back.
+    let _ = tokio::time::timeout(Duration::from_secs(3), status.wait_for(|s| !s.is_busy())).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
 }
 

@@ -109,6 +109,17 @@ pub struct StreamStatus {
     /// The last session ended normally because the phone stopped it (its Stop button, or it
     /// closed the connection). The UI shows a neutral note, never an error.
     pub ended_by_phone: bool,
+    /// A session that was given up on has not handed the camera back yet. `state` is
+    /// `error` then, but nothing is free: playback and the in-app camera are still refused
+    /// and requests are answered `busy`, until that session closes.
+    pub releasing: bool,
+}
+
+impl StreamStatus {
+    /// A request is pending, a session is up, or a given-up one still holds the camera.
+    pub fn is_busy(&self) -> bool {
+        !self.state.is_free() || self.releasing
+    }
 }
 
 impl Default for StreamStatus {
@@ -128,6 +139,7 @@ impl Default for StreamStatus {
             last_error: None,
             last_error_code: None,
             ended_by_phone: false,
+            releasing: false,
         }
     }
 }
@@ -256,8 +268,14 @@ impl Machine {
         self.session = None;
         let state = if error.is_some() { Phase::Error } else { Phase::Idle };
         let (code, error) = error.map(|(r, e)| (r.as_str().to_string(), e)).unzip();
-        self.status =
-            StreamStatus { state, last_error: error, last_error_code: code, since: Some(wall_ms()), ..StreamStatus::default() };
+        self.status = StreamStatus {
+            state,
+            last_error: error,
+            last_error_code: code,
+            since: Some(wall_ms()),
+            releasing: self.releasing.is_some(),
+            ..StreamStatus::default()
+        };
     }
 
     fn is_current(&self, id: &str) -> bool {
@@ -280,8 +298,8 @@ impl Machine {
     /// arrives — see [`Self::on_session_event`].
     fn give_up(&mut self) {
         let epoch = self.current_epoch();
-        self.finish(Some((StopReason::Error, STILL_RELEASING.to_string())));
         self.releasing = epoch;
+        self.finish(Some((StopReason::Error, STILL_RELEASING.to_string())));
     }
 
     // --- inputs from the phone ---------------------------------------------------------
@@ -584,6 +602,7 @@ impl Machine {
             if matches!(ev, SessionEvent::Closed { .. }) {
                 eprintln!("phone stream: the abandoned session has shut down; the camera is free again");
                 self.releasing = None;
+                self.status.releasing = false;
                 // No session can have started meanwhile, so the status is still the
                 // give-up's error; it no longer describes anything.
                 if self.session.is_none() && self.status.state == Phase::Error {
@@ -1002,6 +1021,7 @@ mod tests {
         let st = m.status().clone();
         assert_eq!((st.state, st.last_error.as_deref(), st.last_error_code.as_deref()), (Phase::Error, Some(STILL_RELEASING), Some("error")));
         assert!(m.is_releasing());
+        assert!(st.releasing && st.is_busy(), "the UI and the exit path must see it as busy");
         // An error state normally takes the next request; not while the camera is held.
         assert_eq!(sent(&m.on_signal(req("s2"), t)), vec!["reject:Busy"]);
         assert_eq!(m.status().state, Phase::Error);
@@ -1012,6 +1032,7 @@ mod tests {
         assert!(m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t).is_empty());
         assert!(!m.is_releasing());
         assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
+        assert!(!m.status().releasing && !m.status().is_busy());
         assert!(matches!(&m.on_signal(req("s2"), t)[..], [Action::AskUser(_)]));
     }
 

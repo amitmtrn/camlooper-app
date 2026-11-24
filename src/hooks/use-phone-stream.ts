@@ -36,6 +36,11 @@ export interface PhoneStreamStatus {
   lastErrorCode: string | null;
   /** The last session ended normally because the phone stopped it. Never an error. */
   endedByPhone: boolean;
+  /**
+   * A session the backend gave up on still holds the camera. `state` is `error`, but
+   * playback and the camera are refused until it lets go.
+   */
+  releasing: boolean;
 }
 
 export interface PhoneStreamRequest {
@@ -64,6 +69,7 @@ const IDLE: PhoneStreamStatus = {
   lastError: null,
   lastErrorCode: null,
   endedByPhone: false,
+  releasing: false,
 };
 
 /** A banner's Stop turns into a force stop this long into `stopping` (machine.rs: `FORCE_STOP_AFTER`, plus a margin). */
@@ -72,6 +78,14 @@ export const FORCE_STOP_AFTER_MS = 5_250;
 /** The phone holds the camera: normal video start controls are off. */
 export function phoneOwnsCamera(state: PhoneStreamPhase): boolean {
   return state === "connecting" || state === "live" || state === "stopping";
+}
+
+/**
+ * The video and camera controls are off: the phone holds the camera, or a session that was
+ * given up on has not handed it back yet (the backend refuses to start anything until then).
+ */
+export function cameraBusy(status: Pick<PhoneStreamStatus, "state" | "releasing">): boolean {
+  return phoneOwnsCamera(status.state) || status.releasing === true;
 }
 
 /** Error codes with their own translated text; anything else uses the generic message. */

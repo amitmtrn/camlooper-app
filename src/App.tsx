@@ -43,7 +43,7 @@ import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { useWindowShown } from "./hooks/use-window-shown";
 import { useRemote, useRemoteCommands, type OpenMeetingCommand } from "./hooks/use-remote";
 import { RemoteCard, type RemoteCardHandle } from "./components/RemoteCard";
-import { usePhoneStream, phoneOwnsCamera, requestKey } from "./hooks/use-phone-stream";
+import { usePhoneStream, cameraBusy, requestKey } from "./hooks/use-phone-stream";
 import { PhoneStreamBanner, PhoneStreamDialog } from "./components/PhoneStream";
 import { useMeeting, useMeetingStatus } from "@/hooks/use-meeting";
 import { Stepper } from "./components/flow/Stepper";
@@ -294,7 +294,7 @@ function CamLooper() {
   }, [windowShown, phoneRequestPending]);
   // While the phone streams, the backend refuses to start playback or the camera; grey the
   // controls and say why instead of letting the click fail.
-  const phoneBusy = phoneOwnsCamera(phoneStream.status.state);
+  const phoneBusy = cameraBusy(phoneStream.status);
   const handlePhoneAccept = async (sessionId: string) => {
     const result = await phoneStream.accept(sessionId);
     if (result === 'expired') toast.error(t('phoneStream.expired'));
