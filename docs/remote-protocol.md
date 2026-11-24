@@ -39,8 +39,14 @@ attempt: 1–64 printable ASCII characters, no spaces (e.g. 16 random base64url 
 | `status` | desktop → phone | `sessionId`, `state`: `connecting` \| `live`, `width?`, `height?`, `fps?`, `codec?` (`H264` \| `VP8`) | Progress for the phone's UI. `live` is sent when the first frame reaches the virtual camera, and again (at most every 2 s) when codec or resolution changes. |
 
 Stop (`stream_stop.data`): `{sessionId, reason}` with `reason` one of `user`, `ice_failed`,
-`error`, `peer_offline`, `timeout`. Unknown reasons are accepted. A `stream_stop` without
-`data` or without `sessionId` stops the current session (there is only ever one).
+`error`, `peer_offline`, `timeout`. Unknown reasons are accepted. **`sessionId` is required
+once the desktop has accepted the session:** a `stream_stop` without `data` or without
+`sessionId`, or naming another session, is ignored then (a late stop from an earlier attempt
+must not end the stream that is running). Before the user has decided, a `stream_stop`
+without `sessionId` still cancels the pending request.
+
+`peer_stopped` is a desktop-local reason (logs, `phone_stream_cli` output) for "the phone
+closed the peer connection and no `stream_stop` followed". It is never sent on the wire.
 
 Unknown `kind`s, malformed messages and messages whose `sessionId` is not the current
 session's are ignored (logged without content).
@@ -66,7 +72,7 @@ phone                                   relay                         desktop
   │──────────────────────────────────────▶│──────────────────────────────▶│ restore the video loop
 ```
 
-The phone may send its offer before `stream_accept`; the desktop holds it (and up to 64 early
+The phone may send its offer before `stream_accept`; the desktop holds it (and its early
 candidates) until the user accepts. Waiting for `stream_accept` is still recommended, so a
 declined request costs the phone no camera start.
 
@@ -76,12 +82,18 @@ declined request costs the phone no camera start.
 |---|---|---|
 | Sessions | one at a time | a `stream_request` with another `sessionId` while busy → `stream_reject{busy}` |
 | User decision | 60 s | `stream_reject{timeout}` |
+| After a decline or an ignored dialog | 15 s | new `stream_request`s → `stream_reject{declined}` without asking the user |
 | Accepted, no offer | 20 s | `stream_stop{timeout}` |
+| Accepted, camera not ready (a polkit/UAC prompt may be open) | 120 s | `stream_stop{timeout}`; the answer is sent only once the camera is ready |
+| Remote candidates | 32 per session, counting those in the offer | the rest are ignored; so are non-UDP, non-IPv4, port 0, loopback, multicast and unspecified addresses |
 | Offer → ICE connected | 15 s | `stream_stop{ice_failed}` |
 | No video while connected | 10 s | `stream_stop{timeout}` |
-| Phone leaves the relay | `peer{online:false}`, `hello{peerOnline:false}` or `error{peer_offline}` | the stream stops (`peer_offline`, nothing is sent) |
-| Phone sends `stream_stop` | — | the stream stops; nothing is sent back |
-| Desktop failure (ffmpeg restarted 3×, camera unavailable) | — | `stream_stop{error}` |
+| Phone leaves the relay before the stream is live | `peer{online:false}`, `hello{peerOnline:false}` or `error{peer_offline}` | the attempt ends (`peer_offline`, nothing is sent) |
+| Phone leaves the relay while live | same | nothing at first: media is peer to peer. If the phone is still offline 10 s later **and** no frame arrived in that time, the stream stops (`peer_offline`, nothing is sent); while video keeps arriving it stays up. A media timeout while the phone is offline also ends as `peer_offline`, not as an error |
+| Phone sends `stream_stop` (with the session's id) | — | the stream stops; nothing is sent back |
+| Phone closes the peer connection (DTLS close) | — | a normal stop, not an error. The desktop waits up to 1.5 s for the `stream_stop` that usually follows and uses its reason; nothing is sent back |
+| Desktop relay socket reconnects | — | queued frames younger than 30 s are sent if they are about the current session or end one (`stream_stop`, `stream_reject`); the rest are dropped |
+| Desktop failure (ffmpeg restarted 3× within 30 s, camera unavailable) | — | `stream_stop{error}` |
 
 ## Media
 
@@ -90,7 +102,8 @@ declined request costs the phone no camera start.
   offer contains, so the phone's codec order does not matter.
 - **ICE:** STUN only (`/v1/ice-servers`), no TURN, so the phone and the computer are expected to
   be on the same network (or have a working NAT path). The desktop offers one host candidate per
-  usable IPv4 interface plus at most one server-reflexive candidate. It cannot resolve mDNS
+  usable IPv4 interface (at most 4, the default-route interface first; VPN/tunnel and
+  container/VM bridge interfaces are left out) plus at most one server-reflexive candidate. It cannot resolve mDNS
   (`*.local`) candidates; Chrome exposes real host addresses to a page that holds camera
   permission, and the phone also reaches the desktop's host candidates directly
   (peer-reflexive), so this does not block same-LAN connections.
@@ -108,5 +121,67 @@ declined request costs the phone no camera start.
   `degradationPreference: "maintain-resolution"` (or `"balanced"`), and
   `track.contentHint = "motion"`.
 - Portrait video is fine: the desktop letterboxes it into the camera's 16:9 frame.
-- Send `stream_stop{reason:"user"}` when the user stops, and before the page is hidden or
-  closed (`pagehide`).
+- Send `stream_stop{sessionId, reason:"user"}` when the user stops, and before the page is
+  hidden or closed (`pagehide`). Always include `sessionId`. Closing the `RTCPeerConnection`
+  alone also ends the session cleanly on the desktop, but without a reason.
+
+## Known limitation / later: the offer is not authenticated end to end
+
+**Status: not implemented. Do not rely on the relay being unable to inject video.**
+
+WebRTC authenticates the media path with the DTLS certificate fingerprint carried in the SDP
+(`a=fingerprint`). str0m verifies that the DTLS peer presents the certificate the offer
+named. But the offer itself reaches the desktop through the relay, and nothing binds it to
+the paired phone. The relay authenticates the two sockets (desktop token, phone ticket); it
+does not — and cannot — prove to the desktop that an `offer` it forwards was written by the
+phone.
+
+What that allows: a **compromised or malicious relay** (or anyone who can act as the phone
+on the relay, e.g. with a stolen phone ticket) can send `stream_request`, and after the user
+clicks Accept, an `offer` with its own fingerprint and candidates, and then feed arbitrary
+video into the virtual camera. It can equally replace the real phone's offer in transit.
+What it does *not* allow: starting a stream without the user's Accept on the desktop,
+reading the desktop's screen or files, or (for a passive relay) seeing the media, which
+never touches the relay.
+
+Mitigations in place: every stream needs an explicit Accept in the app; the dialog shows
+the phone's name; the live banner and tray make a running stream visible; one click stops
+it. Device names are sanitized so a request cannot disguise itself.
+
+### Proposed design
+
+Bind the DTLS fingerprints to the pairing with a secret the relay never sees.
+
+1. **Pairing-time secret.** Today pairing exchanges a 6-digit code *through* the relay, so
+   the relay knows everything both sides know. Add a secret that travels out of band: the
+   desktop generates 32 random bytes `K` and shows them to the phone in the pairing QR code
+   / link **fragment** (`https://…/#k=<base64url K>` — a fragment is never sent to a
+   server). Both sides store `K` with the pairing. (Typed 6-digit codes cannot carry `K`;
+   for that path use a PAKE such as SPAKE2 over the code to derive `K`, or fall back to the
+   verification code below.)
+2. **Authenticate each offer and answer.** The phone adds to `offer`:
+   `mac = base64url(HMAC-SHA256(K, "camlooper-offer-v1" ‖ 0x00 ‖ sessionId ‖ 0x00 ‖ fingerprint))`
+   where `fingerprint` is the exact `a=fingerprint:sha-256 …` value of its offer (upper-case
+   hex with colons). The desktop recomputes it over the fingerprint it parsed from the SDP
+   and refuses the offer (`stream_stop{error}`) on mismatch, in constant time. The desktop's
+   `answer` carries the same construction with the label `"camlooper-answer-v1"` over its own
+   fingerprint, so the phone knows it is sending its camera to the paired computer and not
+   to the relay. Covering `sessionId` prevents replaying an old offer into a new session;
+   covering only the fingerprint (not the whole SDP) is enough, because everything else in
+   the SDP is either authenticated by DTLS afterwards or only affects reachability.
+3. **Rollout.** `hello` advertises `offerAuth: 1`. A desktop paired with `K` requires `mac`;
+   pairings made before the feature have no `K` and keep today's behaviour until re-paired
+   (the UI should say "re-link your phone to enable verified streaming"). Never accept a
+   missing `mac` on a pairing that has `K` — that would be a downgrade.
+
+**Alternative / fallback: a short verification code.** Without a shared secret, both
+devices can display a 4-digit code derived from the two DTLS fingerprints
+(`SHA-256(offerFingerprint ‖ answerFingerprint)`, truncated — a short authentication
+string) once DTLS is up, and the user compares them before the desktop starts writing
+frames to the camera. It needs no protocol change beyond the UI, but it costs a manual step
+on every stream and users learn to click through it; the HMAC is invisible. Prefer the
+HMAC, keep the code for pairings without `K`.
+
+Related hardening to do at the same time: derive the relay `sessionId` acceptance from `K`
+as well (so a relay cannot even raise the Accept dialog), and add `K`-keyed MACs to
+`stream_stop` if spoofed stops become a nuisance.

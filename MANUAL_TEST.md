@@ -430,6 +430,64 @@ anyway; test on a floating desktop (GNOME, KDE, XFCE).
 
 <!-- Newest entries first. -->
 
+### Phone camera stream: Windows Firewall and the "couldn't connect" message
+_Added 2026-11-24 · Windows, direct-download and Store builds alike (nothing here happens at install time) · `src/hooks/use-phone-stream.ts`, `src/i18n/locales/*.json` (`phoneStream.errors.ice_failed_windows`)_
+
+The phone connects *to* the computer over UDP. If Windows Firewall blocks inbound traffic
+for CamLooper, the connection fails after 15 s; on Windows the error message then also
+points at the firewall. The dialog, banner, stop and tray behaviour are the Linux entry
+"Phone camera stream into v4l2…" (part A) — run those steps on Windows too; this entry only
+covers what differs.
+
+**Setup:** a Windows build installed (see
+[`../manual-testing/VIRTUALBOX_WINDOWS_TESTING.md`](../manual-testing/VIRTUALBOX_WINDOWS_TESTING.md);
+in VirtualBox the VM needs a **bridged** adapter so the phone can reach it — with NAT the
+connection can never succeed), a phone linked under **Advanced → Phone remote**, phone and
+computer on the same Wi-Fi, the network set to **Private** in Windows. An elevated
+PowerShell.
+
+**Steps:**
+1. With CamLooper running, list its firewall rules:
+   `Get-NetFirewallApplicationFilter -Program (Get-Process camlooper).Path | Get-NetFirewallRule | ft DisplayName,Direction,Action,Profile,Enabled`
+   and remove them (append `| Remove-NetFirewallRule` instead of `| ft …`) so Windows asks again.
+2. On the phone tap **Start streaming**; in CamLooper click **Accept**.
+3. When the "Windows Security — Windows Defender Firewall has blocked some features of this
+   app" prompt appears, click **Cancel**.
+4. Wait for the banner to change, read the message, then run the command from step 1 again.
+5. Remove the rules again (step 1), repeat step 2, and this time tick **Private networks**
+   and click **Allow access**.
+6. Switch the app language to **Deutsch** and repeat steps 1–4.
+
+**Expected:**
+- Step 3: the prompt names CamLooper. It appears once per missing rule, the first time the
+  app opens its UDP sockets for a stream (not at install, not at launch).
+- Step 4: "Connecting to <phone>…" for up to ~15 s, then the red message: "Phone camera
+  stopped. Couldn't connect directly to the phone. Put the phone and computer on the same
+  Wi-Fi, or connect the computer to the phone's hotspot. **Also make sure Windows Firewall
+  allows CamLooper on private networks.**" The PowerShell command now lists inbound rules for
+  CamLooper with `Action Block`.
+- Step 5: live within a few seconds, as on Linux. The command lists `Action Allow`,
+  `Profile Private`.
+- Step 6: the same message in German, ending "…dass die Windows-Firewall CamLooper in
+  privaten Netzwerken zulässt."
+
+**Known gotchas:**
+- No prompt appears when a rule for this exact program path already exists (allow *or*
+  block) — hence step 1. Each install location (direct build, Store NSIS build, a dev build)
+  is a different path with its own rules.
+- The firewall sentence is shown on Windows for *every* `ice_failed`, also when the real
+  cause is the phone being on mobile data. It is a hint, not a diagnosis. Linux and macOS
+  show the message without it.
+- It can still connect with inbound traffic blocked when the phone exposes a real LAN
+  address (the computer's outbound checks open the path); the block bites when the phone
+  only offers `.local` (mDNS) addresses. So "blocked but it worked" is not a failure of
+  this entry; "blocked, failed, and no firewall sentence" is.
+- On the Store build the first Accept may also show one UAC prompt (softcam registration).
+  That is unrelated to the firewall prompt; answer it first.
+- These steps were written from the code and Windows Defender Firewall's documented
+  behaviour, not from a run on a Windows machine. If the prompt wording or the PowerShell
+  output differs, fix this entry.
+
 ### Start at login (direct, Store NSIS and MSIX) for the phone remote
 _Added 2026-11-08 · Windows · `tauri-plugin-autostart`, `windows/hooks.nsh`, `windows/hooks-store.nsh`_
 
@@ -572,9 +630,13 @@ the first request by itself and has no UI. The dialog, banner and tray item are 
 code on Windows and macOS; only the camera sink differs.
 
 **Already automated, don't repeat by hand:** `cargo test --lib` covers the 60 s decision
-timeout, stale/cancelled requests, the error code behind the error banner (`last_error_code`
-= `ice_failed` etc.) and that the tray-label payload accepts the new `stopPhone`/`phoneLive`
-fields. Part A covers what needs eyes.
+timeout, the 15 s quiet period after a decline, stale/cancelled requests, a `stream_stop`
+without the session's id being ignored once accepted, the relay-flap grace period while live,
+the stop watchdog, the candidate cap and filter, the error code behind the error banner
+(`last_error_code` = `ice_failed` etc.), that a panic in the session still hands the camera
+back, and that the tray-label payload accepts the new `stopPhone`/`phoneLive` fields.
+`cargo test --test phone_stream_loopback` covers the phone closing its connection (ends idle,
+no error) and junk datagrams sent at the receiver's ports. Part A covers what needs eyes.
 
 #### Part A — in the app
 
@@ -591,9 +653,11 @@ fields. Part A covers what needs eyes.
 1. Open **Advanced** and look at the Phone remote card.
 2. Close the window (it hides to the tray because a phone is linked). On the phone tap
    **Start streaming** and allow camera access.
-3. In the dialog, watch the countdown for 5 s, then click **Decline**.
-4. Tap **Start streaming** again; this time click nothing for 60 s.
-5. Tap **Start streaming** again and click **Accept**.
+3. In the dialog, watch the countdown for 5 s, then click **Decline**. Within 10 s tap
+   **Start streaming** on the phone again.
+4. Wait until 15 s have passed since the Decline, tap **Start streaming** again; this time
+   click nothing for 60 s.
+5. Wait 15 s, tap **Start streaming** again and click **Accept**.
 6. While it is live, look at the step-3 card (**Jump in live** switch, **Record a new loop**)
    and the **Advanced → Virtual camera → Enable virtual camera** switch. Open
    `ffplay -f v4l2 /dev/video10`.
@@ -603,6 +667,13 @@ fields. Part A covers what needs eyes.
 10. Put the phone on mobile data (Wi-Fi off), tap **Start streaming**, and click **Accept**.
     Then, separately, repeat step 5 on Wi-Fi and switch the phone's Wi-Fi off while live.
 11. Switch the app language to **עברית** (Hebrew) and to **العربية** (Arabic) and repeat step 5.
+12. Repeat step 5, and once it is live tap **Stop** *on the phone*. Run the app from a
+    terminal for this one so you can read its stderr.
+13. Tap **Start streaming**; when the dialog is up, disconnect the *computer* from the
+    network (Wi-Fi off / cable out), wait ~5 s and click **Accept**. Reconnect and click
+    **Accept** again before the countdown ends.
+14. Repeat step 5, and while live put the phone's browser in the background for ~5 s (home
+    button), then return to the page.
 
 **Expected:**
 - Step 1: under "Linked with <phone>" a small grey line: "Stream your phone's camera: open
@@ -613,7 +684,10 @@ fields. Part A covers what needs eyes.
   keyboard focus) and **Decline**, and "Declines automatically in 5x s" counting down once a
   second. The rest of the window is dimmed and not clickable. Debug logs show
   `phone stream: request from <phone>`.
-- Step 3: the dialog closes; the phone shows that the computer declined. The loop keeps playing.
+- Step 3: the dialog closes; the phone shows that the computer declined. The loop keeps
+  playing. The second tap is declined on the phone straight away and **no dialog appears and
+  the window is not raised** on the computer: for 15 s after a Decline (or an ignored dialog)
+  new requests are declined silently.
 - Step 4: the countdown reaches 0 and the dialog closes by itself (within ~1 s of 0); the
   phone shows that the request timed out. Clicking nothing else is needed.
 - Step 5: the dialog closes, a red banner appears at the very top: spinner + "Connecting to
@@ -637,9 +711,24 @@ fields. Part A covers what needs eyes.
   by a red message that stays: "Phone camera stopped. Couldn't connect directly to the phone.
   Put the phone and computer on the same Wi-Fi, or connect the computer to the phone's
   hotspot." The **×** dismisses it; a new request also clears it. Wi-Fi off while live:
-  within ~10 s either the banner just disappears (the relay reported the phone offline — not
-  an error) or the message reads "…The phone stopped sending video…" (media timeout). Hovering
-  the message shows the technical detail as a tooltip.
+  the picture freezes and within ~10–20 s the banner just disappears (the relay reported the
+  phone offline and the video stopped — not an error). If the relay had not noticed yet, the
+  message reads "…The phone stopped sending video…" instead (media timeout). Hovering the
+  message shows the technical detail as a tooltip.
+- Step 12: the banner disappears (it may say "Stopping the phone camera…" for a moment), a
+  plain toast says "Phone stopped streaming.", the controls are enabled and the loop resumes.
+  **No red "Phone camera stopped…" message.** stderr has
+  `phone stream: receiver closed (closed by the phone)` followed by
+  `phone stream: ended (user)` (or `ended (peer_stopped)` if the relay's frame was slow) —
+  never `ended (error): the connection was closed`.
+- Step 13: the first click shows the toast "CamLooper isn't connected to the phone service
+  right now. Try again in a moment." and **the dialog stays open**, still counting down; the
+  loop keeps playing. After reconnecting (the Phone remote card is back to "Linked with
+  <phone>", a few seconds) the second click behaves like step 5. If the countdown ran out
+  meanwhile, the dialog just closes.
+- Step 14: the stream either carries on or freezes for those seconds and resumes; the banner
+  stays "Phone camera live" throughout. The phone's relay connection dropping for a moment
+  does not end a stream that is still delivering video.
 - Step 11: dialog and banner text are translated and laid out right-to-left (icon and title
   on the right, buttons on the left); in the banner the "1280×720 · 30 fps · H.264 · 00:12"
   part still reads left-to-right with no scrambled digits.
@@ -652,7 +741,11 @@ fields. Part A covers what needs eyes.
   (GNOME shows "CamLooper is ready" instead). The dialog is still there; that is not a failure.
 - There is no separate desktop notification; bringing the window forward is the alert.
 - Accepting may trigger one polkit prompt the first time (loading v4l2loopback), or one UAC
-  prompt on the Windows Store build (softcam registration).
+  prompt on the Windows Store build (softcam registration). You have two minutes to answer
+  it; the banner says "Connecting…" meanwhile. (The phone page may give up waiting earlier
+  and show its own timeout — start again once the prompt is answered.)
+- The 15 s quiet period after a Decline is deliberate (a phone cannot keep popping the
+  window up). A request during it is declined on the phone at once; it is not lost or stuck.
 - If you click **Accept** in the last second, you may get the toast "That request has already
   expired…" — the backend timed out first. Expected.
 - The phone page itself is English-only, so the translated hint and dialog name the phone's
@@ -699,10 +792,14 @@ a real network and eyes.
   should reach `1280x720` (or the phone camera's 16:9 size) within ~20 s on a good network.
   `"frames"` keeps increasing.
 - Step 5: `Width/Height 1280/720`, `Pixel Format 'RGB3'`; ffmpeg reads 90 frames in about 3 s.
-- Step 6: states `stopping`, `idle`, then `{"event":"unpaired","revoked":true}`; the CLI exits
-  with status 0 and the phone page returns to its unlinked screen.
-- Step 7: within ~10 s the CLI logs `phone stream: ended (timeout)` or `(peer_offline)`,
-  state goes to `error` or `idle`, and the CLI exits.
+- Step 6: state `idle` (possibly via `stopping`), **never `error`**, then
+  `{"event":"unpaired","revoked":true}`; the CLI exits with status 0 and the phone page
+  returns to its unlinked screen. stderr shows
+  `phone stream: receiver closed (closed by the phone)` and `phone stream: ended (user)` or
+  `ended (peer_stopped)` — not `ended (error): the connection was closed`.
+- Step 7: within ~10–20 s the CLI logs `phone stream: ended (peer_offline)` or `(timeout)`,
+  state goes to `idle` (or `error` if the relay had not yet reported the phone offline), and
+  the CLI exits.
 - Step 8: the first grep prints `0` for `cli-plain.err` (no SDP or IP address without
   `--debug`) and a number > 0 for `cli-debug.err`. The second grep prints `0` for every file.
 

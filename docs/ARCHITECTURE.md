@@ -208,24 +208,35 @@ The phone streams its camera peer-to-peer over WebRTC and the app turns it into 
 camera. Signaling rides the same relay socket (opened with `?protocol=2`); the app-level
 protocol is in [remote-protocol.md](remote-protocol.md).
 
-- **Receiver:** str0m 0.26 (sans-IO) with the vendored pure-Rust crypto provider
-  `src-tauri/vendor/str0m-purecrypto` (str0m's own `rust-crypto` feature pulls aws-lc-sys, which
-  breaks the cargo-xwin build). One tokio task per session owns the `Rtc` and one UDP socket per
-  IPv4 interface; candidates go in the answer, the phone trickles.
+- **Receiver:** str0m 0.26 (sans-IO) with the vendored crypto provider
+  `src-tauri/vendor/str0m-purecrypto` (RustCrypto, plus `ring` for the certificate; str0m's own
+  `rust-crypto` feature pulls aws-lc-sys, which breaks the cargo-xwin build). One tokio task per
+  session owns the `Rtc` and one UDP socket per usable IPv4 interface (at most 4, no VPN/tunnel
+  or bridge interfaces); candidates go in the answer, the phone trickles. The sockets are open
+  to the LAN: datagrams that are not this session's are dropped and never end it, remote
+  candidates are filtered and capped at 32, and the phone closing the connection is a normal
+  stop (`peer_stopped`), not an error.
 - **Pipeline:** depacketized H.264 → Annex-B (SPS/PPS before every IDR) or VP8 → IVF on ffmpeg's
   stdin (`pipeline::Source::EncodedStdin`), then the existing `build_outputs` sinks: v4l2 on
   Linux, BGR24 → softcam on Windows, BGRA → CMIO on macOS, letterboxed to the camera geometry at
   a constant frame rate.
 - **Handoff:** while a phone session holds the camera, the video loop is paused and refuses to
-  start; it is resumed when the stream ends.
-- **Rules:** `machine.rs` is a pure state machine (one session, 60 s decision timeout, busy,
-  stale session ids); `manager.rs` runs it. There is no auto-accept in the app: a `DecisionSink`
+  start, and so do the in-app camera preview and recording; the loop is resumed when the stream
+  ends. The session task runs under `catch_unwind` and the acquire in its own never-cancelled
+  task, so the camera is handed back exactly once whatever happens — a panic, a stop in the
+  middle of a polkit/UAC prompt.
+- **Rules:** `machine.rs` is a pure state machine (one session, 60 s decision timeout, 15 s
+  quiet period after a decline, busy, stale session ids, 10 s grace when the phone leaves the
+  relay mid-stream, 10 s stop watchdog); `manager.rs` runs it. There is no auto-accept in the app: a `DecisionSink`
   (the UI) must call `remote_stream_accept`.
 - **Commands / events:** `remote_stream_status`, `remote_stream_accept`, `remote_stream_reject`,
   `remote_stream_stop`; `remote://stream-request`, `remote://stream-request-dismissed`,
   `remote://stream-status`.
 - **Dev:** `cargo run --example phone_stream_cli -- --code 123456 --null` runs the whole path
   headless; `cargo test --test phone_stream_loopback` runs it against a simulated phone.
+- **Not done yet:** the offer is not authenticated end to end — a compromised relay could
+  inject video after the user accepts. See "Known limitation / later" in
+  [remote-protocol.md](remote-protocol.md) for the proposed design.
 
 #### Auto-join (`meeting/`)
 
