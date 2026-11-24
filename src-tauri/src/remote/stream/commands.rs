@@ -93,8 +93,14 @@ pub async fn remote_stream_status() -> StreamStatus {
 }
 
 /// `Err("no_such_request")` when the request already expired or was cancelled.
+/// `Err("offline")` while the relay socket is down: the accept could not reach the phone, and
+/// starting the session anyway would pause the video loop for a connection that cannot be
+/// negotiated. The request stays pending; the UI keeps its dialog open.
 #[tauri::command]
 pub async fn remote_stream_accept(session_id: String) -> Result<(), String> {
+    if !crate::remote::client::is_connected() {
+        return Err("offline".to_string());
+    }
     manager()?.accept(&session_id).await.map_err(|_| "no_such_request".to_string())
 }
 

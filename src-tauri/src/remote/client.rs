@@ -15,7 +15,7 @@
 //! `fetch_ice_servers`) take no `AppHandle`, so the headless dev CLI uses them too.
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use once_cell::sync::{Lazy, OnceCell};
@@ -32,7 +32,7 @@ use super::protocol::{
     ApiErrorBody, ClientMessage, IceServersResponse, PairClaimRequest, PairClaimResponse, ServerMessage, PROTOCOL_V2_QUERY,
 };
 use super::store::{Pairing, Store, STORE_VERSION};
-use super::stream::signal::{OutboundFrame, StopReason};
+use super::stream::signal::{worth_sending_after_reconnect, OutboundFrame, StopReason};
 use super::stream::StreamManager;
 
 const DEFAULT_API_BASE: &str = "https://api.camlooper.com/";
@@ -481,6 +481,11 @@ fn forget_pairing(app: &AppHandle, server_reason: Option<&str>) {
     }
 }
 
+/// Whether the relay socket is up right now.
+pub(crate) fn is_connected() -> bool {
+    state().connected
+}
+
 fn set_connected(app: &AppHandle, connected: bool) {
     state().connected = connected;
     emit_status(app);
@@ -499,11 +504,17 @@ enum SessionEnd {
 
 async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
     let mut backoff = Backoff::default();
-    let (stream, mut outbound) = super::stream::commands::install(app.clone());
+    let (stream, outbound) = super::stream::commands::install(app.clone());
+    // Stamp each frame as it is queued, so that after a reconnect its age is known.
+    let mut outbound = stamp_outbound(outbound);
     loop {
         let pairing = { state().pairing.clone() };
         let Some(pairing) = pairing else {
-            // Unlinked: park. No client, no DNS, no socket until a code is entered.
+            // Unlinked, however we got here — also from the backoff below or a refused
+            // reconnect, where no relay session was up to notice. An unpaired phone must not
+            // keep feeding the camera over the peer-to-peer path it already has.
+            stream.stop(StopReason::User).await;
+            // Park. No client, no DNS, no socket until a code is entered.
             match rx.recv().await {
                 None => return,
                 Some(_) => {
@@ -524,9 +535,17 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
                 backoff.reset();
                 set_connected(&app, true);
                 stream.set_device_name(pairing.mobile_device_name.clone());
-                // Frames queued while disconnected belong to a moment that has passed.
-                while outbound.try_recv().is_ok() {}
-                let end = run_session(ws, &mut rx, &app, &stream, &mut outbound).await;
+                // Frames queued while disconnected: keep what the phone still needs (the
+                // answer or a stop for the session that is current, a recent rejection), drop
+                // what belongs to a moment that has passed.
+                let current = stream.status().session_id;
+                let mut carried = Vec::new();
+                while let Ok((queued_at, frame)) = outbound.try_recv() {
+                    if worth_sending_after_reconnect(&frame, queued_at.elapsed(), current.as_deref()) {
+                        carried.push(frame);
+                    }
+                }
+                let end = run_session(ws, &mut rx, &app, &stream, &mut outbound, carried).await;
                 set_connected(&app, false);
                 match end {
                     SessionEnd::Revoked(reason) => {
@@ -544,6 +563,9 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
                 }
             }
             Err(ConnectError::Revoked) => {
+                // The pairing was revoked while the socket was down; a stream may still be
+                // live peer to peer.
+                stream.stop(StopReason::PeerOffline).await;
                 forget_pairing(&app, Some("revoked"));
                 continue;
             }
@@ -560,6 +582,18 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
             }
         }
     }
+}
+
+fn stamp_outbound(mut raw: mpsc::UnboundedReceiver<OutboundFrame>) -> mpsc::UnboundedReceiver<(Instant, OutboundFrame)> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(frame) = raw.recv().await {
+            if tx.send((Instant::now(), frame)).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 /// Open the desktop WebSocket (v2 frames, header auth).
@@ -598,8 +632,16 @@ async fn run_session(
     rx: &mut mpsc::UnboundedReceiver<Control>,
     app: &AppHandle,
     stream: &StreamManager,
-    outbound: &mut mpsc::UnboundedReceiver<OutboundFrame>,
+    outbound: &mut mpsc::UnboundedReceiver<(Instant, OutboundFrame)>,
+    carried: Vec<OutboundFrame>,
 ) -> SessionEnd {
+    for frame in carried {
+        if let Some(text) = frame.to_json() {
+            if ws.send(Message::text(text)).await.is_err() {
+                return SessionEnd::Dropped;
+            }
+        }
+    }
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping.tick().await; // the first tick completes immediately
@@ -644,7 +686,7 @@ async fn run_session(
                 }
             }
             frame = outbound.recv() => {
-                let Some(frame) = frame else { continue };
+                let Some((_, frame)) = frame else { continue };
                 match frame.to_json() {
                     Some(text) => {
                         if ws.send(Message::text(text)).await.is_err() {
