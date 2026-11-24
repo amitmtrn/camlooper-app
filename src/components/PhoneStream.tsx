@@ -139,6 +139,14 @@ export function PhoneStreamDialog({
     };
   }, []);
 
+  // A disabled button cannot keep the focus: when Accept or Decline is disabled under it
+  // (busy, or Accept re-arming) the focus falls to <body>, outside the dialog, and Escape
+  // and Tab would stop working. Put it back on the dialog whenever it has left.
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) dialog.focus();
+  }, [busy, armed, expired]);
+
   // The backend's timeout is what counts, but do not sit at "0 s" waiting to hear of it.
   useEffect(() => {
     if (expired) onExpire(sessionId);
