@@ -43,6 +43,12 @@ Not redistributed as separate files, but compiled or bundled into the app:
 | [`ffmpeg-next`](https://crates.io/crates/ffmpeg-next) / `ffmpeg-sys-next` (Rust bindings, non-Windows) | WTFPL |
 | [`windows`](https://crates.io/crates/windows) crate (Win32 DirectShow / Media Foundation) | MIT OR Apache-2.0 |
 | [`v4l`](https://crates.io/crates/v4l) (Linux virtual camera) | MIT |
+| [`str0m`](https://github.com/algesten/str0m) 0.26 (WebRTC receiver for the phone camera stream; no default features) | MIT OR Apache-2.0 |
+| `str0m-purecrypto` — vendored copy of [`str0m-rust-crypto`](https://crates.io/crates/str0m-rust-crypto) 0.7.0 by Martin Algesten, patched to drop its aws-lc dependency. Lives in `src-tauri/vendor/str0m-purecrypto/` with its license text (`LICENSE-MIT`) and a README explaining the patch | MIT OR Apache-2.0 (used under MIT) |
+| str0m's pure-Rust crypto stack: `dimpl` (DTLS), `rcgen` + `ring` (certificate), RustCrypto `aes-gcm`/`p256`/`sha2`/`hmac`…, `x509-parser`, `sctp-proto` | MIT OR Apache-2.0 (ring: ISC-style, already used by rustls) |
+| `curve25519-dalek`, `x25519-dalek` (pulled in by `dimpl`) | BSD-3-Clause |
+| [`if-addrs`](https://crates.io/crates/if-addrs) (local interfaces for ICE host candidates) | MIT OR BSD-3-Clause |
+| `nom`, `flagset` (via `x509-parser` / `x509-cert`) | MIT / Apache-2.0 |
 | Other Rust crates (tokio, serde, image, uuid, mp4, …) | MIT OR Apache-2.0 (see `src-tauri/Cargo.lock`) |
 | [React](https://react.dev/), [Radix UI](https://www.radix-ui.com/), [shadcn/ui](https://ui.shadcn.com/), [Tailwind CSS](https://tailwindcss.com/), [Vite](https://vite.dev/) | MIT |
 | Other npm packages | MIT / ISC / BSD (see `package-lock.json`) |

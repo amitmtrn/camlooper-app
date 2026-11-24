@@ -1,0 +1,28 @@
+# Vendored copy of str0m-rust-crypto 0.7.0 (MIT OR Apache-2.0, Martin Algesten).
+# ONLY change: dimpl is used with feature "rust-crypto" only (upstream also enables
+# "rcgen", which in dimpl 0.9 forces dimpl/aws-lc-rs + rcgen/aws_lc_rs -> aws-lc-sys).
+# Self-signed cert generation is done with rcgen + ring instead.
+[package]
+name = "str0m-purecrypto"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.89.0"
+license = "MIT OR Apache-2.0"
+publish = false
+authors = ["Martin Algesten <martin@algesten.se>"]
+repository = "https://github.com/algesten/str0m"
+description = "Vendored copy of str0m-rust-crypto 0.7.0 without the aws-lc dependency (see README.md)"
+
+[dependencies]
+str0m-proto = { version = "0.8.0", default-features = false, features = ["dtls"] }
+dimpl = { version = "0.9.0", default-features = false, features = ["rust-crypto"] }
+rcgen = { version = "0.14.7", default-features = false, features = ["ring", "crypto"] }
+time = "0.3.47"
+hmac = "0.13"
+aes-gcm = "0.11"
+aes = "0.9"
+ctr = "0.10"
+p256 = { version = "0.14", features = ["ecdh"] }
+sha1 = "0.11"
+sha2 = "0.11"
+getrandom = "0.3"
