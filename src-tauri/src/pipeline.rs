@@ -34,6 +34,9 @@ pub enum CameraSink {
     /// No camera leg at all — preview only. Used whenever playback runs with the virtual
     /// camera switched off.
     None,
+    /// Decode and discard (`-f null -`). Never chosen by the app; the headless phone-stream
+    /// CLI and its integration test use it to prove frames decode without a camera device.
+    Null,
 }
 
 impl CameraSink {
@@ -51,7 +54,7 @@ impl CameraSink {
         match self {
             CameraSink::RawBgr24Stdout => Some(3),
             CameraSink::RawBgraStdout => Some(4),
-            CameraSink::V4l2 { .. } | CameraSink::None => None,
+            CameraSink::V4l2 { .. } | CameraSink::None | CameraSink::Null => None,
         }
     }
 
@@ -160,6 +163,65 @@ pub enum Source {
     MjpegStdin { fps: u32 },
     /// A capture device, already expressed as ffmpeg input arguments.
     Device { args: Vec<String> },
+    /// An encoded elementary stream written to stdin by the phone-stream receiver: H.264
+    /// Annex-B or VP8 in IVF. Frames arrive in real time over the network, so this input is
+    /// tuned for latency, not throughput: no probing, no buffering, and timestamps taken from
+    /// the arrival clock (see [`encoded_stdin_input_args`]).
+    EncodedStdin { codec: EncodedCodec },
+}
+
+/// Codecs the phone-stream receiver hands to ffmpeg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EncodedCodec {
+    H264,
+    Vp8,
+}
+
+impl EncodedCodec {
+    /// The ffmpeg demuxer for the byte stream the receiver writes.
+    pub fn demuxer(self) -> &'static str {
+        match self {
+            EncodedCodec::H264 => "h264",
+            EncodedCodec::Vp8 => "ivf",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            EncodedCodec::H264 => "H264",
+            EncodedCodec::Vp8 => "VP8",
+        }
+    }
+}
+
+/// Input arguments for [`Source::EncodedStdin`].
+///
+/// * `-fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0`: start decoding
+///   on the first keyframe instead of buffering seconds of stream to probe it.
+/// * `-use_wallclock_as_timestamps 1`: a raw H.264 stream carries no timestamps (the demuxer
+///   would assume 25 fps), and a phone's frame rate drifts with light and bandwidth. Stamping
+///   each frame with its arrival time lets the `fps` filter in the output leg turn whatever
+///   arrives into the camera's constant rate, duplicating frames through short stalls.
+pub fn encoded_stdin_input_args(codec: EncodedCodec) -> Vec<String> {
+    [
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
+        "-use_wallclock_as_timestamps",
+        "1",
+        "-f",
+        codec.demuxer(),
+        "-i",
+        "pipe:0",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// A complete pipeline description.
@@ -230,6 +292,9 @@ fn build_input(spec: &PipelineSpec) -> Vec<String> {
         Source::Device { args } => {
             a.extend(args.iter().cloned());
         }
+        Source::EncodedStdin { codec } => {
+            a.extend(encoded_stdin_input_args(*codec));
+        }
     }
 
     a
@@ -257,6 +322,11 @@ pub fn build_outputs(spec: &PipelineSpec) -> Vec<String> {
             // width*height*bpp bytes and the reader can use a fixed-size read_exact.
             a.extend(["-f".into(), "rawvideo".into(), "-pix_fmt".into(), pix.into()]);
             a.push("pipe:1".into());
+        }
+        CameraSink::Null => {
+            a.extend(["-map".into(), "0:v".into()]);
+            a.extend(["-vf".into(), format!("{fit},fps={}", spec.geometry.fps)]);
+            a.extend(["-f".into(), "null".into(), "-".into()]);
         }
         CameraSink::None => {}
     }
@@ -580,6 +650,80 @@ mod tests {
         }
         assert_eq!(bar_max, 0, "pillarbox bars must be pure black, saw {bar_max}");
         assert!(content_max > 50, "the padded region swallowed the picture");
+    }
+
+    // --- the phone stream's encoded stdin input ------------------------------------------
+
+    fn phone_spec(codec: EncodedCodec, sink: CameraSink) -> PipelineSpec {
+        PipelineSpec {
+            source: Source::EncodedStdin { codec },
+            sink,
+            geometry: geom(),
+            preview: None,
+            realtime: false,
+        }
+    }
+
+    fn index_of(a: &[String], needle: &str) -> usize {
+        a.iter().position(|x| x == needle).unwrap_or_else(|| panic!("{needle} missing: {a:?}"))
+    }
+
+    #[test]
+    fn encoded_stdin_is_tuned_for_latency_and_reads_pipe0() {
+        for (codec, demuxer) in [(EncodedCodec::H264, "h264"), (EncodedCodec::Vp8, "ivf")] {
+            let a = build(&phone_spec(codec, CameraSink::V4l2 { device: "/dev/video0".into() }));
+            let out = a.join(" ");
+            assert!(out.contains("-fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0"), "{out}");
+            assert!(out.contains("-use_wallclock_as_timestamps 1"), "{out}");
+            assert!(out.contains(&format!("-f {demuxer} -i pipe:0")), "{out}");
+            // Every input option must precede the -i it applies to.
+            let i = index_of(&a, "-i");
+            for opt in ["-fflags", "-probesize", "-analyzeduration", "-use_wallclock_as_timestamps"] {
+                assert!(index_of(&a, opt) < i, "{opt} must be an input option: {out}");
+            }
+            // Never self-paced: the network is the clock.
+            assert!(!a.contains(&"-re".to_string()), "{out}");
+            assert!(!a.contains(&"-stream_loop".to_string()), "{out}");
+        }
+    }
+
+    #[test]
+    fn phone_stream_to_v4l2_is_fitted_constant_rate_rgb24() {
+        let out = joined(&phone_spec(EncodedCodec::H264, CameraSink::V4l2 { device: "/dev/video7".into() }));
+        // Portrait phones are letterboxed into the camera geometry, never stretched.
+        assert!(out.contains(&format!("-vf {},fps=30", fit_filter(&geom()))), "{out}");
+        assert!(out.contains("-f v4l2 -pix_fmt rgb24 /dev/video7"), "{out}");
+    }
+
+    #[test]
+    fn phone_stream_to_softcam_is_bgr24_on_stdout() {
+        let out = joined(&phone_spec(EncodedCodec::Vp8, CameraSink::RawBgr24Stdout));
+        assert!(out.contains(&format!("-vf {},fps=30", fit_filter(&geom()))), "{out}");
+        assert!(out.ends_with("-f rawvideo -pix_fmt bgr24 pipe:1"), "{out}");
+    }
+
+    #[test]
+    fn phone_stream_to_cmio_is_bgra_on_stdout() {
+        let out = joined(&phone_spec(EncodedCodec::H264, CameraSink::RawBgraStdout));
+        assert!(out.ends_with("-f rawvideo -pix_fmt bgra pipe:1"), "{out}");
+        assert_eq!(out.matches("pipe:1").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn null_sink_decodes_and_discards() {
+        let out = joined(&phone_spec(EncodedCodec::H264, CameraSink::Null));
+        assert!(out.contains(&format!("-vf {},fps=30", fit_filter(&geom()))), "{out}");
+        assert!(out.ends_with("-f null -"), "{out}");
+        assert_eq!(CameraSink::Null.frame_bytes(&geom()), None);
+    }
+
+    #[test]
+    fn phone_stream_with_preview_on_a_device_sink_adds_the_mjpeg_leg() {
+        let mut s = phone_spec(EncodedCodec::H264, CameraSink::V4l2 { device: "/dev/video0".into() });
+        s.preview = Some(PreviewSpec::default());
+        let out = joined(&s);
+        assert!(out.contains("-c:v mjpeg"), "{out}");
+        assert!(out.ends_with("pipe:1"), "{out}");
     }
 
     #[test]
