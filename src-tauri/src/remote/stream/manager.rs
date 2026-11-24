@@ -41,12 +41,24 @@ impl DecisionSink for ChannelDecisions {
 
 /// Starts session tasks. The real one is [`super::runner::spawn_session`]; tests use a fake.
 pub trait SessionBackend: Send + Sync {
-    fn start(&self, session_id: &str, events: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand>;
+    /// `epoch` is the machine's local id for this session task: unlike the phone-chosen
+    /// `session_id` it never repeats, so it is what the camera handoff is keyed on.
+    fn start(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        events: mpsc::UnboundedSender<SessionEvent>,
+    ) -> mpsc::UnboundedSender<SessionCommand>;
 }
 
 impl SessionBackend for Arc<super::runner::SessionDeps> {
-    fn start(&self, _session_id: &str, events: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
-        super::runner::spawn_session(self.clone(), events)
+    fn start(
+        &self,
+        _session_id: &str,
+        epoch: u64,
+        events: mpsc::UnboundedSender<SessionEvent>,
+    ) -> mpsc::UnboundedSender<SessionCommand> {
+        super::runner::spawn_session(self.clone(), epoch, events)
     }
 }
 
@@ -59,7 +71,8 @@ enum Input {
     Reject(String, oneshot::Sender<Result<(), DecisionError>>),
     Stop(StopReason, oneshot::Sender<()>),
     SetDeviceName(Option<String>),
-    Session(String, SessionEvent),
+    /// From the session task started with this epoch.
+    Session(u64, SessionEvent),
 }
 
 #[derive(Clone)]
@@ -145,7 +158,7 @@ async fn run(
     status: watch::Sender<StreamStatus>,
 ) {
     let mut m = Machine::new();
-    let mut session_tx: Option<(String, mpsc::UnboundedSender<SessionCommand>)> = None;
+    let mut session_tx: Option<(u64, mpsc::UnboundedSender<SessionCommand>)> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -167,7 +180,7 @@ async fn run(
                     Input::PeerOnline(false) => m.on_peer_offline(now),
                     Input::RelayError(code) => {
                         match code.as_str() {
-                            "peer_offline" => m.on_peer_offline(now),
+                            "peer_offline" => m.on_peer_unreachable(now),
                             _ => {
                                 eprintln!("phone stream: relay refused a frame ({code})");
                                 vec![]
@@ -196,10 +209,10 @@ async fn run(
                         m.default_device_name = name.and_then(|n| sanitize_label(&n, MAX_DEVICE_LABEL));
                         vec![]
                     }
-                    Input::Session(id, ev) => {
+                    Input::Session(epoch, ev) => {
                         let closed = matches!(ev, SessionEvent::Closed { .. });
-                        let a = m.on_session_event(&id, ev, now);
-                        if closed && session_tx.as_ref().is_some_and(|(s, _)| *s == id) {
+                        let a = m.on_session_event(epoch, ev, now);
+                        if closed && session_tx.as_ref().is_some_and(|(e, _)| *e == epoch) {
                             session_tx = None;
                         }
                         a
@@ -220,14 +233,14 @@ async fn run(
                     decisions.request(req);
                 }
                 Action::DismissRequest(id) => decisions.dismissed(&id),
-                Action::StartSession(id) => {
+                Action::StartSession { session_id, epoch } => {
                     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-                    let cmd = backend.start(&id, ev_tx);
-                    session_tx = Some((id.clone(), cmd));
+                    let cmd = backend.start(&session_id, epoch, ev_tx);
+                    session_tx = Some((epoch, cmd));
                     let Some(me) = self_tx.upgrade() else { continue };
                     tokio::spawn(async move {
                         while let Some(ev) = ev_rx.recv().await {
-                            if me.send(Input::Session(id.clone(), ev)).is_err() {
+                            if me.send(Input::Session(epoch, ev)).is_err() {
                                 break;
                             }
                         }
@@ -272,16 +285,25 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
+    /// A started session's epoch and its event channel.
+    type Started = (u64, mpsc::UnboundedSender<SessionEvent>);
+
     /// A backend whose sessions answer the offer and go live immediately.
     #[derive(Default)]
     struct FakeBackend {
         commands: Arc<Mutex<Vec<String>>>,
+        /// Sessions swallow `Stop` and never report `Closed` (a hung teardown)…
+        hang_on_stop: bool,
+        /// …until the test sends it for them: every started session's (epoch, events).
+        started: Arc<Mutex<Vec<Started>>>,
     }
 
     impl SessionBackend for FakeBackend {
-        fn start(&self, _id: &str, events: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
+        fn start(&self, _id: &str, epoch: u64, events: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
             let (tx, mut rx) = mpsc::unbounded_channel::<SessionCommand>();
             let log = self.commands.clone();
+            let hang_on_stop = self.hang_on_stop;
+            self.started.lock().unwrap().push((epoch, events.clone()));
             tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
                     log.lock().unwrap().push(format!("{cmd:?}"));
@@ -297,6 +319,7 @@ mod tests {
                                 decoder_restarts: 0,
                             }));
                         }
+                        SessionCommand::Stop(_) if hang_on_stop => {}
                         SessionCommand::Stop(reason) => {
                             let _ = events.send(SessionEvent::Closed { reason, error: None });
                             return;
@@ -363,6 +386,50 @@ mod tests {
         let log = backend.commands.lock().unwrap().clone();
         assert!(log.iter().any(|c| c.contains("Stop(User)")), "{log:?}");
         assert!(out.try_recv().is_err(), "no stream_stop is echoed to the phone");
+    }
+
+    /// The UI's forced stop (a second Stop 5 s into a hung one) must not let a second session
+    /// start next to the first, which still holds the camera; and with the phone reusing its
+    /// `sessionId`, the first session's late events must not be taken for the second's.
+    #[tokio::test]
+    async fn a_forced_stop_keeps_the_machine_busy_until_the_old_session_has_closed() {
+        let backend = Arc::new(FakeBackend { hang_on_stop: true, ..FakeBackend::default() });
+        let (dtx, mut drx) = mpsc::unbounded_channel();
+        let (m, mut out) = StreamManager::spawn(backend.clone(), Arc::new(ChannelDecisions(dtx)));
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"same"}));
+        drx.recv().await.unwrap();
+        m.accept("same").await.unwrap();
+        m.on_relay_signal(json!({"kind":"offer","sessionId":"same","sdp":"v=0"}));
+        wait_state(&m, Phase::Live).await;
+
+        m.stop(StopReason::User).await;
+        wait_state(&m, Phase::Stopping).await;
+        // The manager runs on the real clock: wait out the force-stop threshold.
+        tokio::time::sleep(crate::remote::stream::machine::FORCE_STOP_AFTER + Duration::from_millis(100)).await;
+        m.stop(StopReason::User).await;
+        wait_state(&m, Phase::Error).await;
+        assert_eq!(m.status().last_error.as_deref(), Some(crate::remote::stream::machine::STILL_RELEASING));
+
+        while out.try_recv().is_ok() {}
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"same"}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"same","reason":"busy"}));
+        assert_eq!(backend.started.lock().unwrap().len(), 1, "no second session next to the first");
+
+        // The old session finally reports in: free again, and the same id starts epoch 2.
+        let (epoch, old_events) = backend.started.lock().unwrap()[0].clone();
+        assert_eq!(epoch, 1);
+        old_events.send(SessionEvent::Closed { reason: StopReason::User, error: None }).unwrap();
+        wait_state(&m, Phase::Idle).await;
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"same"}));
+        drx.recv().await.unwrap();
+        m.accept("same").await.unwrap();
+        wait_state(&m, Phase::Connecting).await;
+        assert_eq!(backend.started.lock().unwrap().iter().map(|(e, _)| *e).collect::<Vec<_>>(), vec![1, 2]);
+        // A stray event from the first session task does not touch the second session.
+        let _ = old_events.send(SessionEvent::Closed { reason: StopReason::Error, error: Some("late".into()) });
+        m.on_relay_signal(json!({"kind":"offer","sessionId":"same","sdp":"v=0"}));
+        wait_state(&m, Phase::Live).await;
+        assert_eq!(m.status().last_error, None);
     }
 
     #[test]

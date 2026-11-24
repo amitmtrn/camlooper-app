@@ -16,7 +16,7 @@ use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::media::{FrameOut, StreamWriter};
 use super::rtc::{self, EncodedFrame, RtcClose, RtcCommand, RtcEvent, RtcOptions};
@@ -43,26 +43,65 @@ pub struct CameraTarget {
     pub preview: bool,
 }
 
+/// Tells a running [`CameraControl::acquire`] that its session is over. The acquire is still
+/// never dropped half way; it is asked to come back early (give up a system prompt it is
+/// waiting in) so the camera can be handed back sooner.
+#[derive(Clone)]
+pub struct Cancel(watch::Receiver<bool>);
+
+/// The session's end of a [`Cancel`].
+pub struct CancelHandle(watch::Sender<bool>);
+
+impl Cancel {
+    pub fn new() -> (CancelHandle, Cancel) {
+        let (tx, rx) = watch::channel(false);
+        (CancelHandle(tx), Cancel(rx))
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    /// Resolves once the session has been cancelled (or its task is gone altogether).
+    pub async fn cancelled(&self) {
+        let mut rx = self.0.clone();
+        let _ = rx.wait_for(|c| *c).await;
+    }
+}
+
+impl CancelHandle {
+    pub fn cancel(&self) {
+        let _ = self.0.send(true);
+    }
+}
+
 /// Hands the virtual camera to the phone stream and back.
+///
+/// `epoch` identifies the session (the state machine's counter; it never repeats within a
+/// run). The camera belongs to the epoch that acquired it, and only that epoch's `release`
+/// gives it back.
 pub trait CameraControl: Send + Sync {
     /// Make the camera available and stop whatever else writes to it. Must remember what it
     /// changed as it goes, so `release` can undo a partially completed acquire. Runs to
-    /// completion in its own task: it is never dropped half way.
-    fn acquire(&self) -> BoxFuture<'_, Result<CameraTarget>>;
-    /// Undo `acquire`. Always called once per session, also after a failed or cancelled
-    /// acquire; must be a no-op when there is nothing to undo.
-    fn release(&self) -> BoxFuture<'_, ()>;
+    /// completion in its own task: it is never dropped half way. When `cancel` fires it
+    /// should return (an error) as soon as it safely can.
+    fn acquire(&self, epoch: u64, cancel: Cancel) -> BoxFuture<'_, Result<CameraTarget>>;
+    /// Undo what `acquire(epoch)` did. Always called once per session, also after a failed
+    /// or cancelled acquire; must be a no-op when there is nothing to undo **or when the
+    /// camera is held by another epoch** (this session's acquire was refused because an
+    /// earlier session had not released yet — that session's own release undoes it).
+    fn release(&self, epoch: u64) -> BoxFuture<'_, ()>;
 }
 
 /// A fixed sink with nothing to hand back (CLI with `--device` / `--null`, tests).
 pub struct FixedCamera(pub CameraTarget);
 
 impl CameraControl for FixedCamera {
-    fn acquire(&self) -> BoxFuture<'_, Result<CameraTarget>> {
+    fn acquire(&self, _epoch: u64, _cancel: Cancel) -> BoxFuture<'_, Result<CameraTarget>> {
         let t = self.0.clone();
         Box::pin(async move { Ok(t) })
     }
-    fn release(&self) -> BoxFuture<'_, ()> {
+    fn release(&self, _epoch: u64) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
 }
@@ -127,6 +166,12 @@ pub struct MediaStats {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
+    /// The camera handoff and the sockets are done (the session may still wait for the offer).
+    Prepared,
+    /// The session has ended by itself (deadline, failure) but cannot report `Closed` yet:
+    /// the camera handoff is still under way and has to finish before it can be undone.
+    /// Not sent when the end was a `Stop` command — the machine knows about that one.
+    Releasing { reason: StopReason, error: Option<String> },
     Answer(String),
     IceConnected,
     /// The first frame reached ffmpeg.
@@ -140,11 +185,18 @@ pub enum SessionEvent {
 /// Start a session task. It ends by sending exactly one `Closed`, after handing the camera
 /// back — also when the session panics: otherwise the camera would stay claimed (video
 /// playback refused until restart) and the state machine busy forever.
-pub fn spawn_session(deps: Arc<SessionDeps>, events: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
+///
+/// `epoch` is the state machine's id for this session; the camera is acquired and released
+/// under it, so this session can never hand back a camera that another one holds.
+pub fn spawn_session(
+    deps: Arc<SessionDeps>,
+    epoch: u64,
+    events: mpsc::UnboundedSender<SessionEvent>,
+) -> mpsc::UnboundedSender<SessionCommand> {
     let (tx, rx) = mpsc::unbounded_channel();
     let camera = deps.camera.clone();
     let session_events = events.clone();
-    spawn_guarded(camera, events, async move { run_session(deps, rx, &session_events).await });
+    spawn_guarded(camera, epoch, events, async move { run_session(deps, epoch, rx, &session_events).await });
     tx
 }
 
@@ -152,13 +204,14 @@ pub fn spawn_session(deps: Arc<SessionDeps>, events: mpsc::UnboundedSender<Sessi
 /// between, a panic included.
 fn spawn_guarded(
     camera: Arc<dyn CameraControl>,
+    epoch: u64,
     events: mpsc::UnboundedSender<SessionEvent>,
     session: impl std::future::Future<Output = Outcome> + Send + 'static,
 ) {
     tokio::spawn(async move {
         let run = AssertUnwindSafe(session).catch_unwind().await;
         let (reason, error) = run.unwrap_or_else(|_| (StopReason::Error, Some("internal error in the phone stream".into())));
-        if AssertUnwindSafe(camera.release()).catch_unwind().await.is_err() {
+        if AssertUnwindSafe(camera.release(epoch)).catch_unwind().await.is_err() {
             eprintln!("phone stream: handing the camera back failed unexpectedly");
         }
         if let Some(e) = &error {
@@ -175,26 +228,44 @@ type Prepared = (CameraTarget, rtc::LocalTransport);
 
 async fn run_session(
     deps: Arc<SessionDeps>,
+    epoch: u64,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     events: &mpsc::UnboundedSender<SessionEvent>,
 ) -> Outcome {
     // --- 1. prepare (camera, STUN, sockets) while the phone sends its offer -------------
     // In its own task, never cancelled: dropping `acquire` between "started the camera" and
     // "noted that it must be stopped again" would leave the camera on with nothing to undo.
+    // It is told when the session is over, though, so it can come back early.
     let prep = deps.clone();
+    let (cancel, cancelled) = Cancel::new();
     let mut prepare = tokio::spawn(async move {
-        let target = prep.camera.acquire().await?;
-        let stun = prep.ice.stun_server().await;
-        let transport = rtc::gather(&prep.rtc, stun).await?;
-        Ok::<Prepared, anyhow::Error>((target, transport))
+        let target = prep.camera.acquire(epoch, cancelled.clone()).await?;
+        // Nothing to undo in the rest: once the session is over it is simply dropped.
+        tokio::select! {
+            r = async {
+                let stun = prep.ice.stun_server().await;
+                let transport = rtc::gather(&prep.rtc, stun).await?;
+                Ok::<Prepared, anyhow::Error>((target, transport))
+            } => r,
+            _ = cancelled.cancelled() => Err(anyhow!("the session ended while preparing")),
+        }
     });
-    let (target, transport, offer, candidates) = match offer_and_camera(&deps, &mut prepare, &mut cmd_rx).await {
+    let (target, transport, offer, candidates) = match offer_and_camera(&deps, &mut prepare, &mut cmd_rx, events).await {
         Ok(ready) => ready,
-        Err(outcome) => {
+        Err((outcome, by_command)) => {
             // Stopped or timed out mid-acquire: let it finish so that `release` (the caller's
-            // next step) undoes all of it rather than racing it.
+            // next step) undoes all of it rather than racing it. That can take as long as
+            // the user leaves a system prompt open, so say what happened *before* waiting:
+            // the phone and the UI must not sit in "connecting" until then.
             if !prepare.is_finished() {
-                let _ = tokio::time::timeout(deps.prepare_timeout, &mut prepare).await;
+                cancel.cancel();
+                if !by_command {
+                    let _ = events.send(SessionEvent::Releasing { reason: outcome.0.clone(), error: outcome.1.clone() });
+                }
+                // No deadline here: releasing under a running acquire would undo nothing
+                // (or half). If it never returns, neither does this session, and the state
+                // machine's watchdog reports that — while keeping the camera marked as held.
+                let _ = (&mut prepare).await;
             }
             return outcome;
         }
@@ -260,12 +331,14 @@ async fn run_session(
 }
 
 /// Phase 1: wait until the camera is ready *and* the offer has arrived. The two have separate
-/// deadlines; a stop or a failure ends the wait with the session's outcome.
+/// deadlines; a stop or a failure ends the wait with the session's outcome, and whether it
+/// was a `Stop` command (which the machine already knows about).
 async fn offer_and_camera(
     deps: &SessionDeps,
     prepare: &mut tokio::task::JoinHandle<Result<Prepared>>,
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
-) -> Result<(CameraTarget, rtc::LocalTransport, String, Vec<String>), Outcome> {
+    events: &mpsc::UnboundedSender<SessionEvent>,
+) -> Result<(CameraTarget, rtc::LocalTransport, String, Vec<String>), (Outcome, bool)> {
     let started = tokio::time::Instant::now();
     let offer_deadline = started + deps.offer_timeout;
     let prepare_deadline = started + deps.prepare_timeout;
@@ -279,9 +352,12 @@ async fn offer_and_camera(
         }
         tokio::select! {
             r = &mut *prepare, if prepared.is_none() => match r {
-                Ok(Ok(p)) => prepared = Some(p),
-                Ok(Err(e)) => return Err((StopReason::Error, Some(format!("{e:#}")))),
-                Err(_) => return Err((StopReason::Error, Some("preparing the camera failed unexpectedly".into()))),
+                Ok(Ok(p)) => {
+                    prepared = Some(p);
+                    let _ = events.send(SessionEvent::Prepared);
+                }
+                Ok(Err(e)) => return Err(((StopReason::Error, Some(format!("{e:#}"))), false)),
+                Err(_) => return Err(((StopReason::Error, Some("preparing the camera failed unexpectedly".into())), false)),
             },
             cmd = cmd_rx.recv() => match cmd {
                 Some(SessionCommand::Offer(sdp)) => offer = Some(sdp),
@@ -290,14 +366,14 @@ async fn offer_and_camera(
                         candidates.push(c);
                     }
                 }
-                Some(SessionCommand::Stop(r)) => return Err((r, None)),
-                None => return Err((StopReason::Error, Some("session dropped".into()))),
+                Some(SessionCommand::Stop(r)) => return Err(((r, None), true)),
+                None => return Err(((StopReason::Error, Some("session dropped".into())), false)),
             },
             _ = tokio::time::sleep_until(offer_deadline), if offer.is_none() => {
-                return Err((StopReason::Timeout, Some("no offer from the phone".into())));
+                return Err(((StopReason::Timeout, Some("no offer from the phone".into())), false));
             }
             _ = tokio::time::sleep_until(prepare_deadline), if prepared.is_none() => {
-                return Err((StopReason::Timeout, Some("preparing the camera took too long".into())));
+                return Err(((StopReason::Timeout, Some("preparing the camera took too long".into())), false));
             }
         }
     }
@@ -408,6 +484,20 @@ impl Decoder {
                 r.abort();
                 let _ = tokio::time::timeout(Duration::from_millis(250), r).await;
             }
+        }
+    }
+}
+
+/// The orderly way out is [`Decoder::stop`]. This is for every other way (a panic unwinding
+/// through the media loop, an early return): the reader must not keep pushing frames into
+/// the camera after the session has handed it back. ffmpeg itself dies with `kill_on_drop`.
+/// `abort` only takes effect where the reader awaits, so it also checks `running` before
+/// every frame; a push that blocks inside the driver ends when that call returns.
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(r) = self.reader.take() {
+            r.abort();
         }
     }
 }
@@ -633,18 +723,41 @@ mod tests {
         released: AtomicUsize,
         panic_in_acquire: bool,
         acquire_delay: Duration,
+        /// Come back early (with an error) when the session is cancelled, like a system
+        /// prompt that is closed.
+        honour_cancel: bool,
+        cancelled: AtomicUsize,
+        epochs: std::sync::Mutex<Vec<(&'static str, u64)>>,
     }
 
     impl ProbeCamera {
         fn new(panic_in_acquire: bool, acquire_delay: Duration) -> Arc<Self> {
-            Arc::new(Self { acquired: AtomicUsize::new(0), released: AtomicUsize::new(0), panic_in_acquire, acquire_delay })
+            Self::with(panic_in_acquire, acquire_delay, false)
+        }
+        fn with(panic_in_acquire: bool, acquire_delay: Duration, honour_cancel: bool) -> Arc<Self> {
+            Arc::new(Self {
+                acquired: AtomicUsize::new(0),
+                released: AtomicUsize::new(0),
+                panic_in_acquire,
+                acquire_delay,
+                honour_cancel,
+                cancelled: AtomicUsize::new(0),
+                epochs: Default::default(),
+            })
         }
     }
 
     impl CameraControl for ProbeCamera {
-        fn acquire(&self) -> BoxFuture<'_, Result<CameraTarget>> {
+        fn acquire(&self, epoch: u64, cancel: Cancel) -> BoxFuture<'_, Result<CameraTarget>> {
             Box::pin(async move {
-                tokio::time::sleep(self.acquire_delay).await;
+                self.epochs.lock().unwrap().push(("acquire", epoch));
+                tokio::select! {
+                    _ = tokio::time::sleep(self.acquire_delay) => {}
+                    _ = cancel.cancelled(), if self.honour_cancel => {
+                        self.cancelled.fetch_add(1, Ordering::SeqCst);
+                        return Err(anyhow!("cancelled"));
+                    }
+                }
                 if self.panic_in_acquire {
                     panic!("boom (expected in this test)");
                 }
@@ -656,10 +769,14 @@ mod tests {
                 })
             })
         }
-        fn release(&self) -> BoxFuture<'_, ()> {
+        fn release(&self, epoch: u64) -> BoxFuture<'_, ()> {
             Box::pin(async move {
+                self.epochs.lock().unwrap().push(("release", epoch));
                 // A release that ran before the acquire finished would undo nothing.
-                assert!(self.panic_in_acquire || self.acquired.load(Ordering::SeqCst) == 1, "release raced the acquire");
+                assert!(
+                    self.panic_in_acquire || self.honour_cancel || self.acquired.load(Ordering::SeqCst) == 1,
+                    "release raced the acquire"
+                );
                 self.released.fetch_add(1, Ordering::SeqCst);
             })
         }
@@ -695,7 +812,7 @@ mod tests {
             (ProbeCamera::new(false, Duration::ZERO), Arc::new(PanickingIce) as Arc<dyn IceSource>),
         ] {
             let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-            let _tx = spawn_session(deps(camera.clone(), ice), ev_tx);
+            let _tx = spawn_session(deps(camera.clone(), ice), 1, ev_tx);
             let (reason, error) = closed(&mut ev_rx).await;
             assert_eq!(reason, StopReason::Error);
             assert!(error.is_some());
@@ -707,7 +824,7 @@ mod tests {
     async fn a_panic_in_the_session_itself_still_releases_and_reports_closed() {
         let camera = ProbeCamera::new(true, Duration::ZERO);
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-        spawn_guarded(camera.clone(), ev_tx, async { panic!("boom (expected in this test)") });
+        spawn_guarded(camera.clone(), 1, ev_tx, async { panic!("boom (expected in this test)") });
         let (reason, error) = closed(&mut ev_rx).await;
         assert_eq!((reason, error.as_deref()), (StopReason::Error, Some("internal error in the phone stream")));
         assert_eq!(camera.released.load(Ordering::SeqCst), 1);
@@ -717,7 +834,7 @@ mod tests {
     async fn a_stop_during_a_slow_acquire_waits_for_it_before_releasing() {
         let camera = ProbeCamera::new(false, Duration::from_millis(400));
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-        let tx = spawn_session(deps(camera.clone(), Arc::new(NoStun)), ev_tx);
+        let tx = spawn_session(deps(camera.clone(), Arc::new(NoStun)), 1, ev_tx);
         tokio::time::sleep(Duration::from_millis(50)).await;
         tx.send(SessionCommand::Stop(StopReason::User)).unwrap();
         assert_eq!(closed(&mut ev_rx).await, (StopReason::User, None));
@@ -733,7 +850,7 @@ mod tests {
         d.rtc.bind_ips = Some(vec![std::net::Ipv4Addr::LOCALHOST]);
         d.offer_timeout = Duration::from_millis(200);
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-        let tx = spawn_session(Arc::new(d), ev_tx);
+        let tx = spawn_session(Arc::new(d), 1, ev_tx);
         tx.send(SessionCommand::Offer("v=0\r\nnot really an offer\r\n".into())).unwrap();
         // It gets as far as reading the offer (which is garbage) instead of timing out.
         let (reason, error) = closed(&mut ev_rx).await;
@@ -747,7 +864,61 @@ mod tests {
         d.rtc.bind_ips = Some(vec![std::net::Ipv4Addr::LOCALHOST]);
         d.offer_timeout = Duration::from_millis(200);
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-        let _tx = spawn_session(Arc::new(d), ev_tx);
+        let _tx = spawn_session(Arc::new(d), 1, ev_tx);
         assert_eq!(closed(&mut ev_rx).await, (StopReason::Timeout, Some("no offer from the phone".into())));
+    }
+
+    #[tokio::test]
+    async fn the_camera_is_acquired_and_released_under_the_sessions_epoch() {
+        let camera = ProbeCamera::new(false, Duration::ZERO);
+        let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+        let tx = spawn_session(deps(camera.clone(), Arc::new(NoStun)), 7, ev_tx);
+        tx.send(SessionCommand::Stop(StopReason::User)).unwrap();
+        closed(&mut ev_rx).await;
+        assert_eq!(*camera.epochs.lock().unwrap(), vec![("acquire", 7), ("release", 7)]);
+    }
+
+    #[tokio::test]
+    async fn the_prepare_deadline_is_reported_before_waiting_for_the_acquire() {
+        // The acquire sits in a "prompt" far longer than the prepare deadline and ignores
+        // the cancel (a UAC prompt cannot be closed from outside).
+        let camera = ProbeCamera::new(false, Duration::from_millis(700));
+        let mut d = SessionDeps::new(PathBuf::from("ffmpeg"), camera.clone(), Arc::new(NoStun));
+        d.rtc.bind_ips = Some(vec![std::net::Ipv4Addr::LOCALHOST]);
+        d.prepare_timeout = Duration::from_millis(100);
+        let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+        let started = Instant::now();
+        let _tx = spawn_session(Arc::new(d), 1, ev_tx);
+        let error = Some("preparing the camera took too long".to_string());
+        let first = tokio::time::timeout(Duration::from_secs(5), ev_rx.recv()).await.unwrap().unwrap();
+        assert_eq!(first, SessionEvent::Releasing { reason: StopReason::Timeout, error: error.clone() });
+        assert!(started.elapsed() < Duration::from_millis(500), "reported at the deadline, not after the acquire");
+        assert_eq!(camera.released.load(Ordering::SeqCst), 0, "not released under a running acquire");
+        assert_eq!(closed(&mut ev_rx).await, (StopReason::Timeout, error));
+        assert_eq!(camera.released.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stop_cancels_an_acquire_that_can_be_cancelled() {
+        // An acquire that would take a minute (a polkit prompt left open) but gives up when
+        // the session is over.
+        let camera = ProbeCamera::with(false, Duration::from_secs(60), true);
+        let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+        let tx = spawn_session(deps(camera.clone(), Arc::new(NoStun)), 1, ev_tx);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(SessionCommand::Stop(StopReason::User)).unwrap();
+        // `closed` allows 5 s: the stop did not wait out the acquire. No `Releasing` either —
+        // the machine asked for this stop.
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), ev_rx.recv()).await.unwrap().unwrap() {
+                SessionEvent::Closed { reason, error } => {
+                    assert_eq!((reason, error), (StopReason::User, None));
+                    break;
+                }
+                other => assert!(!matches!(other, SessionEvent::Releasing { .. }), "{other:?}"),
+            }
+        }
+        assert_eq!(camera.cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!((camera.acquired.load(Ordering::SeqCst), camera.released.load(Ordering::SeqCst)), (0, 1));
     }
 }

@@ -523,7 +523,10 @@ async fn load_loopback_module() -> VcamSetupOutcome {
         cmd.arg(format!("card_label={}", CARD_LABEL));
     }
 
-    let output = match cmd.stdin(Stdio::null()).output().await {
+    // kill_on_drop: a caller that stops waiting (the phone stream's camera handoff, when its
+    // session ends) drops this future, and the polkit prompt must not stay open behind it.
+    // pkexec keeps the caller's real uid while it authenticates, so it can be killed.
+    let output = match cmd.stdin(Stdio::null()).kill_on_drop(true).output().await {
         Ok(o) => o,
         Err(e) => {
             eprintln!("camlooper: failed to run modprobe: {}", e);

@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
 use tokio::sync::Mutex;
 
-use super::runner::{CameraControl, CameraTarget};
+use super::runner::{CameraControl, CameraTarget, Cancel};
 use crate::virtual_camera::{self, VirtualCameraConfig};
 
 static PHONE_OWNS_CAMERA: AtomicBool = AtomicBool::new(false);
@@ -25,13 +25,46 @@ pub fn phone_owns_camera() -> bool {
     PHONE_OWNS_CAMERA.load(Ordering::SeqCst)
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq)]
 struct Undo {
     /// Playback was running and we paused it.
     resume_playback: bool,
     /// The camera was off and we started it.
     stop_camera: bool,
     claimed: bool,
+    /// The session that holds the claim.
+    epoch: u64,
+}
+
+impl Undo {
+    /// Take the camera for `epoch`. Refused while another session's claim has not been
+    /// released (it was given up on by the stop watchdog and is still shutting down);
+    /// nothing is changed then, so that session's own release still undoes what it did.
+    fn claim(&mut self, epoch: u64) -> Result<()> {
+        if self.claimed {
+            return Err(anyhow!("the previous phone session is still shutting down"));
+        }
+        *self = Undo { claimed: true, epoch, ..Undo::default() };
+        Ok(())
+    }
+
+    /// What `epoch`'s release has to undo: everything if it holds the claim, nothing if
+    /// another session does — a session whose acquire was refused must not hand back (or
+    /// stop) a camera it never had.
+    fn take_for(&mut self, epoch: u64) -> Option<Undo> {
+        (self.claimed && self.epoch == epoch).then(|| std::mem::take(self))
+    }
+}
+
+/// Clears the process-wide claim when dropped, so it is cleared even if stopping the camera
+/// panics: with the undo state already taken, nothing else would ever clear it, and video
+/// playback would be refused until the app is restarted.
+struct ClaimGuard;
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        PHONE_OWNS_CAMERA.store(false, Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -40,19 +73,14 @@ pub struct AppCamera {
 }
 
 impl AppCamera {
-    async fn acquire_inner(&self) -> Result<CameraTarget> {
+    async fn acquire_inner(&self, epoch: u64, cancel: Cancel) -> Result<CameraTarget> {
         let mut undo = self.undo.lock().await;
-        if undo.claimed {
-            // A previous session was given up on (stop watchdog) and has not released yet.
-            // Its release will find nothing left: this session's release undoes it all.
-            return Err(anyhow!("the previous phone session is still shutting down"));
-        }
+        undo.claim(epoch)?;
         // Claim first, look second: the in-app camera checks the claim under its own lock
         // before it starts (camera_capture::start_capture), so either it sees the claim and
         // refuses, or it started before and is seen here. Checking first would leave a window
         // for a recording to start in between.
         PHONE_OWNS_CAMERA.store(true, Ordering::SeqCst);
-        undo.claimed = true;
         let (capture_running, recording) = crate::camera_capture::capture_activity().await;
         if recording {
             return Err(anyhow!("a camera recording is in progress"));
@@ -75,7 +103,17 @@ impl AppCamera {
         }
 
         if !virtual_camera::get_virtual_camera_status().await.is_active {
-            prepare_platform_camera().await?;
+            // The step that can wait on the user (polkit / UAC). When the session ends
+            // meanwhile, do not sit in it: dropping the Linux future kills pkexec, which
+            // closes the prompt. The Windows registration runs on a blocking thread and its
+            // UAC prompt cannot be closed from here; it is left to finish on its own.
+            tokio::select! {
+                r = prepare_platform_camera() => r?,
+                _ = cancel.cancelled() => return Err(anyhow!("the session ended while the camera was being set up")),
+            }
+            if cancel.is_cancelled() {
+                return Err(anyhow!("the session ended while the camera was being set up"));
+            }
             let (width, height) = virtual_camera::output_resolution();
             let config = VirtualCameraConfig { width, height, fps: 30, ..VirtualCameraConfig::default() };
             // Noted before the start, not after: a start that fails half way (or a session
@@ -91,22 +129,28 @@ impl AppCamera {
 }
 
 impl CameraControl for AppCamera {
-    fn acquire(&self) -> BoxFuture<'_, Result<CameraTarget>> {
-        Box::pin(self.acquire_inner())
+    fn acquire(&self, epoch: u64, cancel: Cancel) -> BoxFuture<'_, Result<CameraTarget>> {
+        Box::pin(self.acquire_inner(epoch, cancel))
     }
 
-    fn release(&self) -> BoxFuture<'_, ()> {
+    fn release(&self, epoch: u64) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            // Waits for an acquire that is still running (it holds the lock throughout).
             let mut undo = self.undo.lock().await;
-            let u = std::mem::take(&mut *undo);
+            let Some(u) = undo.take_for(epoch) else {
+                if undo.claimed {
+                    eprintln!("phone stream: session {epoch} never had the camera (session {} holds it); nothing to hand back", undo.epoch);
+                }
+                return;
+            };
+            let claim = ClaimGuard;
             if u.stop_camera && virtual_camera::get_virtual_camera_status().await.is_active {
                 if let Err(e) = virtual_camera::stop_virtual_camera().await {
                     eprintln!("phone stream: could not stop the virtual camera: {e}");
                 }
             }
-            if u.claimed {
-                PHONE_OWNS_CAMERA.store(false, Ordering::SeqCst);
-            }
+            // Before resuming: playback refuses to start while the phone owns the camera.
+            drop(claim);
             if u.resume_playback && crate::video_processor::has_video_loaded().await {
                 if let Err(e) = crate::video_processor::start_video_stream().await {
                     eprintln!("phone stream: could not resume the video loop: {e}");
@@ -139,4 +183,55 @@ async fn prepare_platform_camera() -> Result<()> {
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 async fn prepare_platform_camera() -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_release_only_undoes_its_own_sessions_claim() {
+        let mut undo = Undo::default();
+        // S1 acquires (started the camera, paused playback), is given up on by the watchdog.
+        undo.claim(1).unwrap();
+        undo.stop_camera = true;
+        undo.resume_playback = true;
+
+        // S2's acquire is refused and changes nothing; its release finds nothing of its own.
+        assert!(undo.claim(2).is_err());
+        assert_eq!(undo.take_for(2), None);
+        assert_eq!(undo, Undo { resume_playback: true, stop_camera: true, claimed: true, epoch: 1 });
+
+        // S1's late release still undoes everything it did — once.
+        let u = undo.take_for(1).expect("S1 holds the claim");
+        assert!(u.stop_camera && u.resume_playback);
+        assert_eq!(undo, Undo::default());
+        assert_eq!(undo.take_for(1), None);
+
+        // S3 acquires; a stray second release from S1 or S2 cannot take the camera from it.
+        undo.claim(3).unwrap();
+        undo.stop_camera = true;
+        assert_eq!(undo.take_for(1), None);
+        assert_eq!(undo.take_for(2), None);
+        assert!(undo.claimed && undo.stop_camera && undo.epoch == 3);
+        assert!(undo.take_for(3).is_some());
+    }
+
+    #[test]
+    fn nothing_claimed_means_nothing_to_undo() {
+        // Epoch 0 is the default; an unclaimed state must not match it.
+        assert_eq!(Undo::default().take_for(0), None);
+    }
+
+    #[test]
+    fn the_claim_is_cleared_even_when_the_release_unwinds() {
+        // The only test that touches the process-wide flag.
+        PHONE_OWNS_CAMERA.store(true, Ordering::SeqCst);
+        let r = std::panic::catch_unwind(|| {
+            let _claim = ClaimGuard;
+            panic!("boom (expected in this test)");
+        });
+        assert!(r.is_err());
+        assert!(!phone_owns_camera());
+    }
 }

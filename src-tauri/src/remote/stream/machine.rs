@@ -16,10 +16,18 @@
 //! * the phone leaving the relay while **live** does not end the stream — media is peer to
 //!   peer and a WebSocket flap is not a reason to drop it. The stream ends only when the phone
 //!   is still offline after [`PEER_OFFLINE_GRACE`] *and* no frame arrived in that time;
-//! * a declined (or ignored) request silences further requests for [`DECLINE_COOLDOWN`], so a
-//!   phone cannot keep raising the window;
-//! * a session that does not report `Closed` within [`STOPPING_WATCHDOG`] of being asked to
-//!   stop is given up on, so the machine can never stay busy forever.
+//! * a declined request silences further requests for [`DECLINE_COOLDOWN`], and the dialog
+//!   is raised at most [`MAX_PROMPTS`] times per [`PROMPT_WINDOW`] whatever ended the earlier
+//!   ones, so a phone cannot keep raising the window;
+//! * a session that does not report `Closed` within the stop watchdog ([`STOPPING_WATCHDOG`],
+//!   or [`STOPPING_WATCHDOG_PREPARING`] while its camera handoff is still under way) is given
+//!   up on: the status becomes `error` so the UI is not stuck in "stopping", but the machine
+//!   keeps answering `busy` until that session's `Closed` arrives, because until then it
+//!   still holds the camera.
+//!
+//! Session events are matched by a local **epoch** (a counter that grows with every started
+//! session), never by the phone-chosen `sessionId`: a phone may reuse an id, and a late event
+//! from an abandoned session must not be taken for the next one's.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -31,17 +39,28 @@ use super::signal::{LinkState, OutboundFrame, RejectReason, StopData, StopReason
 pub const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 /// While live, a changed resolution/codec is reported to the phone at most this often.
 const STATUS_MIN_INTERVAL: Duration = Duration::from_secs(2);
-/// After the user declines (or ignores) a request, new requests are declined without a prompt
-/// for this long.
+/// After the user declines a request, new requests are declined without a prompt for this
+/// long. Only an explicit decline starts it: a timeout, a cancel by the phone or an unlink
+/// says nothing about what the user wants.
 pub const DECLINE_COOLDOWN: Duration = Duration::from_secs(15);
+/// The confirm dialog is raised at most this many times per [`PROMPT_WINDOW`], however the
+/// earlier prompts ended (request, cancel, request… would otherwise raise it without limit).
+pub const MAX_PROMPTS: usize = 5;
+pub const PROMPT_WINDOW: Duration = Duration::from_secs(60);
 /// While live, the phone may be gone from the relay this long before the stream is ended —
 /// and then only if no frame arrived meanwhile.
 pub const PEER_OFFLINE_GRACE: Duration = Duration::from_secs(10);
-/// A session asked to stop must report `Closed` within this long.
+/// A session asked to stop must report `Closed` within this long…
 pub const STOPPING_WATCHDOG: Duration = Duration::from_secs(10);
+/// …unless it was still preparing the camera (no `Prepared` yet): the handoff is never cut
+/// short, and it can sit in a UAC prompt that cannot be cancelled. This is the runner's
+/// `prepare_timeout` (120 s) plus a margin.
+pub const STOPPING_WATCHDOG_PREPARING: Duration = Duration::from_secs(125);
 /// A second Stop from the user this long into a stop that has not finished gives up on the
 /// session at once instead of waiting for the watchdog.
 pub const FORCE_STOP_AFTER: Duration = Duration::from_secs(5);
+/// `last_error` after giving up on a session that has not handed the camera back.
+pub const STILL_RELEASING: &str = "the phone session has not finished shutting down; the camera is still held";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -131,8 +150,9 @@ pub enum Action {
     AskUser(StreamRequest),
     /// Close the confirm dialog (timed out, phone cancelled, phone went offline).
     DismissRequest(String),
-    /// Start the session task for this id (camera handoff + receiver).
-    StartSession(String),
+    /// Start the session task for this id (camera handoff + receiver). Its events come back
+    /// tagged with `epoch`.
+    StartSession { session_id: String, epoch: u64 },
     ToSession(SessionCommand),
 }
 
@@ -151,6 +171,10 @@ impl std::fmt::Display for DecisionError {
 #[derive(Debug)]
 struct Session {
     id: String,
+    /// Set when the session task is started (on accept).
+    epoch: Option<u64>,
+    /// The session task reported that the camera handoff and the sockets are done.
+    prepared: bool,
     requested_at: Instant,
     accepted: bool,
     early_offer: Option<String>,
@@ -162,10 +186,21 @@ struct Session {
     stop_requested_at: Option<Instant>,
     /// The pending stop came from the phone's `stream_stop`.
     stop_from_phone: bool,
-    /// While live: when the phone was last seen leaving the relay, and the frame count then.
-    peer_offline: Option<(Instant, u64)>,
+    /// While live: the phone was reported off the relay.
+    peer_offline: Option<PeerOffline>,
     last_status: Option<(Option<String>, Option<u32>, Option<u32>)>,
     last_status_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PeerOffline {
+    since: Instant,
+    /// The frame count at `since`.
+    frames: u64,
+    /// From a presence frame (`peer`, `hello`). `false` when all we have is an
+    /// `error{peer_offline}` for one frame we sent: no `peer{online:true}` is promised to
+    /// follow that, so it must not stay armed once video is seen to keep arriving.
+    confirmed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -176,6 +211,13 @@ pub struct Machine {
     pub default_device_name: Option<String>,
     /// Requests are declined without asking until then (see [`DECLINE_COOLDOWN`]).
     quiet_until: Option<Instant>,
+    /// When the user was last asked (at most [`MAX_PROMPTS`] entries).
+    prompts: std::collections::VecDeque<Instant>,
+    /// The epoch given to the last started session.
+    last_epoch: u64,
+    /// A session that was given up on and has not reported `Closed`: it still holds the
+    /// camera, so new requests are answered `busy` until it does.
+    releasing: Option<u64>,
 }
 
 fn wall_ms() -> i64 {
@@ -220,6 +262,26 @@ impl Machine {
 
     fn is_current(&self, id: &str) -> bool {
         self.session.as_ref().is_some_and(|s| s.id == id)
+    }
+
+    /// The epoch of the session task that is running for the current session, if any.
+    pub fn current_epoch(&self) -> Option<u64> {
+        self.session.as_ref().and_then(|s| s.epoch)
+    }
+
+    /// A given-up session has not handed the camera back yet (see [`Self::give_up`]).
+    pub fn is_releasing(&self) -> bool {
+        self.releasing.is_some()
+    }
+
+    /// Stop waiting for the current session's `Closed`. The UI gets an error instead of an
+    /// endless "stopping", but the machine is not free: the session still holds the camera
+    /// (a new one could not acquire it), so requests are answered `busy` until its `Closed`
+    /// arrives — see [`Self::on_session_event`].
+    fn give_up(&mut self) {
+        let epoch = self.current_epoch();
+        self.finish(Some((StopReason::Error, STILL_RELEASING.to_string())));
+        self.releasing = epoch;
     }
 
     // --- inputs from the phone ---------------------------------------------------------
@@ -276,17 +338,27 @@ impl Machine {
         if self.is_current(&session_id) {
             return vec![]; // a retransmitted request
         }
-        if !self.status.state.is_free() {
+        if !self.status.state.is_free() || self.releasing.is_some() {
             return vec![signal(StreamSignal::StreamReject { session_id, reason: RejectReason::Busy })];
         }
         if self.quiet_until.is_some_and(|t| now < t) {
-            // The user just said no (or ignored the dialog). Do not raise the window again.
+            // The user just said no. Do not raise the window again.
             return vec![signal(StreamSignal::StreamReject { session_id, reason: RejectReason::Declined })];
         }
+        while self.prompts.front().is_some_and(|t| now.duration_since(*t) >= PROMPT_WINDOW) {
+            self.prompts.pop_front();
+        }
+        if self.prompts.len() >= MAX_PROMPTS {
+            // Too many prompts lately, however they ended.
+            return vec![signal(StreamSignal::StreamReject { session_id, reason: RejectReason::Declined })];
+        }
+        self.prompts.push_back(now);
         let received_at = wall_ms();
         let device_name = device_label.or_else(|| self.default_device_name.clone());
         self.session = Some(Session {
             id: session_id.clone(),
+            epoch: None,
+            prepared: false,
             requested_at: now,
             accepted: false,
             early_offer: None,
@@ -332,11 +404,24 @@ impl Machine {
     /// attempt at once (signaling cannot complete). A live stream does not need the relay:
     /// it gets [`PEER_OFFLINE_GRACE`], see [`Self::tick`].
     pub fn on_peer_offline(&mut self, now: Instant) -> Vec<Action> {
+        self.peer_offline(now, true)
+    }
+
+    /// The relay answered `error{peer_offline}` to a frame we sent. Like
+    /// [`Self::on_peer_offline`], except that while live it is only a hint: nothing promises
+    /// a `peer{online:true}` afterwards, so it is dropped as soon as video is seen to keep
+    /// arriving (see [`Self::tick`]).
+    pub fn on_peer_unreachable(&mut self, now: Instant) -> Vec<Action> {
+        self.peer_offline(now, false)
+    }
+
+    fn peer_offline(&mut self, now: Instant, confirmed: bool) -> Vec<Action> {
         let frames = self.status.frames;
         let live = self.status.state == Phase::Live;
         let Some(s) = self.session.as_mut() else { return vec![] };
         if live && s.stop_reason.is_none() {
-            s.peer_offline.get_or_insert((now, frames));
+            let p = s.peer_offline.get_or_insert(PeerOffline { since: now, frames, confirmed });
+            p.confirmed |= confirmed;
             return vec![];
         }
         self.end_without_telling_phone(StopReason::PeerOffline, now)
@@ -376,6 +461,9 @@ impl Machine {
             return Err(DecisionError::NoSuchRequest);
         }
         s.accepted = true;
+        self.last_epoch += 1;
+        let epoch = self.last_epoch;
+        s.epoch = Some(epoch);
         let id = s.id.clone();
         let mut actions = vec![
             signal(StreamSignal::StreamAccept { session_id: id.clone() }),
@@ -387,7 +475,7 @@ impl Machine {
                 fps: None,
                 codec: None,
             }),
-            Action::StartSession(id),
+            Action::StartSession { session_id: id, epoch },
         ];
         if let Some(offer) = s.early_offer.take() {
             actions.push(Action::ToSession(SessionCommand::Offer(offer)));
@@ -408,12 +496,13 @@ impl Machine {
         Ok(vec![signal(StreamSignal::StreamReject { session_id: session_id.to_string(), reason: RejectReason::Declined })])
     }
 
-    /// Stop from the desktop side (the user's stop button, or the app shutting down).
+    /// Stop from the desktop side (the user's stop button, an unlink, or the app shutting
+    /// down). A pending request is declined, without the cooldown: this is not the dialog's
+    /// Decline, and after an unlink the next request comes from another pairing.
     pub fn stop(&mut self, reason: StopReason, now: Instant) -> Vec<Action> {
         let Some(s) = self.session.as_mut() else { return vec![] };
         let id = s.id.clone();
         if !s.accepted {
-            self.quiet_until = Some(now + DECLINE_COOLDOWN);
             self.finish(None);
             return vec![
                 Action::DismissRequest(id.clone()),
@@ -423,10 +512,11 @@ impl Machine {
         if s.stop_reason.is_some() {
             // Already stopping. A repeated Stop after [`FORCE_STOP_AFTER`] is the user's way
             // out of a teardown that hangs: give up on the session now, as the watchdog
-            // would a little later.
+            // would a little later. It does not free the camera — nothing here can — so the
+            // machine stays busy for new requests until the session reports `Closed`.
             if s.stop_requested_at.is_some_and(|t| now.duration_since(t) >= FORCE_STOP_AFTER) {
                 eprintln!("phone stream: forced stop; giving up on a session that is still shutting down");
-                self.finish(None);
+                self.give_up();
             }
             return vec![];
         }
@@ -445,31 +535,36 @@ impl Machine {
         let Some(s) = self.session.as_ref() else { return vec![] };
         if !s.accepted && now.duration_since(s.requested_at) >= DECISION_TIMEOUT {
             let id = s.id.clone();
-            self.quiet_until = Some(now + DECLINE_COOLDOWN);
+            // No cooldown: the user may never have seen the dialog, or tried to accept
+            // while the relay socket was down. The prompt rate limit covers nagging.
             self.finish(None);
             return vec![
                 Action::DismissRequest(id.clone()),
                 signal(StreamSignal::StreamReject { session_id: id, reason: RejectReason::Timeout }),
             ];
         }
-        // The session task was asked to stop and never reported back (stuck in a system
-        // prompt, a hung driver call). Its `Closed` — if it ever comes — is for a session
-        // that is no longer current and is ignored; the camera handoff refuses a new acquire
-        // until the old one has been released.
-        if s.stop_requested_at.is_some_and(|t| now.duration_since(t) >= STOPPING_WATCHDOG) {
-            eprintln!("phone stream: the session did not shut down within {}s; giving up on it", STOPPING_WATCHDOG.as_secs());
-            self.finish(None);
+        // The session task was asked to stop and never reported back (a hung driver call, a
+        // system prompt nobody answers). A session that was still handing the camera over
+        // gets much longer: that is never cut short, so a stop in the middle of it
+        // legitimately takes a while.
+        let watchdog = if s.prepared { STOPPING_WATCHDOG } else { STOPPING_WATCHDOG_PREPARING };
+        if s.stop_requested_at.is_some_and(|t| now.duration_since(t) >= watchdog) {
+            eprintln!("phone stream: the session did not shut down within {}s; giving up on it", watchdog.as_secs());
+            self.give_up();
             return vec![];
         }
         // Live, and the phone has been off the relay for the whole grace period.
-        if let Some((since, frames_then)) = s.peer_offline {
+        if let Some(PeerOffline { since, frames: frames_then, confirmed }) = s.peer_offline {
             if s.stop_reason.is_none() && now.duration_since(since) >= PEER_OFFLINE_GRACE {
                 let frames = self.status.frames;
                 if frames > frames_then {
                     // Video is still arriving peer to peer: the stream is healthy without
-                    // the relay. Look again after another grace period.
+                    // the relay. A phone known to be off the relay is looked at again after
+                    // another grace period; a mere delivery error is forgotten, or it would
+                    // stay armed for good and turn a real media timeout much later into a
+                    // silent ending.
                     if let Some(s) = self.session.as_mut() {
-                        s.peer_offline = Some((now, frames));
+                        s.peer_offline = confirmed.then_some(PeerOffline { since: now, frames, confirmed });
                     }
                 } else {
                     return self.end_without_telling_phone(StopReason::PeerOffline, now);
@@ -481,21 +576,61 @@ impl Machine {
 
     // --- inputs from the session task --------------------------------------------------
 
-    pub fn on_session_event(&mut self, session_id: &str, ev: SessionEvent, now: Instant) -> Vec<Action> {
-        if !self.is_current(session_id) {
+    /// An event from the session task started with `epoch`. Events from any other session
+    /// are ignored, with one exception: the `Closed` of a session that was given up on ends
+    /// the "still releasing" state.
+    pub fn on_session_event(&mut self, epoch: u64, ev: SessionEvent, now: Instant) -> Vec<Action> {
+        if self.releasing == Some(epoch) {
+            if matches!(ev, SessionEvent::Closed { .. }) {
+                eprintln!("phone stream: the abandoned session has shut down; the camera is free again");
+                self.releasing = None;
+                // No session can have started meanwhile, so the status is still the
+                // give-up's error; it no longer describes anything.
+                if self.session.is_none() && self.status.state == Phase::Error {
+                    self.finish(None);
+                }
+            }
+            return vec![];
+        }
+        if self.current_epoch() != Some(epoch) {
             return vec![];
         }
         match ev {
-            SessionEvent::Answer(sdp) => {
-                if self.session.as_ref().is_some_and(|s| s.stop_reason.is_some()) {
+            SessionEvent::Prepared => {
+                if let Some(s) = self.session.as_mut() {
+                    s.prepared = true;
+                }
+                vec![]
+            }
+            // The session ended by itself while the camera handoff was still under way, and
+            // has to wait for that before it can report `Closed`. Tell the phone now, and
+            // show "stopping" (with the watchdog running) instead of a stale "connecting".
+            SessionEvent::Releasing { reason, .. } => {
+                let Some(s) = self.session.as_mut() else { return vec![] };
+                if s.stop_reason.is_some() {
                     return vec![];
                 }
-                vec![signal(StreamSignal::Answer { session_id: session_id.to_string(), sdp })]
+                s.stop_reason = Some(reason.clone());
+                s.stop_requested_at = Some(now);
+                let id = s.id.clone();
+                self.enter(Phase::Stopping);
+                vec![Action::Send(OutboundFrame::StreamStop { session_id: id, reason })]
+            }
+            SessionEvent::Answer(sdp) => {
+                let Some(s) = self.session.as_mut() else { return vec![] };
+                s.prepared = true;
+                if s.stop_reason.is_some() {
+                    return vec![];
+                }
+                vec![signal(StreamSignal::Answer { session_id: s.id.clone(), sdp })]
             }
             SessionEvent::IceConnected => vec![],
             SessionEvent::Live(stats) => {
                 if self.session.as_ref().is_some_and(|s| s.stop_reason.is_some()) {
                     return vec![];
+                }
+                if let Some(s) = self.session.as_mut() {
+                    s.prepared = true;
                 }
                 self.apply_stats(&stats);
                 self.enter(Phase::Live);
@@ -510,10 +645,10 @@ impl Machine {
                 }
             }
             SessionEvent::Closed { reason, error } => {
-                let s = self.session.as_ref().expect("is_current checked");
+                let s = self.session.as_ref().expect("current_epoch checked");
                 let requested = s.stop_reason.clone();
                 let from_phone = s.stop_from_phone;
-                let phone_offline = s.peer_offline.is_some();
+                let phone_offline = s.peer_offline.is_some_and(|p| p.confirmed);
                 let id = s.id.clone();
                 match requested {
                     // We (or the phone) asked for this stop; the phone already knows.
@@ -615,7 +750,7 @@ mod tests {
         m.on_signal(req(id), t);
         m.accept(id, t).unwrap();
         m.on_signal(offer(id), t);
-        m.on_session_event(id, SessionEvent::Live(stats(1280, 720)), t);
+        m.on_session_event(m.current_epoch().unwrap(), SessionEvent::Live(stats(1280, 720)), t);
         assert_eq!(m.status().state, Phase::Live);
     }
 
@@ -629,7 +764,7 @@ mod tests {
 
         let a = m.accept("s1", t).unwrap();
         assert_eq!(sent(&a), vec!["stream_accept", "status:Connecting"]);
-        assert!(a.contains(&Action::StartSession("s1".into())));
+        assert!(a.contains(&Action::StartSession { session_id: "s1".into(), epoch: 1 }));
         assert_eq!(m.status().state, Phase::Connecting);
 
         assert_eq!(m.on_signal(offer("s1"), t), vec![Action::ToSession(SessionCommand::Offer("v=0".into()))]);
@@ -637,9 +772,9 @@ mod tests {
             m.on_signal(cand("s1", "candidate:1"), t),
             vec![Action::ToSession(SessionCommand::RemoteCandidate("candidate:1".into()))]
         );
-        assert_eq!(sent(&m.on_session_event("s1", SessionEvent::Answer("v=0 a".into()), t)), vec!["answer"]);
+        assert_eq!(sent(&m.on_session_event(1, SessionEvent::Answer("v=0 a".into()), t)), vec!["answer"]);
 
-        let a = m.on_session_event("s1", SessionEvent::Live(stats(1280, 720)), t);
+        let a = m.on_session_event(1, SessionEvent::Live(stats(1280, 720)), t);
         assert_eq!(sent(&a), vec!["status:Live"]);
         let st = m.status();
         assert_eq!(st.state, Phase::Live);
@@ -650,7 +785,7 @@ mod tests {
         assert_eq!(sent(&a), vec!["stop:user"]);
         assert!(a.contains(&Action::ToSession(SessionCommand::Stop(StopReason::User))));
         assert_eq!(m.status().state, Phase::Stopping);
-        assert!(m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t).is_empty());
+        assert!(m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t).is_empty());
         assert_eq!(m.status().state, Phase::Idle);
         assert_eq!(m.current_session(), None);
     }
@@ -667,7 +802,7 @@ mod tests {
         assert_eq!(sent(&m.on_signal(req("s2"), t)), vec!["reject:Busy"]);
         m.stop(StopReason::User, t);
         assert_eq!(sent(&m.on_signal(req("s3"), t)), vec!["reject:Busy"], "still stopping");
-        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t);
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t);
         assert!(matches!(&m.on_signal(req("s3"), t)[..], [Action::AskUser(_)]));
     }
 
@@ -703,7 +838,7 @@ mod tests {
         assert!(m.on_signal(offer("old"), t).is_empty());
         assert!(m.on_signal(cand("old", "candidate:1"), t).is_empty());
         assert!(m.on_remote_stop(StopData { session_id: Some("old".into()), reason: StopReason::User }, t).is_empty());
-        assert!(m.on_session_event("old", SessionEvent::Closed { reason: StopReason::Error, error: None }, t).is_empty());
+        assert!(m.on_session_event(99, SessionEvent::Closed { reason: StopReason::Error, error: None }, t).is_empty());
         assert_eq!(m.accept("old", t), Err(DecisionError::NoSuchRequest));
         assert_eq!(m.status().state, Phase::Live);
         // Accepting twice is not possible either.
@@ -718,7 +853,7 @@ mod tests {
         assert!(m.on_signal(offer("s1"), t).is_empty());
         assert!(m.on_signal(cand("s1", "candidate:a"), t).is_empty());
         let a = m.accept("s1", t).unwrap();
-        let start = a.iter().position(|x| *x == Action::StartSession("s1".into())).unwrap();
+        let start = a.iter().position(|x| *x == Action::StartSession { session_id: "s1".into(), epoch: 1 }).unwrap();
         assert_eq!(a[start + 1], Action::ToSession(SessionCommand::Offer("v=0".into())));
         assert_eq!(a[start + 2], Action::ToSession(SessionCommand::RemoteCandidate("candidate:a".into())));
     }
@@ -741,7 +876,7 @@ mod tests {
         assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::User))]);
         assert!(sent(&a).is_empty());
         assert_eq!(m.status().state, Phase::Stopping);
-        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t);
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t);
         assert_eq!(m.status().state, Phase::Idle);
         assert_eq!(m.status().last_error, None);
         assert!(m.status().ended_by_phone);
@@ -750,7 +885,7 @@ mod tests {
         let mut m = Machine::new();
         live(&mut m, "s1", t);
         m.stop(StopReason::User, t);
-        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t);
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t);
         assert!(!m.status().ended_by_phone);
 
         // Phone goes offline while connecting: signaling cannot finish, the attempt ends now.
@@ -760,7 +895,7 @@ mod tests {
         let a = m.on_peer_offline(t);
         assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::PeerOffline))]);
         assert!(m.on_peer_offline(t).is_empty(), "only once");
-        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::PeerOffline, error: None }, t);
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::PeerOffline, error: None }, t);
         assert_eq!(m.status().state, Phase::Idle);
         assert_eq!(m.status().last_error, None);
         assert!(!m.status().ended_by_phone);
@@ -773,7 +908,7 @@ mod tests {
         // period: the session reports `peer_stopped` on its own.
         let mut m = Machine::new();
         live(&mut m, "s1", t);
-        let a = m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::PeerStopped, error: None }, t);
+        let a = m.on_session_event(1, SessionEvent::Closed { reason: StopReason::PeerStopped, error: None }, t);
         assert!(a.is_empty(), "nothing is sent to a phone that hung up: {a:?}");
         let st = m.status();
         assert_eq!((st.state, st.last_error.clone(), st.last_error_code.clone()), (Phase::Idle, None, None));
@@ -821,13 +956,13 @@ mod tests {
         m.on_peer_offline(t);
         let mut later = stats(1280, 720);
         later.frames = 300;
-        m.on_session_event("s1", SessionEvent::Stats(later.clone()), t + secs(9));
+        m.on_session_event(1, SessionEvent::Stats(later.clone()), t + secs(9));
         assert!(m.tick(t + PEER_OFFLINE_GRACE).is_empty());
         assert_eq!(m.status().state, Phase::Live);
         // …and once the video stops as well, the next grace period ends it, without an error.
         let a = m.tick(t + PEER_OFFLINE_GRACE * 2);
         assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::PeerOffline))]);
-        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::PeerOffline, error: None }, t + secs(21));
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::PeerOffline, error: None }, t + secs(21));
         assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
 
         // The phone vanished (tab closed): the media timeout fires while it is off the relay.
@@ -836,7 +971,7 @@ mod tests {
         live(&mut m, "s1", t);
         m.on_peer_offline(t);
         let a = m.on_session_event(
-            "s1",
+            1,
             SessionEvent::Closed { reason: StopReason::Timeout, error: Some("no video from the phone".into()) },
             t + secs(10),
         );
@@ -846,7 +981,7 @@ mod tests {
         let mut m = Machine::new();
         live(&mut m, "s1", t);
         let a = m.on_session_event(
-            "s1",
+            1,
             SessionEvent::Closed { reason: StopReason::Timeout, error: Some("no video from the phone".into()) },
             t,
         );
@@ -855,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_that_never_reports_closed_does_not_keep_the_machine_busy() {
+    fn a_session_that_never_reports_closed_ends_as_an_error_and_stays_busy_until_it_does() {
         let t = Instant::now();
         let mut m = Machine::new();
         live(&mut m, "s1", t);
@@ -863,10 +998,141 @@ mod tests {
         assert!(m.tick(t + STOPPING_WATCHDOG - Duration::from_secs(1)).is_empty());
         assert_eq!(m.status().state, Phase::Stopping);
         assert!(m.tick(t + STOPPING_WATCHDOG).is_empty());
-        assert_eq!(m.status().state, Phase::Idle);
-        // The late Closed belongs to no current session.
-        assert!(m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t).is_empty());
+        // Not idle: the session still holds the camera, and the UI is told so.
+        let st = m.status().clone();
+        assert_eq!((st.state, st.last_error.as_deref(), st.last_error_code.as_deref()), (Phase::Error, Some(STILL_RELEASING), Some("error")));
+        assert!(m.is_releasing());
+        // An error state normally takes the next request; not while the camera is held.
+        assert_eq!(sent(&m.on_signal(req("s2"), t)), vec!["reject:Busy"]);
+        assert_eq!(m.status().state, Phase::Error);
+        // Anything but `Closed` from the abandoned session changes nothing.
+        assert!(m.on_session_event(1, SessionEvent::Stats(stats(1280, 720)), t).is_empty());
+        assert!(m.is_releasing());
+        // Its late `Closed` frees the machine and clears the error.
+        assert!(m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t).is_empty());
+        assert!(!m.is_releasing());
+        assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
         assert!(matches!(&m.on_signal(req("s2"), t)[..], [Action::AskUser(_)]));
+    }
+
+    #[test]
+    fn a_stop_while_the_camera_is_being_prepared_is_given_time() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
+        // Stopped while the handoff may sit in a polkit/UAC prompt: 10 s is not enough.
+        m.stop(StopReason::User, t);
+        assert!(m.tick(t + STOPPING_WATCHDOG * 3).is_empty());
+        assert_eq!(m.status().state, Phase::Stopping);
+        assert_eq!(sent(&m.on_signal(req("s2"), t)), vec!["reject:Busy"]);
+        // It finishes late but normally: idle, no error.
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t + STOPPING_WATCHDOG * 4);
+        assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
+        assert!(!m.is_releasing());
+
+        // Never finishing is still bounded.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
+        m.stop(StopReason::User, t);
+        m.tick(t + STOPPING_WATCHDOG_PREPARING);
+        assert_eq!(m.status().state, Phase::Error);
+        assert!(m.is_releasing());
+
+        // Once the session says the camera is ready, the short watchdog applies.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
+        m.on_session_event(1, SessionEvent::Prepared, t);
+        m.stop(StopReason::User, t);
+        m.tick(t + STOPPING_WATCHDOG);
+        assert_eq!(m.status().state, Phase::Error);
+    }
+
+    #[test]
+    fn events_are_matched_by_epoch_so_a_reused_session_id_cannot_confuse_sessions() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        live(&mut m, "same", t);
+        assert_eq!(m.current_epoch(), Some(1));
+        m.stop(StopReason::User, t);
+        m.stop(StopReason::User, t + FORCE_STOP_AFTER); // given up on
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t + FORCE_STOP_AFTER);
+
+        // The phone uses the same sessionId again.
+        let t2 = t + Duration::from_secs(30);
+        let a = m.on_signal(req("same"), t2);
+        assert!(matches!(&a[..], [Action::AskUser(_)]), "{a:?}");
+        let a = m.accept("same", t2).unwrap();
+        assert!(a.contains(&Action::StartSession { session_id: "same".into(), epoch: 2 }));
+        // Late events of the first session task: not this session's.
+        assert!(m.on_session_event(1, SessionEvent::Answer("old answer".into()), t2).is_empty());
+        assert!(m.on_session_event(1, SessionEvent::Live(stats(1, 1)), t2).is_empty());
+        assert!(m.on_session_event(1, SessionEvent::Closed { reason: StopReason::Error, error: Some("x".into()) }, t2).is_empty());
+        assert_eq!((m.status().state, m.current_epoch()), (Phase::Connecting, Some(2)));
+        assert_eq!(sent(&m.on_session_event(2, SessionEvent::Answer("v=0".into()), t2)), vec!["answer"]);
+    }
+
+    #[test]
+    fn a_session_that_ends_by_itself_mid_handoff_tells_the_phone_before_it_has_released() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
+        // The prepare deadline passed with a system prompt still open.
+        let error = Some("preparing the camera took too long".to_string());
+        let a = m.on_session_event(1, SessionEvent::Releasing { reason: StopReason::Timeout, error: error.clone() }, t);
+        assert_eq!(sent(&a), vec!["stop:timeout"]);
+        assert_eq!(m.status().state, Phase::Stopping);
+        assert_eq!(sent(&m.on_signal(req("s2"), t)), vec!["reject:Busy"]);
+        // The `Closed` that follows the release: the error is shown, the phone is not told twice.
+        let a = m.on_session_event(1, SessionEvent::Closed { reason: StopReason::Timeout, error }, t + Duration::from_secs(40));
+        assert!(a.is_empty(), "{a:?}");
+        let st = m.status();
+        assert_eq!((st.state, st.last_error_code.as_deref()), (Phase::Error, Some("timeout")));
+        assert_eq!(st.last_error.as_deref(), Some("preparing the camera took too long"));
+
+        // After a stop the machine asked for, `Releasing` is only an echo.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
+        m.stop(StopReason::User, t);
+        assert!(m.on_session_event(1, SessionEvent::Releasing { reason: StopReason::User, error: None }, t).is_empty());
+    }
+
+    #[test]
+    fn a_delivery_error_does_not_stay_armed_once_video_is_seen_to_arrive() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        // `error{peer_offline}` for a status frame; no presence frame ever follows.
+        assert!(m.on_peer_unreachable(t).is_empty());
+        let mut later = stats(1280, 720);
+        later.frames = 300;
+        m.on_session_event(1, SessionEvent::Stats(later), t + Duration::from_secs(9));
+        assert!(m.tick(t + PEER_OFFLINE_GRACE).is_empty());
+        // Much later the video really dries up: an error, and the phone is told.
+        assert!(m.tick(t + PEER_OFFLINE_GRACE * 30).is_empty());
+        let a = m.on_session_event(
+            1,
+            SessionEvent::Closed { reason: StopReason::Timeout, error: Some("no video from the phone".into()) },
+            t + PEER_OFFLINE_GRACE * 30,
+        );
+        assert_eq!(sent(&a), vec!["stop:timeout"]);
+        assert_eq!(m.status().state, Phase::Error);
+
+        // Without video it ends the stream after the grace period, like a presence frame.
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        m.on_peer_unreachable(t);
+        let a = m.tick(t + PEER_OFFLINE_GRACE);
+        assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::PeerOffline))]);
+        // Before the stream is live it ends the attempt at once.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.accept("s1", t).unwrap();
+        assert_eq!(m.on_peer_unreachable(t), vec![Action::ToSession(SessionCommand::Stop(StopReason::PeerOffline))]);
     }
 
     #[test]
@@ -882,10 +1148,41 @@ mod tests {
         assert_eq!(m.status().state, Phase::Idle);
         // After the cooldown the user is asked again.
         assert!(matches!(&m.on_signal(req("s3"), t + DECLINE_COOLDOWN)[..], [Action::AskUser(_)]));
-        // An ignored dialog (60 s timeout) counts as a no, too.
-        let t2 = t + DECLINE_COOLDOWN + DECISION_TIMEOUT;
-        m.tick(t2);
-        assert_eq!(sent(&m.on_signal(req("s4"), t2 + Duration::from_secs(1))), vec!["reject:Declined"]);
+    }
+
+    #[test]
+    fn only_an_explicit_decline_starts_the_cooldown() {
+        let t = Instant::now();
+        let secs = Duration::from_secs;
+        // The dialog timed out (the user may have tried to accept while offline): a retry asks.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        m.tick(t + DECISION_TIMEOUT);
+        assert!(matches!(&m.on_signal(req("s2"), t + DECISION_TIMEOUT + secs(1))[..], [Action::AskUser(_)]));
+        // A stop that is not the dialog's Decline (unlink, quit, tray): no cooldown either.
+        let mut m = Machine::new();
+        m.on_signal(req("s1"), t);
+        assert_eq!(sent(&m.stop(StopReason::User, t)), vec!["reject:Declined"]);
+        assert!(matches!(&m.on_signal(req("s2"), t + secs(1))[..], [Action::AskUser(_)]));
+    }
+
+    #[test]
+    fn the_dialog_is_raised_a_limited_number_of_times_per_minute() {
+        let t = Instant::now();
+        let ms = Duration::from_millis;
+        let mut m = Machine::new();
+        // Request, cancel, request, cancel…: no decline, so no cooldown applies.
+        for i in 0..MAX_PROMPTS {
+            let id = format!("s{i}");
+            let at = t + ms(100 * i as u64);
+            assert!(matches!(&m.on_signal(req(&id), at)[..], [Action::AskUser(_)]), "prompt {i}");
+            m.on_remote_stop(StopData { session_id: Some(id), reason: StopReason::User }, at);
+        }
+        let a = m.on_signal(req("one-too-many"), t + ms(900));
+        assert_eq!(sent(&a), vec!["reject:Declined"]);
+        assert_eq!(m.status().state, Phase::Idle);
+        // A minute after the first prompt there is room for one more.
+        assert!(matches!(&m.on_signal(req("later"), t + PROMPT_WINDOW)[..], [Action::AskUser(_)]));
     }
 
     #[test]
@@ -917,7 +1214,7 @@ mod tests {
         m.accept("s1", t).unwrap();
         m.on_signal(offer("s1"), t);
         let a = m.on_session_event(
-            "s1",
+            1,
             SessionEvent::Closed { reason: StopReason::IceFailed, error: Some("no ICE connection".into()) },
             t,
         );
@@ -937,14 +1234,14 @@ mod tests {
         let mut m = Machine::new();
         live(&mut m, "s1", t);
         // Same size: nothing.
-        assert!(m.on_session_event("s1", SessionEvent::Stats(stats(1280, 720)), t + Duration::from_secs(5)).is_empty());
+        assert!(m.on_session_event(1, SessionEvent::Stats(stats(1280, 720)), t + Duration::from_secs(5)).is_empty());
         // New size right away after the live status: held back…
         let mut m = Machine::new();
         live(&mut m, "s1", t);
-        assert!(m.on_session_event("s1", SessionEvent::Stats(stats(640, 360)), t + Duration::from_millis(500)).is_empty());
+        assert!(m.on_session_event(1, SessionEvent::Stats(stats(640, 360)), t + Duration::from_millis(500)).is_empty());
         assert_eq!(m.status().width, Some(640), "local status still updates");
         // …and sent once the interval has passed.
-        let a = m.on_session_event("s1", SessionEvent::Stats(stats(640, 360)), t + Duration::from_secs(3));
+        let a = m.on_session_event(1, SessionEvent::Stats(stats(640, 360)), t + Duration::from_secs(3));
         assert_eq!(sent(&a), vec!["status:Live"]);
     }
 
@@ -988,12 +1285,18 @@ mod tests {
         // Too early: an impatient double click changes nothing.
         assert!(m.stop(StopReason::User, t + FORCE_STOP_AFTER - Duration::from_millis(1)).is_empty());
         assert_eq!(m.status().state, Phase::Stopping);
-        // From 5 s on, Stop gives up on the session without waiting for the watchdog.
+        // From 5 s on, Stop gives up on the session without waiting for the watchdog. The UI
+        // leaves "stopping", but nothing new may start: the old session holds the camera,
+        // and a second session next to it would mean two writers.
         assert!(m.stop(StopReason::User, t + FORCE_STOP_AFTER).is_empty());
+        assert_eq!((m.status().state, m.status().last_error.as_deref()), (Phase::Error, Some(STILL_RELEASING)));
+        assert_eq!(sent(&m.on_signal(req("s2"), t + FORCE_STOP_AFTER)), vec!["reject:Busy"]);
+        // Another Stop has nothing left to do.
+        assert!(m.stop(StopReason::User, t + FORCE_STOP_AFTER * 2).is_empty());
+        // The abandoned session's late `Closed` frees the machine.
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t + FORCE_STOP_AFTER * 3);
         assert_eq!((m.status().state, m.status().last_error.clone()), (Phase::Idle, None));
-        // The abandoned session's late `Closed` is ignored, and a new request is taken.
-        m.on_session_event("s1", SessionEvent::Closed { reason: StopReason::User, error: None }, t + FORCE_STOP_AFTER);
-        assert!(matches!(&m.on_signal(req("s2"), t + FORCE_STOP_AFTER)[..], [Action::AskUser(_)]));
+        assert!(matches!(&m.on_signal(req("s2"), t + FORCE_STOP_AFTER * 3)[..], [Action::AskUser(_)]));
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub mod signal;
 pub use handoff::phone_owns_camera;
 pub use machine::{Phase, StreamRequest, StreamStatus};
 pub use manager::{ChannelDecisions, DecisionEvent, DecisionSink, SessionBackend, StreamManager};
-pub use runner::{CameraControl, CameraTarget, FixedCamera, IceSource, NoStun, SessionDeps};
+pub use runner::{CameraControl, CameraTarget, Cancel, FixedCamera, IceSource, NoStun, SessionDeps};
 
 use super::protocol::ServerMessage;
 
@@ -84,7 +84,7 @@ mod tests {
 
     struct NeverStarts;
     impl SessionBackend for NeverStarts {
-        fn start(&self, _: &str, _: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
+        fn start(&self, _: &str, _: u64, _: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
             mpsc::unbounded_channel().0
         }
     }
