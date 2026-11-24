@@ -1,0 +1,1327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f0f14">
+<meta name="referrer" content="no-referrer">
+<!-- CSP: works on camlooper.com (API on api.camlooper.com) and behind the same-origin dev proxy
+     on *.trycloudflare.com ('self' does not cover wss: in every browser, hence the explicit host).
+     script-src hash = the inline script element; dev/update-csp.mjs recomputes it, dev/selftest.mjs checks it.
+     frame-ancestors is ignored in <meta>: production must send it (or X-Frame-Options) as a header. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-kh3Q61fpi49GgbG8jH74DXrVW6dYyUkunKBuntr5Gug='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex">
+<title>CamLooper Remote</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f0f14; --card: #1a1a22; --card2: #22222c; --line: #2e2e3a;
+    --text: #f1f1f5; --muted: #a0a0b2; --accent: #7c5cff; --accent2: #6a4cf0;
+    --ok: #2ecc71; --warn: #f5b83d; --bad: #ff5468; --radius: 16px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) 16px max(20px, env(safe-area-inset-bottom));
+    max-width: 560px; margin-inline: auto; min-height: 100vh;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0 14px; }
+  .brand { white-space: nowrap; flex-shrink: 0; display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; }
+  .logo { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), #b05cff); display: grid; place-items: center; }
+  .logo::after { content: ""; width: 12px; height: 12px; border-radius: 50%; border: 3px solid #fff; }
+  h1 { font-size: 1.5rem; margin: 6px 0 8px; }
+  h2 { font-size: 1.1rem; margin: 0 0 10px; }
+  p { margin: 6px 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: .88rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin: 12px 0; }
+  label { display: block; font-size: .9rem; color: var(--muted); margin: 10px 0 6px; }
+  input, select {
+    width: 100%; font: inherit; color: var(--text); background: var(--card2); border: 1px solid var(--line);
+    border-radius: 12px; min-height: 52px; padding: 10px 14px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  button {
+    font: inherit; font-weight: 600; min-height: 52px; padding: 10px 18px; border-radius: 14px; border: 0;
+    background: var(--accent); color: #fff; cursor: pointer; touch-action: manipulation;
+  }
+  button:active { background: var(--accent2); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.secondary { background: var(--card2); color: var(--text); border: 1px solid var(--line); }
+  button.danger { background: var(--bad); }
+  button.link { background: none; color: var(--muted); min-height: 44px; padding: 8px 4px; text-decoration: underline; }
+  .block { display: block; width: 100%; margin-top: 12px; }
+  .big { min-height: 64px; font-size: 1.15rem; border-radius: 18px; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row > * { flex: 1; }
+  .seg { display: flex; background: var(--card2); border: 1px solid var(--line); border-radius: 14px; padding: 4px; gap: 4px; }
+  .seg button { flex: 1; background: transparent; color: var(--muted); min-height: 46px; border-radius: 10px; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  .code {
+    font: 700 3.4rem/1.1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .18em; text-align: center;
+    margin: 14px 0 6px; padding: 14px 0 14px .18em; background: var(--card2); border-radius: 14px; user-select: all;
+  }
+  .center { text-align: center; }
+  .msg { min-height: 1.4em; font-size: .95rem; }
+  .msg:empty { min-height: 0; margin: 0; }
+  .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); } .msg.warn { color: var(--warn); }
+  .banner { border-radius: 12px; padding: 12px 14px; margin: 10px 0; background: var(--card2); border-left: 4px solid var(--accent); }
+  .banner.err { border-left-color: var(--bad); }
+  .banner.warn { border-left-color: var(--warn); }
+  .dot { flex-shrink: 0; display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #666; margin-right: 6px; vertical-align: middle; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .pill { display: inline-flex; align-items: center; font-size: .85rem; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .desk { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .desk-name { font-weight: 700; font-size: 1.1rem; overflow-wrap: anywhere; }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; vertical-align: -3px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .video-wrap { position: relative; background: #000; border-radius: var(--radius); overflow: hidden; aspect-ratio: 9 / 16; max-height: 58vh; width: 100%; margin: 0 auto; }
+  @media (orientation: landscape) { .video-wrap { aspect-ratio: 16 / 9; } }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; background: #000; }
+  video.mirror { transform: scaleX(-1); }
+  .chip { position: absolute; top: 12px; left: 12px; font-weight: 700; font-size: .85rem; padding: 6px 12px; border-radius: 999px; background: #000a; color: #fff; display: flex; align-items: center; gap: 8px; }
+  .chip::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--warn); }
+  .chip.live { background: #14532dd9; } .chip.live::before { background: var(--ok); animation: pulse 1.4s infinite; }
+  .chip.failed { background: #7f1d1dd9; } .chip.failed::before { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .stat { background: var(--card2); border-radius: 12px; padding: 8px 12px; }
+  .stat b { display: block; font-size: .75rem; color: var(--muted); font-weight: 500; }
+  .stat span { font-variant-numeric: tabular-nums; font-weight: 600; overflow-wrap: anywhere; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo" aria-hidden="true"></div><span data-s="appName"></span></div>
+  <span id="hdrDesk" class="pill hidden"><span id="hdrDot" class="dot"></span><span id="hdrDeskName"></span></span>
+</header>
+
+<noscript>JavaScript is required.</noscript>
+<div id="globalMsg" class="banner warn hidden"></div>
+
+<!-- 1. Pair -->
+<section id="scrPair" class="hidden">
+  <div id="pairStart">
+    <h1 data-s="pairTitle"></h1>
+    <p class="muted" data-s="pairIntro"></p>
+    <div class="card">
+      <label for="deviceName" data-s="phoneName"></label>
+      <input id="deviceName" maxlength="64" autocomplete="off" autocapitalize="words">
+      <button id="btnGetCode" class="block big" data-s="getCode"></button>
+      <p id="pairErr" class="msg err"></p>
+    </div>
+  </div>
+  <div id="pairCode" class="hidden">
+    <h1 data-s="codeTitle"></h1>
+    <div class="card center">
+      <div id="code" class="code" aria-live="polite"></div>
+      <p data-s="codeHint"></p>
+      <p id="countdown" class="muted small"></p>
+      <p id="pairWait" class="muted"><span class="spinner"></span><span data-s="waitingLink"></span></p>
+      <p id="pairCodeErr" class="msg err"></p>
+      <button id="btnNewCode" class="block hidden" data-s="newCode"></button>
+      <button id="btnCancelPair" class="block secondary" data-s="cancel"></button>
+    </div>
+  </div>
+</section>
+
+<!-- 2. Home -->
+<section id="scrHome" class="hidden">
+  <div id="homeMsg" class="banner hidden"></div>
+  <div class="card">
+    <div class="desk">
+      <div>
+        <div class="muted small" data-s="linkedTo"></div>
+        <div id="deskName" class="desk-name"></div>
+      </div>
+      <div class="small" style="white-space:nowrap"><span id="deskDot" class="dot"></span><span id="deskState"></span></div>
+    </div>
+    <p id="deskNote" class="muted small hidden"></p>
+  </div>
+
+  <div class="card">
+    <h2 data-s="camTitle"></h2>
+    <label data-s="camera"></label>
+    <div class="seg" role="group" id="segFacing">
+      <button type="button" data-v="user" aria-pressed="true" data-s="front"></button>
+      <button type="button" data-v="environment" aria-pressed="false" data-s="back"></button>
+    </div>
+    <label data-s="quality"></label>
+    <div class="seg" role="group" id="segQuality">
+      <button type="button" data-v="720" aria-pressed="true" data-s="q720"></button>
+      <button type="button" data-v="480" aria-pressed="false" data-s="q480"></button>
+    </div>
+    <p class="muted small" data-s="qualityHint"></p>
+    <p class="muted small" data-s="micHint"></p>
+    <button id="btnStart" class="block big" data-s="startStreaming"></button>
+    <p id="camMsg" class="msg"></p>
+  </div>
+
+  <div class="card">
+    <h2 data-s="meetTitle"></h2>
+    <label for="meetUrl" data-s="meetLabel"></label>
+    <input id="meetUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://zoom.us/j/…">
+    <button id="btnOpen" class="block" data-s="open"></button>
+    <p id="meetMsg" class="msg"></p>
+  </div>
+
+  <div class="card">
+    <p class="muted small"><span data-s="thisPhone"></span> <span id="myName"></span></p>
+    <button id="btnUnpair" class="block secondary" data-s="unpair"></button>
+  </div>
+</section>
+
+<!-- 3. Streaming -->
+<section id="scrStream" class="hidden">
+  <div class="video-wrap">
+    <video id="preview" autoplay playsinline muted></video>
+    <div id="chip" class="chip"></div>
+  </div>
+  <p id="streamMsg" class="msg" aria-live="polite"></p>
+  <div id="streamFail" class="banner err hidden"></div>
+  <div id="hiddenNote" class="banner warn hidden" data-s="hiddenNote"></div>
+  <div id="stats" class="stats hidden">
+    <div class="stat"><b data-s="stRes"></b><span id="stRes">–</span></div>
+    <div class="stat"><b data-s="stFps"></b><span id="stFps">–</span></div>
+    <div class="stat"><b data-s="stRate"></b><span id="stRate">–</span></div>
+    <div class="stat"><b data-s="stCodec"></b><span id="stCodec">–</span></div>
+    <div class="stat"><b data-s="stPath"></b><span id="stPath">–</span></div>
+    <div class="stat"><b data-s="stRtt"></b><span id="stRtt">–</span></div>
+  </div>
+  <p id="deskRecv" class="muted small"></p>
+  <p id="keepOpen" class="muted small" data-s="keepOpen"></p>
+  <p id="micNote" class="muted small"></p>
+  <div id="streamActions">
+    <div class="row">
+      <button id="btnSwitch" class="secondary big" data-s="switchCam"></button>
+      <button id="btnStop" class="danger big" data-s="stop"></button>
+    </div>
+    <button id="btnMic" type="button" class="block secondary" aria-pressed="false"></button>
+  </div>
+  <div id="failActions" class="row hidden">
+    <button id="btnBack" class="secondary big" data-s="back2"></button>
+    <button id="btnRetry" class="big" data-s="retry"></button>
+  </div>
+</section>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------------
+// UI strings (English). Keep every user-visible string here for future i18n.
+// ---------------------------------------------------------------------------------
+const STRINGS = {
+  appName: "CamLooper Remote",
+  pairTitle: "Link this phone",
+  pairIntro: "Use your phone as a camera for CamLooper and open meetings on your computer.",
+  phoneName: "Phone name",
+  getCode: "Get a link code",
+  codeTitle: "Enter this code on your computer",
+  codeHint: "Enter this code in CamLooper on your computer (Remote → Link phone).",
+  expiresIn: (s) => `Code expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`,
+  codeExpired: "This code has expired.",
+  waitingLink: "Waiting for your computer…",
+  newCode: "Get a new code",
+  cancel: "Cancel",
+  linkedTo: "Linked to",
+  yourComputer: "Your computer",
+  online: "Online",
+  offline: "Offline",
+  connectingServer: "Connecting…",
+  deskOfflineNote: "Open CamLooper on your computer to use the phone camera.",
+  deskOldNote: "Update CamLooper on your computer to use this phone as a camera.",
+  meetTitle: "Open a meeting on the computer",
+  meetLabel: "Meeting link (Zoom, Teams or Google Meet)",
+  open: "Open",
+  meetInvalid: "Paste a full meeting link starting with https://",
+  meetNotAllowed: "Only Zoom, Microsoft Teams and Google Meet links can be opened.",
+  meetSending: "Sending…",
+  meetDelivered: "Sent to your computer.",
+  meetQueued: "Your computer is offline. The meeting will open when CamLooper connects (within 10 minutes).",
+  meetAcked: "Opened on your computer ✓",
+  camTitle: "Use this phone as the camera",
+  camera: "Camera",
+  front: "Front",
+  back: "Back",
+  quality: "Quality",
+  q720: "720p",
+  q480: "480p",
+  qualityHint: "720p looks best. 480p uses less data on weak networks.",
+  micHint: "The phone's microphone is sent to your computer too. You can mute it while streaming.",
+  micMute: "Mute microphone",
+  micUnmute: "Unmute microphone",
+  micOn: "Microphone on: your computer receives the phone's sound.",
+  micMuted: "Microphone muted.",
+  micNone: "Microphone not in use: only the camera is sent.",
+  startStreaming: "Start streaming",
+  thisPhone: "This phone:",
+  unpair: "Unpair this phone",
+  unpairConfirm: "Unpair this phone from your computer?",
+  unpaired: "This phone is no longer linked. Link it again to continue.",
+  unpairFailed: "Couldn't reach the CamLooper service to unlink this phone. If it still shows on your computer, unlink it there in CamLooper.",
+  chipRequesting: "Requesting",
+  chipConnecting: "Connecting",
+  chipLive: "Live",
+  chipFailed: "Failed",
+  chipReconnecting: "Reconnecting",
+  stCamera: "Starting the camera…",
+  stWaitAccept: "Waiting for the computer to accept…",
+  stConnecting: "Connecting to your computer…",
+  stLive: "Your computer is receiving this camera.",
+  stUnstable: "Connection unstable, trying to recover…",
+  keepOpen: "Keep this page open and the screen on while streaming.",
+  hiddenNote: "This page is in the background. Android may pause the camera until you come back.",
+  switchCam: "Switch camera",
+  stop: "Stop",
+  back2: "Back",
+  retry: "Try again",
+  stRes: "Resolution", stFps: "Frame rate", stRate: "Bitrate", stCodec: "Codec", stPath: "Network path", stRtt: "Round trip",
+  deskRecv: (w, h, fps, codec) => `Computer receives ${w}×${h}${fps ? ` @ ${fps} fps` : ""}${codec ? ` (${codec})` : ""}`,
+  pathHost: "direct (local)", pathSrflx: "direct (internet)", pathPrflx: "direct (internet)", pathRelay: "relay",
+  errNoSecure: "The camera needs a secure (https) page.",
+  errNoCamera: "This browser can't use the camera.",
+  errCamDenied: "Camera access was blocked. Allow the camera for this site in Chrome settings and try again.",
+  errCamBusy: "The camera is in use by another app. Close it and try again.",
+  errCamNone: "No camera was found.",
+  errCam: "Couldn't start the camera.",
+  errCamLost: "The camera stopped (another app may be using it). Close other camera apps and try again.",
+  errNoOtherCam: "This phone has no other camera to switch to.",
+  errCodec: (list) => `Your computer can't receive this phone's video format (${list || "none available"}). Update CamLooper on your computer and try again.`,
+  errDtls: "Couldn't set up a secure connection with your computer. Update CamLooper on your computer and try again.",
+  errNotConnected: "Not connected to the CamLooper service yet. Check your internet connection and try again.",
+  errDeskOffline: "Your computer is offline. Open CamLooper on the computer and try again.",
+  errDeskOld: "Update CamLooper on your computer to use this phone as a camera.",
+  errNetwork: "Network problem. Check your internet connection.",
+  errRateLimited: "Too many attempts. Please wait a minute and try again.",
+  errGeneric: "Something went wrong. Please try again.",
+  errReplaced: "CamLooper Remote was opened in another tab or browser. Reload this page to use it here.",
+  iceFailed: "Can't connect directly on this network. Put the phone and computer on the same Wi-Fi, or connect the computer to the phone's hotspot.",
+  reject: {
+    declined: "The computer declined the camera.",
+    busy: "The computer is already receiving a camera.",
+    timeout: "The computer didn't answer in time.",
+    unsupported: "Your computer's CamLooper can't receive this camera. Update CamLooper and try again.",
+    other: "The computer couldn't start the camera.",
+  },
+  acceptTimeout: "The computer didn't respond. Make sure CamLooper is open on your computer.",
+  stopped: {
+    user: "Streaming stopped on the computer.",
+    ice_failed: null, // uses iceFailed
+    error: "The computer hit an error and stopped the stream.",
+    peer_offline: "Your computer went offline.",
+    timeout: "The connection timed out.",
+    other: "Streaming stopped.",
+  },
+  streamEnded: "Streaming stopped.",
+  defaultAndroid: "Android phone",
+  defaultIphone: "iPhone",
+  defaultPhone: "Phone",
+};
+
+// ---------------------------------------------------------------------------------
+// Config, debug logging (tokens/tickets/SDP always redacted)
+// ---------------------------------------------------------------------------------
+const API = window.CAMLOOPER_API || (location.hostname === "camlooper.com" || location.hostname === "www.camlooper.com" ? "https://api.camlooper.com" : location.origin);
+const WS_BASE = API.replace(/^http/, "ws");
+const STORE = "camlooper-remote-phone-v1";
+const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+const PING_MS = 25000, ACCEPT_TIMEOUT_MS = 60000, CONNECT_TIMEOUT_MS = 20000, STATUS_POLL_MS = 3000;
+const HTTP_TIMEOUT_MS = 8000, WS_CONNECT_TIMEOUT_MS = 10000;
+const QUALITY = {
+  720: { width: 1280, height: 720, maxBitrate: 2500000 },
+  480: { width: 848, height: 480, maxBitrate: 1200000 },
+};
+
+function redact(v) {
+  const s = typeof v === "string" ? v : (() => { try { return JSON.stringify(v, (k, x) => /token|ticket|sdp|candidate|credential|password|authorization|^url$/i.test(k) && typeof x === "string" ? "[redacted]" : x); } catch { return String(v); } })();
+  return String(s)
+    .replace(/(ticket|token)=[^&\s"']+/gi, "$1=[redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/=-]+/g, "Bearer [redacted]");
+}
+function dlog(...args) { if (DEBUG) console.log("[camlooper]", ...args.map(redact)); }
+
+// ---------------------------------------------------------------------------------
+// DOM helpers
+// ---------------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const show = (el, on = true) => (typeof el === "string" ? $(el) : el).classList.toggle("hidden", !on);
+function setMsg(id, text, cls = "") { const el = $(id); el.textContent = text || ""; el.className = "msg" + (cls ? " " + cls : ""); }
+function banner(id, text, cls = "") { const el = $(id); el.textContent = text || ""; el.className = "banner" + (cls ? " " + cls : ""); show(el, !!text); }
+// Own-property lookup only: remote strings like "constructor" must not hit Object.prototype.
+const own = (obj, key) => (typeof key === "string" && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined);
+for (const el of document.querySelectorAll("[data-s]")) { const v = own(STRINGS, el.dataset.s); if (typeof v === "string") el.textContent = v; }
+
+function screen(name) {
+  for (const s of ["Pair", "Home", "Stream"]) show("scr" + s, s === name);
+  show("hdrDesk", name !== "Pair" && !!pair && pair.linked);
+  window.scrollTo(0, 0);
+}
+
+// ---------------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------------
+let pair = loadPair();           // { pairId, mobileToken, deviceName, linked, desktopName, code?, expiresAt? }
+const desk = { online: false, protocol: 0, known: false };
+let ws = null, wsAttempt = 0, wsTimer = null, pingTimer = null, wsLastRx = 0, wsStopped = false, wsReplaced = false;
+let pollTimer = null, countdownTimer = null, ackTimer = null;
+let facing = "user", quality = "720", micMuted = false;
+let session = null;              // current stream session, see startStreaming()
+let wakeLock = null;
+
+function loadPair() {
+  try {
+    const p = JSON.parse(localStorage.getItem(STORE));
+    return p && typeof p.pairId === "string" && typeof p.mobileToken === "string" ? p : null;
+  } catch { return null; }
+}
+function savePair(p) {
+  pair = p;
+  try { if (p) localStorage.setItem(STORE, JSON.stringify(p)); else localStorage.removeItem(STORE); } catch {}
+}
+
+// ---------------------------------------------------------------------------------
+// HTTP API
+// ---------------------------------------------------------------------------------
+class ApiError extends Error { constructor(status, code, message) { super(message || code || `HTTP ${status}`); this.status = status; this.code = code; } }
+
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) return AbortSignal.timeout(ms);
+  const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal;
+}
+
+async function api(method, path, { auth = true, body } = {}) {
+  const headers = {};
+  const p = pair; // the pair this request belongs to (a late 401 must not revoke a newer pair)
+  if (auth) {
+    if (!pair) throw new ApiError(401, "unauthorized");
+    headers.Authorization = `Bearer ${pair.mobileToken}`;
+    headers["X-CamLooper-Pair"] = pair.pairId;
+  }
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  let res;
+  try {
+    res = await fetch(API + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer", signal: timeoutSignal(HTTP_TIMEOUT_MS) });
+  } catch (e) { dlog("fetch failed", method, path, e && e.message); throw new ApiError(0, "network", STRINGS.errNetwork); }
+  const text = await res.text().catch(() => "");
+  let data = null; try { data = text ? JSON.parse(text) : null; } catch {}
+  dlog(method, path, "->", res.status);
+  if (!res.ok) {
+    const err = new ApiError(res.status, data && data.error, data && data.message);
+    const ra = Number(res.headers.get("Retry-After"));
+    if (ra > 0) err.retryAfter = Math.min(ra, 300);
+    if (auth && res.status === 401 && pair && p && pair.pairId === p.pairId) { onRevoked(); }
+    throw err;
+  }
+  return data;
+}
+
+function friendlyError(e) {
+  if (!e) return STRINGS.errGeneric;
+  if (e.code === "network") return STRINGS.errNetwork;
+  if (e.code === "rate_limited" || e.status === 429) return STRINGS.errRateLimited;
+  if (e.code === "url_not_allowed") return STRINGS.meetNotAllowed;
+  if (e.status === 401) return STRINGS.unpaired;
+  return STRINGS.errGeneric;
+}
+
+// ---------------------------------------------------------------------------------
+// Pairing
+// ---------------------------------------------------------------------------------
+function defaultDeviceName() {
+  const ua = navigator.userAgent || "";
+  if (/iPhone/i.test(ua)) return STRINGS.defaultIphone;
+  if (/Android/i.test(ua)) {
+    const m = ua.match(/Android [\d.]+; ([^;)]+?)(?: Build|\))/);
+    const model = m && m[1].trim();
+    return model && model.length > 1 && model !== "K" ? model.slice(0, 64) : STRINGS.defaultAndroid;
+  }
+  return STRINGS.defaultPhone;
+}
+async function refineDeviceName() {
+  // Chrome's reduced UA hides the model; ask UA Client Hints (no prompt).
+  try {
+    if (!navigator.userAgentData || !navigator.userAgentData.getHighEntropyValues) return;
+    const v = await navigator.userAgentData.getHighEntropyValues(["model"]);
+    const input = $("deviceName");
+    if (v.model && input.value === STRINGS.defaultAndroid && document.activeElement !== input) input.value = String(v.model).slice(0, 64);
+  } catch {}
+}
+
+function showPairStart(err) {
+  stopPairTimers();
+  screen("Pair");
+  show("pairStart"); show("pairCode", false);
+  const input = $("deviceName");
+  if (!input.value) { input.value = (pair && pair.deviceName) || defaultDeviceName(); refineDeviceName(); }
+  setMsg("pairErr", err || "", "err");
+}
+
+$("btnGetCode").onclick = async () => {
+  const name = $("deviceName").value.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 64) || defaultDeviceName();
+  $("btnGetCode").disabled = true; setMsg("pairErr", "");
+  try {
+    const r = await api("POST", "/v1/mobile/pair/start", { auth: false, body: { deviceName: name } });
+    savePair({ pairId: r.pairId, mobileToken: r.mobileToken, deviceName: name, linked: false, code: r.code, expiresAt: r.expiresAt });
+    showPairCode();
+    connectWs();
+  } catch (e) {
+    setMsg("pairErr", friendlyError(e), "err");
+  } finally { $("btnGetCode").disabled = false; }
+};
+
+function showPairCode() {
+  screen("Pair");
+  show("pairStart", false); show("pairCode");
+  $("code").textContent = pair.code || "------";
+  setMsg("pairCodeErr", "");
+  show("btnNewCode", false); show("pairWait");
+  stopPairTimers();
+  const tick = () => {
+    const left = Math.max(0, Math.round((Date.parse(pair && pair.expiresAt) - Date.now()) / 1000));
+    if (!(left > 0)) {
+      $("countdown").textContent = STRINGS.codeExpired;
+      show("btnNewCode"); show("pairWait", false); $("code").style.opacity = ".35";
+      stopPairTimers();
+      return;
+    }
+    $("code").style.opacity = "";
+    $("countdown").textContent = STRINGS.expiresIn(left);
+  };
+  tick();
+  countdownTimer = setInterval(tick, 1000);
+  pollLinked();
+}
+
+function stopPairTimers() { clearInterval(countdownTimer); countdownTimer = null; clearTimeout(pollTimer); pollTimer = null; }
+
+async function pollLinked() {
+  clearTimeout(pollTimer);
+  if (!pair || pair.linked || !countdownTimer) return;
+  try {
+    const s = await api("GET", "/v1/mobile/status");
+    if (s && s.linked) { onLinked(s.desktopName, s.desktopOnline); return; }
+  } catch (e) {
+    if (e.status === 401) return;
+    setMsg("pairCodeErr", e.code === "network" ? STRINGS.errNetwork : "", "err");
+  }
+  if (pair && !pair.linked && countdownTimer) pollTimer = setTimeout(pollLinked, STATUS_POLL_MS);
+}
+
+function onLinked(desktopName, online) {
+  if (!pair) return;
+  const wasLinked = pair.linked;
+  const p = { pairId: pair.pairId, mobileToken: pair.mobileToken, deviceName: pair.deviceName, linked: true, desktopName: typeof desktopName === "string" && desktopName ? desktopName : pair.desktopName || "" };
+  savePair(p);
+  if (typeof online === "boolean") { desk.online = online; desk.known = true; }
+  stopPairTimers();
+  renderDesk();
+  if (!wasLinked) { dlog("linked"); showHome(); if (!ws) connectWs(); }
+}
+
+// DELETE the pair on the server, retrying once. true = gone (deleted, or already unknown).
+async function deletePairRemote() {
+  for (let i = 0; i < 2; i++) {
+    const p = pair; if (!p) return true;
+    try { await api("DELETE", "/v1/mobile/pair"); return true; }
+    catch (e) {
+      dlog("unpair failed", e.status, e.code);
+      if (e.status === 401 || e.status === 404) return true;
+      if (i === 0) await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  return false;
+}
+
+async function newCode() {
+  const old = pair;
+  if (old) await deletePairRemote(); // never linked: nothing to clean up on the computer
+  stopWs(); savePair(null);
+  if (old) $("deviceName").value = old.deviceName || "";
+  showPairStart();
+  $("btnGetCode").click();
+}
+$("btnNewCode").onclick = newCode;
+$("btnCancelPair").onclick = async () => {
+  const old = pair;
+  $("btnCancelPair").disabled = true;
+  if (old) await deletePairRemote();
+  $("btnCancelPair").disabled = false;
+  stopWs(); savePair(null);
+  if (old) $("deviceName").value = old.deviceName || "";
+  showPairStart();
+};
+
+$("btnUnpair").onclick = async () => {
+  if (!confirm(STRINGS.unpairConfirm)) return;
+  const wasLinked = !!(pair && pair.linked);
+  $("btnUnpair").disabled = true;
+  let ok;
+  try { ok = await deletePairRemote(); } finally { $("btnUnpair").disabled = false; }
+  if (pair) resetToPair(ok || !wasLinked ? "" : STRINGS.unpairFailed);
+  else if (!ok && wasLinked) setMsg("pairErr", STRINGS.unpairFailed, "err");
+};
+
+// A pair that was never linked (expired code) just goes back to the start, without the
+// "no longer linked" message (item 22).
+function onRevoked() { if (pair) resetToPair(pair.linked ? STRINGS.unpaired : ""); }
+
+function resetToPair(message) {
+  endSession(null, { notify: true, silent: true });
+  stopWs(); clearInterval(ackTimer);
+  stopQueue = []; outbox = [];
+  const name = pair && pair.deviceName;
+  savePair(null);
+  desk.online = false; desk.known = false; desk.protocol = 0;
+  if (name) $("deviceName").value = name;
+  showPairStart(message);
+}
+
+// ---------------------------------------------------------------------------------
+// Home
+// ---------------------------------------------------------------------------------
+function showHome(notice, cls) {
+  screen("Home");
+  $("myName").textContent = (pair && pair.deviceName) || "";
+  banner("homeMsg", notice || "", cls || "");
+  renderDesk();
+}
+
+function renderDesk() {
+  const name = (pair && pair.desktopName) || STRINGS.yourComputer;
+  $("deskName").textContent = name;
+  $("hdrDeskName").textContent = name;
+  const connected = ws && ws.readyState === 1 && desk.known;
+  const on = connected && desk.online;
+  $("deskDot").className = "dot" + (on ? " on" : "");
+  $("hdrDot").className = "dot" + (on ? " on" : "");
+  $("deskState").textContent = connected ? (on ? STRINGS.online : STRINGS.offline) : STRINGS.connectingServer;
+  let note = "";
+  if (connected && !desk.online) note = STRINGS.deskOfflineNote;
+  else if (connected && desk.online && desk.protocol && desk.protocol < 2) note = STRINGS.deskOldNote;
+  $("deskNote").textContent = note; show("deskNote", !!note);
+  show("hdrDesk", !!pair && pair.linked && $("scrPair").classList.contains("hidden"));
+}
+
+for (const segId of ["segFacing", "segQuality"]) {
+  $(segId).addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-v]"); if (!b) return;
+    for (const x of $(segId).querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+    if (segId === "segFacing") facing = b.dataset.v; else quality = b.dataset.v;
+  });
+}
+
+// Meeting link (protocol v1 command)
+$("btnOpen").onclick = async () => {
+  const raw = $("meetUrl").value.trim();
+  let u = null;
+  try { u = new URL(raw); } catch {}
+  if (!u || (u.protocol !== "https:" && u.protocol !== "http:") || !u.hostname) { setMsg("meetMsg", STRINGS.meetInvalid, "err"); return; }
+  if (u.protocol === "http:") u.protocol = "https:"; // the relay accepts https links only
+  $("btnOpen").disabled = true; setMsg("meetMsg", STRINGS.meetSending);
+  clearInterval(ackTimer);
+  try {
+    const r = await api("POST", "/v1/mobile/commands", { body: { type: "open_meeting", url: u.href } });
+    setMsg("meetMsg", r.delivered ? STRINGS.meetDelivered : STRINGS.meetQueued, r.delivered ? "ok" : "warn");
+    $("meetUrl").value = "";
+    waitForAck(r.commandId, Date.parse(r.expiresAt) || Date.now() + 600000);
+  } catch (e) {
+    setMsg("meetMsg", e.code === "not_linked" ? STRINGS.unpaired : friendlyError(e), "err");
+  } finally { $("btnOpen").disabled = false; }
+};
+
+function waitForAck(commandId, until) {
+  clearInterval(ackTimer);
+  let n = 0;
+  ackTimer = setInterval(async () => {
+    if (!pair || Date.now() > until || ++n > 120) { clearInterval(ackTimer); return; }
+    try {
+      const s = await api("GET", "/v1/mobile/status");
+      if (s && s.lastAck && s.lastAck.commandId === commandId) { clearInterval(ackTimer); setMsg("meetMsg", STRINGS.meetAcked, "ok"); }
+    } catch (e) { if (e.status === 401) clearInterval(ackTimer); }
+  }, 5000);
+}
+
+// ---------------------------------------------------------------------------------
+// Relay WebSocket (ticket auth, ping 25 s, reconnect with backoff + fresh ticket)
+// ---------------------------------------------------------------------------------
+function stopWs() {
+  wsStopped = true;
+  clearTimeout(wsTimer); clearInterval(pingTimer);
+  const s = ws; ws = null;
+  if (s) { try { s.close(1000, "bye"); } catch {} }
+}
+
+function scheduleReconnect(minDelay = 0) {
+  clearTimeout(wsTimer);
+  if (wsStopped || !pair) return;
+  const delay = Math.max(minDelay, Math.min(30000, 1000 * 2 ** Math.min(wsAttempt, 5)) * (0.75 + Math.random() * 0.5));
+  wsAttempt++;
+  dlog("ws reconnect in", Math.round(delay), "ms");
+  wsTimer = setTimeout(connectWs, delay);
+}
+
+async function connectWs() {
+  if (!pair) return;
+  wsStopped = false; wsReplaced = false;
+  clearTimeout(wsTimer);
+  if (ws && ws.readyState <= 1) return;
+  let ticket;
+  try { ticket = (await api("POST", "/v1/mobile/ws-ticket")).ticket; }
+  catch (e) { if (e.status !== 401) scheduleReconnect(e.status === 429 && e.retryAfter ? e.retryAfter * 1000 : 0); return; }
+  if (!pair || wsStopped || (ws && ws.readyState <= 1)) return;
+  let sock;
+  try { sock = new WebSocket(`${WS_BASE}/v1/mobile/ws?pair=${encodeURIComponent(pair.pairId)}&ticket=${encodeURIComponent(ticket)}`); }
+  catch (e) { dlog("ws ctor failed"); scheduleReconnect(); return; }
+  ticket = null;
+  ws = sock;
+  // A socket stuck in CONNECTING would block every reconnect path: give up after 10 s.
+  const connectTimer = setTimeout(() => {
+    if (ws !== sock || sock.readyState !== 0) return;
+    dlog("ws connect timeout");
+    try { sock.close(); } catch {}
+    onWsGone(sock, 0);
+  }, WS_CONNECT_TIMEOUT_MS);
+  sock.onopen = () => {
+    clearTimeout(connectTimer);
+    if (ws !== sock) return;
+    dlog("ws open");
+    wsAttempt = 0; wsLastRx = Date.now();
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => {
+      if (ws !== sock || sock.readyState !== 1) return;
+      if (Date.now() - wsLastRx > PING_MS * 2 + 5000) { dlog("ws stale, reconnecting"); try { sock.close(); } catch {} onWsGone(sock, 0); return; }
+      sock.send('{"type":"ping"}');
+    }, PING_MS);
+    flushOutbox();
+  };
+  sock.onmessage = (ev) => {
+    if (ws !== sock) return;
+    wsLastRx = Date.now();
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m && typeof m === "object") onFrame(m);
+  };
+  sock.onerror = () => dlog("ws error");
+  sock.onclose = (ev) => { clearTimeout(connectTimer); onWsGone(sock, ev.code); };
+}
+
+function onWsGone(sock, code) {
+  if (ws !== sock) return;
+  ws = null; clearInterval(pingTimer);
+  desk.known = false;
+  dlog("ws closed", code);
+  renderDesk();
+  if (code === 4003 || code === 4004) { onRevoked(); return; }
+  if (code === 4000) {
+    wsReplaced = true; banner("globalMsg", STRINGS.errReplaced, "warn");
+    // Signaling is gone for good: a session that isn't live yet can never finish.
+    if (session && !session.ended && !session.live) endSession(STRINGS.errReplaced, { failed: true, notify: false });
+    return;
+  }
+  scheduleReconnect();
+}
+
+function wsSend(frame) {
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify(frame)); return true; }
+  return false;
+}
+
+// Signaling frames for the active session are queued while the socket reconnects.
+let outbox = [];
+function sendSignal(data) {
+  const frame = { type: "signal", data };
+  dlog("-> signal", data.kind);
+  if (!wsSend(frame)) { if (outbox.length < 100) outbox.push(frame); if (!ws && !wsReplaced) connectWs(); }
+}
+function flushOutbox() {
+  const stops = stopQueue; stopQueue = [];
+  for (const f of stops) if (Date.now() - f.at < 120000) wsSend(f.frame);
+  const q = outbox; outbox = [];
+  for (const f of q) if (session && f.data && f.data.sessionId === session.id) wsSend(f);
+}
+
+// stream_stop must not be lost while the socket reconnects: queue it for the next open.
+let stopQueue = [];
+function sendStop(sessionId, reason) {
+  const frame = { type: "stream_stop", data: { sessionId, reason } };
+  if (wsSend(frame)) return;
+  stopQueue = stopQueue.slice(-4).concat({ frame, at: Date.now() });
+  if (!ws && !wsReplaced && pair) connectWs();
+}
+
+function onFrame(m) {
+  switch (m.type) {
+    case "hello":
+      dlog("<- hello", { linked: m.linked, desktopOnline: m.desktopOnline, desktopProtocol: m.desktopProtocol });
+      desk.known = true; desk.online = !!m.desktopOnline; desk.protocol = Number(m.desktopProtocol) || 0;
+      if (m.linked) onLinked(m.desktopName, desk.online);
+      renderDesk();
+      break;
+    case "linked":
+      desk.known = true;
+      onLinked(m.desktopName);
+      break;
+    case "peer":
+      if (m.role !== "desktop") break;
+      dlog("<- peer", { online: m.online, protocol: m.protocol });
+      desk.known = true; desk.online = !!m.online;
+      if (m.online) desk.protocol = Number(m.protocol) || desk.protocol;
+      renderDesk();
+      if (!m.online && session && !session.live && !session.ended) endSession(STRINGS.stopped.peer_offline, { failed: true, notify: false, reason: "peer_offline" });
+      break;
+    case "signal":
+      if (m.from === "desktop" && m.data && typeof m.data === "object") onSignal(m.data).catch((e) => { dlog("signal handling failed", e && e.name); if (session && !session.ended) endSession(STRINGS.errGeneric, { failed: true, reason: "error" }); });
+      break;
+    case "stream_stop":
+      onRemoteStop(m.data && typeof m.data === "object" ? m.data : {});
+      break;
+    case "error":
+      dlog("<- error", m.error);
+      if (session && !session.ended && !session.live) {
+        if (m.error === "peer_offline") endSession(STRINGS.errDeskOffline, { failed: true, notify: false });
+        else if (m.error === "peer_unsupported") endSession(STRINGS.errDeskOld, { failed: true, notify: false });
+        // A dropped offer/candidate would otherwise surface as a misleading ICE timeout.
+        else if (m.error === "rate_limited") endSession(STRINGS.errRateLimited, { failed: true, reason: "error" });
+        else if (m.error === "too_large" || m.error === "bad_request") endSession(STRINGS.errGeneric, { failed: true, reason: "error" });
+      }
+      break;
+    case "unpaired":
+      dlog("<- unpaired", m.reason);
+      onRevoked();
+      break;
+    case "pong": break;
+  }
+}
+
+// ---------------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------------
+function randomId() {
+  const b = new Uint8Array(16); crypto.getRandomValues(b);
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function videoConstraints(face, q, exact = false) {
+  const Q = QUALITY[q] || QUALITY[720];
+  // exact: used when switching, so the same camera is never returned with flipped UI state.
+  return { facingMode: exact ? { exact: face } : face, width: { ideal: Q.width }, height: { ideal: Q.height }, frameRate: { ideal: 30, max: 30 } };
+}
+
+function cameraError(e) {
+  const n = e && e.name;
+  if (n === "NotAllowedError" || n === "SecurityError") return STRINGS.errCamDenied;
+  if (n === "NotReadableError" || n === "AbortError") return STRINGS.errCamBusy;
+  if (n === "NotFoundError" || n === "OverconstrainedError") return STRINGS.errCamNone;
+  return STRINGS.errCam;
+}
+
+// Camera + microphone (the mic is sent; phase 2 uses it). Any failure, including the user
+// blocking only the mic (NotAllowedError), is retried once camera-only.
+async function openCamera(face, q) {
+  const gum = (video, audio) => navigator.mediaDevices.getUserMedia({ video, audio });
+  try { return await gum(videoConstraints(face, q), true); }
+  catch (e) {
+    dlog("getUserMedia (camera+mic) failed, retrying camera only:", e && e.name);
+    try { return await gum(videoConstraints(face, q), false); }
+    catch (e2) {
+      if (e2 && e2.name === "OverconstrainedError") return gum({ facingMode: face }, false);
+      throw e2;
+    }
+  }
+}
+
+async function openVideoTrack(face, q, exact) {
+  const st = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(face, q, exact), audio: false });
+  return st.getVideoTracks()[0];
+}
+
+$("btnStart").onclick = () => startStreaming();
+$("btnRetry").onclick = () => startStreaming();
+$("btnBack").onclick = () => { endSession(null, { notify: false, silent: true }); showHome(); };
+$("btnStop").onclick = () => { endSession(null, { notify: true, reason: "user" }); showHome(); };
+
+// Precheck failures: show them where the user is looking (Home card, or the Stream failure banner).
+function startError(text) {
+  if (!$("scrStream").classList.contains("hidden")) { banner("streamFail", text, "err"); show("failActions"); show("streamActions", false); }
+  else setMsg("camMsg", text, "err");
+}
+
+async function startStreaming() {
+  if (session && !session.ended) return;
+  setMsg("camMsg", "");
+  if (!window.isSecureContext) { startError(STRINGS.errNoSecure); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.RTCPeerConnection) { startError(STRINGS.errNoCamera); return; }
+  if (!ws || ws.readyState !== 1) { startError(wsReplaced ? STRINGS.errReplaced : STRINGS.errNotConnected); if (!ws && !wsReplaced) connectWs(); return; }
+  if (desk.known && !desk.online) { startError(STRINGS.errDeskOffline); return; }
+  if (desk.protocol && desk.protocol < 2) { startError(STRINGS.errDeskOld); return; }
+
+  const s = session = {
+    id: randomId(), facing, quality, stream: null, pc: null, live: false, ended: false,
+    timers: {}, pendingRemote: [], localQueue: [], offerSent: false, iceOk: false,
+    startedAt: 0, prevStats: null, phase: "camera", switching: false, reacquiring: false,
+  };
+  outbox = [];
+  screen("Stream");
+  show("streamFail", false); show("streamActions"); show("failActions", false); show("stats", false); show("keepOpen");
+  show("hiddenNote", document.visibilityState !== "visible");
+  $("deskRecv").textContent = "";
+  setChip("requesting"); setMsg("streamMsg", STRINGS.stCamera);
+  $("btnSwitch").disabled = true;
+  renderMic(s);
+
+  let stream;
+  try { stream = await openCamera(s.facing, s.quality); }
+  catch (e) {
+    dlog("camera failed", e && e.name);
+    if (session === s) { session = null; s.ended = true; }
+    showHome(); setMsg("camMsg", cameraError(e), "err");
+    return;
+  }
+  if (session !== s || s.ended) { stream.getTracks().forEach((t) => t.stop()); return; }
+  s.stream = stream;
+  const vt = stream.getVideoTracks()[0];
+  if (vt) { try { vt.contentHint = "motion"; } catch {} watchTrack(s, vt); }
+  const at = stream.getAudioTracks()[0];
+  if (at) at.enabled = !micMuted;
+  renderMic(s);
+  setPreview(stream, s.facing);
+  $("btnSwitch").disabled = false;
+  keepAwake();
+
+  s.phase = "requesting";
+  setMsg("streamMsg", STRINGS.stWaitAccept);
+  sendSignal({ kind: "stream_request", sessionId: s.id, deviceLabel: (pair && pair.deviceName) || defaultDeviceName() });
+  s.timers.accept = setTimeout(() => {
+    if (session === s && s.phase === "requesting") endSession(STRINGS.acceptTimeout, { failed: true, reason: "timeout" });
+  }, ACCEPT_TIMEOUT_MS);
+}
+
+// Microphone mute toggle (the track stays negotiated; muting just sends silence).
+function renderMic(s) {
+  const at = s && s.stream && s.stream.getAudioTracks()[0];
+  const has = !!at && at.readyState === "live";
+  show("btnMic", has);
+  $("btnMic").textContent = micMuted ? STRINGS.micUnmute : STRINGS.micMute;
+  $("btnMic").setAttribute("aria-pressed", String(micMuted));
+  $("micNote").textContent = !s || !s.stream ? "" : !has ? STRINGS.micNone : micMuted ? STRINGS.micMuted : STRINGS.micOn;
+}
+$("btnMic").onclick = () => {
+  micMuted = !micMuted;
+  const s = session;
+  if (s && s.stream) for (const t of s.stream.getAudioTracks()) t.enabled = !micMuted;
+  renderMic(s);
+};
+
+// Video track ended (another app took the camera, permission revoked, …): re-acquire once,
+// otherwise fail the session instead of staying "Live" with frozen video.
+function watchTrack(s, track) {
+  track.onended = () => onVideoEnded(s, track);
+}
+async function onVideoEnded(s, track) {
+  if (session !== s || s.ended || s.switching || s.reacquiring) return;
+  if (!s.stream || s.stream.getVideoTracks()[0] !== track) return;
+  dlog("video track ended, re-acquiring");
+  s.reacquiring = true;
+  let nt = null;
+  try { nt = await openVideoTrack(s.facing, s.quality, false); } catch (e) { dlog("re-acquire failed", e && e.name); }
+  s.reacquiring = false;
+  if (session !== s || s.ended) { if (nt) nt.stop(); return; }
+  if (!nt || !(await swapTrack(s, nt, s.facing))) endSession(STRINGS.errCamLost, { failed: true, reason: "error" });
+}
+
+function setPreview(stream, face) {
+  const v = $("preview");
+  v.srcObject = stream;
+  v.classList.toggle("mirror", face === "user");
+  v.play().catch(() => {});
+}
+
+function setChip(state) {
+  const chip = $("chip");
+  chip.className = "chip" + (state === "live" ? " live" : state === "failed" ? " failed" : "");
+  const label = own({ requesting: STRINGS.chipRequesting, connecting: STRINGS.chipConnecting, live: STRINGS.chipLive, failed: STRINGS.chipFailed, reconnecting: STRINGS.chipReconnecting }, state) || "";
+  chip.textContent = label;
+  if (state === "live" && session && session.startedAt) {
+    const sec = Math.floor((Date.now() - session.startedAt) / 1000);
+    chip.textContent = `${label} ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  }
+}
+
+async function onSignal(d) {
+  const s = session;
+  if (!s || s.ended || d.sessionId !== s.id) { dlog("ignoring signal for other session", d.kind); return; }
+  dlog("<- signal", d.kind);
+  switch (d.kind) {
+    case "stream_accept":
+      if (s.phase !== "requesting") return;
+      clearTimeout(s.timers.accept);
+      s.phase = "connecting";
+      // One deadline from accept to connected (covers ice-servers, offer/answer and ICE/DTLS).
+      s.timers.ice = setTimeout(() => {
+        if (session !== s || s.ended || s.live) return;
+        if (!s.offerSent) endSession(STRINGS.errNetwork, { failed: true, reason: "timeout" });
+        else if (s.iceOk) endSession(STRINGS.errDtls, { failed: true, reason: "error" });
+        else endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
+      }, CONNECT_TIMEOUT_MS);
+      await connectPeer(s);
+      break;
+    case "stream_reject":
+      clearTimeout(s.timers.accept);
+      endSession(own(STRINGS.reject, d.reason) || STRINGS.reject.other, { failed: true, notify: false });
+      break;
+    case "answer":
+      if (!s.pc || s.pc.signalingState !== "have-local-offer" || typeof d.sdp !== "string") return;
+      await s.pc.setRemoteDescription({ type: "answer", sdp: d.sdp });
+      if (session !== s || s.ended) return;
+      if (!videoAccepted(s, d.sdp)) { endSession(STRINGS.errCodec(s.offeredCodecs), { failed: true, reason: "error" }); return; }
+      for (const c of s.pendingRemote.splice(0)) await addRemoteCandidate(s, c);
+      break;
+    case "candidate":
+      if (!s.pc || !s.pc.remoteDescription) { if (s.pendingRemote.length < 100) s.pendingRemote.push(d); return; }
+      await addRemoteCandidate(s, d);
+      break;
+    case "status":
+      if (d.width && d.height) $("deskRecv").textContent = STRINGS.deskRecv(Number(d.width) | 0, Number(d.height) | 0, Number(d.fps) | 0, typeof d.codec === "string" ? d.codec.slice(0, 32) : "");
+      if (d.state === "live" && s.pc && !s.live && s.pc.connectionState === "connected") goLive(s);
+      break;
+  }
+}
+
+// The answer must keep the video m-line (port != 0) with at least one codec, and the
+// transceiver must end up sending.
+function videoAccepted(s, sdp) {
+  const m = /^m=video (\d+) [^ ]+((?: \d+)*)\s*$/m.exec(sdp);
+  if (!m || m[1] === "0" || !m[2].trim()) return false;
+  const dir = s.videoTransceiver && s.videoTransceiver.currentDirection;
+  return !dir || dir === "sendonly" || dir === "sendrecv";
+}
+
+async function addRemoteCandidate(s, d) {
+  if (session !== s || !s.pc) return;
+  let init;
+  if (d.candidate && typeof d.candidate === "object") init = d.candidate;
+  else if (typeof d.candidate === "string" && d.candidate) init = { candidate: d.candidate, sdpMid: d.sdpMid ?? null, sdpMLineIndex: d.sdpMLineIndex ?? null };
+  else return; // end-of-candidates: nothing to do
+  if (init.sdpMid == null && init.sdpMLineIndex == null) init.sdpMLineIndex = 0;
+  await s.pc.addIceCandidate(init).catch((e) => dlog("addIceCandidate failed", e && e.name));
+}
+
+// Video codecs offered: what this phone can both send and (per spec validation) receive,
+// limited to H.264 constrained baseline (42e01f / 42001f, packetization-mode=1), then VP8,
+// plus rtx. Keeps the offer small (16 KB relay frame cap) and the desktop's job simple.
+function pickVideoCodecs() {
+  const caps = (C) => { try { return (C && C.getCapabilities && C.getCapabilities("video") || {}).codecs || []; } catch { return []; } };
+  const send = caps(window.RTCRtpSender), recv = caps(window.RTCRtpReceiver);
+  const key = (c) => `${c.mimeType.toLowerCase()}|${c.clockRate}|${(c.sdpFmtpLine || "").toLowerCase().split(";").map((x) => x.trim()).sort().join(";")}`;
+  const sendKeys = new Set(send.map(key));
+  const both = send.length ? recv.filter((c) => sendKeys.has(key(c))) : recv;
+  const rank = (c) => {
+    const mt = c.mimeType.toLowerCase(), f = (c.sdpFmtpLine || "").toLowerCase();
+    if (mt === "video/h264") {
+      if (!/packetization-mode=1/.test(f)) return -1;
+      if (/profile-level-id=42e01f/.test(f)) return 0;
+      if (/profile-level-id=42001f/.test(f)) return 1;
+      return -1;
+    }
+    if (mt === "video/vp8") return 2;
+    if (mt === "video/rtx") return 3;
+    return -1;
+  };
+  const list = both.map((c, i) => [rank(c), i, c]).filter((x) => x[0] >= 0).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
+  return list.some((c) => !/rtx/i.test(c.mimeType)) ? list : [];
+}
+function pickAudioCodecs() {
+  try {
+    const recv = (RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities("audio") || {}).codecs || [];
+    return recv.filter((c) => /^audio\/opus$/i.test(c.mimeType));
+  } catch { return []; }
+}
+const codecLabel = (list) => [...new Set(list.filter((c) => !/rtx/i.test(c.mimeType)).map((c) => c.mimeType.replace(/^video\//i, "").replace(/^h264$/i, "H.264")))].join(", ");
+
+async function connectPeer(s) {
+  setChip("connecting"); setMsg("streamMsg", STRINGS.stConnecting);
+  let iceServers = [];
+  try {
+    const r = await api("GET", "/v1/ice-servers");
+    if (r && Array.isArray(r.iceServers)) iceServers = r.iceServers;
+    dlog("ice-servers turn:", r && r.turn);
+  } catch (e) {
+    dlog("ice-servers failed", e.status, e.code);
+    if (e.status === 401) return;
+    iceServers = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
+  }
+  if (session !== s || s.ended) return;
+
+  const Q = QUALITY[s.quality] || QUALITY[720];
+  const pc = new RTCPeerConnection({ iceServers, bundlePolicy: "max-bundle" });
+  s.pc = pc;
+  const vt = s.stream.getVideoTracks()[0];
+  const at = s.stream.getAudioTracks()[0];
+  const enc = { maxBitrate: Q.maxBitrate, maxFramerate: 30 };
+  const vtx = pc.addTransceiver(vt, { direction: "sendonly", streams: [s.stream], sendEncodings: [enc] });
+  s.videoSender = vtx.sender; s.videoTransceiver = vtx;
+  let atx = null;
+  if (at) { at.enabled = !micMuted; atx = pc.addTransceiver(at, { direction: "sendonly", streams: [s.stream] }); }
+  const vcodecs = pickVideoCodecs();
+  s.offeredCodecs = codecLabel(vcodecs) || "H.264, VP8";
+  try { if (vcodecs.length && vtx.setCodecPreferences) vtx.setCodecPreferences(vcodecs); }
+  catch (e) { dlog("setCodecPreferences(video) failed", e && e.name); }
+  try { const ac = pickAudioCodecs(); if (atx && ac.length && atx.setCodecPreferences) atx.setCodecPreferences(ac); }
+  catch (e) { dlog("setCodecPreferences(audio) failed", e && e.name); }
+
+  pc.onicecandidate = (ev) => {
+    if (session !== s || s.ended) return;
+    let data = null;
+    if (ev.candidate && ev.candidate.candidate) data = { kind: "candidate", sessionId: s.id, candidate: ev.candidate.candidate, sdpMid: ev.candidate.sdpMid, sdpMLineIndex: ev.candidate.sdpMLineIndex };
+    else if (!ev.candidate && !s.sentEoc) { s.sentEoc = true; data = { kind: "candidate", sessionId: s.id, candidate: "" }; }
+    if (!data) return;
+    if (s.offerSent) sendSignal(data); else s.localQueue.push(data); // never before the offer
+  };
+  pc.onconnectionstatechange = () => onPcState(s);
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") s.iceOk = true;
+    onPcState(s);
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  if (session !== s || s.ended) return;
+  sendSignal({ kind: "offer", sessionId: s.id, sdp: pc.localDescription.sdp });
+  s.offerSent = true;
+  for (const c of s.localQueue.splice(0)) sendSignal(c);
+  await applySenderParams(s);
+
+  clearInterval(s.timers.stats);
+  s.timers.stats = setInterval(() => updateStats(s), 2000);
+}
+
+async function applySenderParams(s) {
+  const sender = s.videoSender; if (!sender) return;
+  const Q = QUALITY[s.quality] || QUALITY[720];
+  try {
+    const p = sender.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    p.encodings[0].maxBitrate = Q.maxBitrate;
+    p.encodings[0].maxFramerate = 30;
+    p.degradationPreference = "maintain-framerate";
+    await sender.setParameters(p);
+  } catch (e) {
+    dlog("setParameters failed, retrying without degradationPreference", e && e.name);
+    try {
+      const p = sender.getParameters();
+      if (p.encodings && p.encodings[0]) { p.encodings[0].maxBitrate = Q.maxBitrate; p.encodings[0].maxFramerate = 30; }
+      await sender.setParameters(p);
+    } catch {}
+  }
+}
+
+// Live / failure come from pc.connectionState only (ICE *and* DTLS). iceConnectionState is
+// only used to tell a DTLS failure (ICE was fine) from a network failure.
+function onPcState(s) {
+  const pc = s.pc; if (!pc || session !== s || s.ended) return;
+  const cs = pc.connectionState;
+  dlog("pc", cs, "/ ice", pc.iceConnectionState);
+  if (cs === "connected") {
+    clearTimeout(s.timers.disc);
+    if (!s.live) goLive(s); else { setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok"); }
+  } else if (cs === "failed") {
+    if (!s.live && s.iceOk) endSession(STRINGS.errDtls, { failed: true, reason: "error" });
+    else endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
+  } else if (s.live && cs === "disconnected") {
+    // TODO(later): ICE restart (pc.restartIce() + re-offer) once the receiver supports it.
+    setChip("reconnecting"); setMsg("streamMsg", STRINGS.stUnstable, "warn");
+    clearTimeout(s.timers.disc);
+    s.timers.disc = setTimeout(() => {
+      if (session === s && !s.ended && s.pc && s.pc.connectionState !== "connected") endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
+    }, 20000);
+  }
+}
+
+function goLive(s) {
+  s.live = true; s.phase = "live";
+  clearTimeout(s.timers.ice);
+  s.startedAt = Date.now();
+  setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok");
+  show("stats");
+  clearInterval(s.timers.clock);
+  s.timers.clock = setInterval(() => { if (session === s && $("chip").classList.contains("live")) setChip("live"); }, 1000);
+  updateStats(s);
+}
+
+function onRemoteStop(data) {
+  const s = session;
+  if (!s || s.ended) return;
+  // Without a sessionId, a stop can only be meant for a request the desktop hasn't answered
+  // yet; once accepted it must name this session (a stale stop must not end a new one).
+  if (data.sessionId ? data.sessionId !== s.id : s.phase !== "requesting") { dlog("ignoring stream_stop for other session"); return; }
+  dlog("<- stream_stop", data.reason);
+  const reason = typeof data.reason === "string" ? data.reason : "other";
+  const msg = reason === "ice_failed" ? STRINGS.iceFailed : (own(STRINGS.stopped, reason) || STRINGS.stopped.other);
+  endSession(null, { notify: false, silent: true });
+  showHome(msg, reason === "user" ? "" : "warn");
+}
+
+// Ends the current session. opts.failed: stay on the stream screen with a Failed chip.
+function endSession(message, opts = {}) {
+  const s = session;
+  if (!s) return;
+  if (!s.ended) {
+    s.ended = true;
+    const notify = opts.notify !== undefined ? opts.notify : opts.reason !== undefined;
+    if (notify) sendStop(s.id, opts.reason || "user");
+    for (const k in s.timers) { clearTimeout(s.timers[k]); clearInterval(s.timers[k]); }
+    if (s.pc) { try { s.pc.close(); } catch {} }
+    if (s.stream) s.stream.getTracks().forEach((t) => t.stop());
+    releaseWake();
+    outbox = [];
+  }
+  $("preview").srcObject = null;
+  show("hiddenNote", false);
+  session = null;
+  $("micNote").textContent = "";
+  if (opts.failed && !opts.silent) {
+    setChip("failed");
+    setMsg("streamMsg", "");
+    banner("streamFail", message || STRINGS.errGeneric, "err");
+    show("streamActions", false); show("failActions"); show("keepOpen", false);
+  }
+}
+
+// Switch camera mid-stream (replaceTrack, no renegotiation)
+$("btnSwitch").onclick = async () => {
+  const s = session; if (!s || s.ended || !s.stream || s.switching) return;
+  s.switching = true; $("btnSwitch").disabled = true;
+  try { await switchCamera(s); }
+  finally {
+    s.switching = false;
+    if (session === s && !s.ended) $("btnSwitch").disabled = false;
+  }
+};
+
+async function switchCamera(s) {
+  const next = s.facing === "user" ? "environment" : "user";
+  const alive = () => session === s && !s.ended;
+  let nt = null;
+  try { nt = await openVideoTrack(next, s.quality, true); }
+  catch (e) {
+    dlog("switch: open failed", e && e.name);
+    if (!alive()) return;
+    if (e && e.name === "OverconstrainedError") { setMsg("streamMsg", STRINGS.errNoOtherCam, "warn"); return; } // keep the current camera
+    // Many Android phones can't open two cameras at once: release the current one first.
+    const old = s.stream.getVideoTracks()[0];
+    if (old) old.stop();
+    try { nt = await openVideoTrack(next, s.quality, true); }
+    catch (e2) {
+      dlog("switch: retry failed", e2 && e2.name);
+      if (!alive()) return;
+      // Reopen the camera we had; if that fails too the session can't continue.
+      let back = null;
+      try { back = await openVideoTrack(s.facing, s.quality, false); } catch (e3) { dlog("switch: reopen failed", e3 && e3.name); }
+      if (!alive()) { if (back) back.stop(); return; }
+      if (!back || !(await swapTrack(s, back, s.facing))) endSession(STRINGS.errCam, { failed: true, reason: "error" });
+      return;
+    }
+  }
+  if (!alive()) { nt.stop(); return; }
+  if (await swapTrack(s, nt, next)) return;
+  // replaceTrack failed: fine if the old track still runs, fatal if it was released.
+  const cur = s.stream && s.stream.getVideoTracks()[0];
+  if (alive() && (!cur || cur.readyState !== "live")) endSession(STRINGS.errCam, { failed: true, reason: "error" });
+}
+
+// Puts nt on the sender, then (only on success) retires the old track and flips UI state.
+// Stops nt and returns false on failure.
+async function swapTrack(s, nt, face) {
+  try { nt.contentHint = "motion"; } catch {}
+  if (s.videoSender) {
+    try { await s.videoSender.replaceTrack(nt); }
+    catch (e) { dlog("replaceTrack failed", e && e.name); nt.stop(); return false; }
+  }
+  if (session !== s || s.ended) { nt.stop(); return false; }
+  for (const old of s.stream.getVideoTracks()) { old.onended = null; s.stream.removeTrack(old); old.stop(); }
+  s.stream.addTrack(nt);
+  watchTrack(s, nt);
+  s.facing = face; facing = face;
+  for (const x of $("segFacing").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x.dataset.v === face));
+  setPreview(s.stream, face);
+  return true;
+}
+
+// Stats every 2 s
+async function updateStats(s) {
+  const pc = s.pc; if (!pc || session !== s || s.ended) return;
+  let report; try { report = await pc.getStats(); } catch { return; }
+  const byId = new Map(); report.forEach((x) => byId.set(x.id, x));
+  let out = null, sel = null;
+  report.forEach((x) => {
+    if (x.type === "outbound-rtp" && x.kind === "video" && (!out || (x.bytesSent || 0) > (out.bytesSent || 0))) out = x;
+    if (x.type === "transport" && x.selectedCandidatePairId) sel = byId.get(x.selectedCandidatePairId) || sel;
+  });
+  if (!sel) report.forEach((x) => { if (!sel && x.type === "candidate-pair" && (x.selected || (x.nominated && x.state === "succeeded"))) sel = x; });
+  if (out) {
+    $("stRes").textContent = out.frameWidth ? `${out.frameWidth}×${out.frameHeight}` : "–";
+    $("stFps").textContent = out.framesPerSecond != null ? `${Math.round(out.framesPerSecond)} fps` : "–";
+    const p = s.prevStats;
+    if (p && out.timestamp > p.ts) $("stRate").textContent = `${Math.round(((out.bytesSent - p.bytes) * 8) / (out.timestamp - p.ts))} kbps`;
+    s.prevStats = { bytes: out.bytesSent, ts: out.timestamp };
+    const codec = out.codecId && byId.get(out.codecId);
+    $("stCodec").textContent = codec ? codec.mimeType.replace(/^video\//i, "") : "–";
+  }
+  if (sel) {
+    const lc = byId.get(sel.localCandidateId), rc = byId.get(sel.remoteCandidateId);
+    const name = (t) => ({ host: STRINGS.pathHost, srflx: STRINGS.pathSrflx, prflx: STRINGS.pathPrflx, relay: STRINGS.pathRelay }[t] || t || "?");
+    const relayed = (lc && lc.candidateType === "relay") || (rc && rc.candidateType === "relay");
+    $("stPath").textContent = `${relayed ? STRINGS.pathRelay : name(lc && lc.candidateType)} · ${lc ? lc.candidateType : "?"}/${rc ? rc.candidateType : "?"}`;
+    $("stRtt").textContent = sel.currentRoundTripTime != null ? `${Math.round(sel.currentRoundTripTime * 1000)} ms` : "–";
+  }
+}
+
+// ---------------------------------------------------------------------------------
+// Wake lock + visibility
+// ---------------------------------------------------------------------------------
+async function keepAwake() {
+  if (!("wakeLock" in navigator) || wakeLock || document.visibilityState !== "visible") return;
+  try {
+    const lock = await navigator.wakeLock.request("screen");
+    if (!session || session.ended) { lock.release().catch(() => {}); return; }
+    wakeLock = lock;
+    lock.addEventListener("release", () => { if (wakeLock === lock) wakeLock = null; });
+  } catch (e) { dlog("wake lock failed", e && e.name); }
+}
+function releaseWake() { const l = wakeLock; wakeLock = null; if (l) l.release().catch(() => {}); }
+
+document.addEventListener("visibilitychange", () => {
+  const streaming = session && !session.ended;
+  if (document.visibilityState === "visible") {
+    show("hiddenNote", false);
+    if (streaming) {
+      keepAwake();
+      const vt = session.stream && session.stream.getVideoTracks()[0];
+      if (vt && vt.readyState === "ended") onVideoEnded(session, vt);
+    }
+    if (pair && !ws && !wsStopped && !wsReplaced) { wsAttempt = 0; connectWs(); }
+  } else if (streaming) {
+    show("hiddenNote");
+  }
+});
+window.addEventListener("online", () => { if (pair && !ws && !wsReplaced) { wsAttempt = 0; connectWs(); } });
+window.addEventListener("pagehide", () => {
+  if (session && !session.ended) sendStop(session.id, "user");
+});
+
+// ---------------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------------
+if (!pair) {
+  showPairStart();
+} else if (!pair.linked) {
+  showPairCode(); // shows "expired" + "Get a new code" if the saved code ran out
+  connectWs();
+} else {
+  showHome();
+  connectWs();
+}
+</script>
+</body>
+</html>

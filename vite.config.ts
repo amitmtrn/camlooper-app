@@ -19,8 +19,13 @@ export default defineConfig(async ({ mode }) => ({
       : undefined,
     watch: {
       // 3. tell vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/src-tauri/**", "**/remote-web/**"],
     },
+  },
+  // The dev dependency scan crawls every .html under the root by default; only the app's
+  // index.html is a Vite entry (remote-web/ is the phone page, served and deployed separately).
+  optimizeDeps: {
+    entries: ["index.html"],
   },
   plugins: [
     react(),
@@ -39,6 +44,8 @@ export default defineConfig(async ({ mode }) => ({
     // This only ever runs in WebView2, WKWebView or WebKitGTK, all of which are well past
     // Vite's conservative default target. No downlevelling needed.
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
+    // Only the app; remote-web/index.html must never end up in dist/.
+    rollupOptions: { input: path.resolve(__dirname, "index.html") },
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
     // Deliberately no manualChunks: this is a local single-window app loaded off the
     // filesystem, so there is no network waterfall to parallelise. The one split that pays
