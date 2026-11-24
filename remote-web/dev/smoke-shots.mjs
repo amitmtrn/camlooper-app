@@ -3,16 +3,13 @@
 // dev/shot-pair.png, dev/shot-code.png and dev/shot-home.png. All /v1 traffic is
 // faked with Playwright routes (never reaches api.camlooper.com).
 // Env: PLAYWRIGHT_CORE (path to playwright-core), CHROME (default /usr/bin/google-chrome).
-import { createRequire } from "node:module";
+import { loadChromium } from "./playwright.mjs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
-const PW = process.env.PLAYWRIGHT_CORE || "/workspace/camlooper/remote-v2/phase1/spike/harness/node_modules/playwright-core";
-let chromium;
-try { ({ chromium } = require(PW)); } catch { ({ chromium } = require("playwright-core")); }
+const chromium = await loadChromium();
 
 // Local page server; upstream is an unroutable local port (all /v1 calls are intercepted anyway).
 const srv = spawn(process.execPath, [path.join(HERE, "serve-phone.mjs")], { env: { ...process.env, PORT: "0", UPSTREAM: "http://127.0.0.1:9" }, stdio: ["ignore", "pipe", "inherit"] });

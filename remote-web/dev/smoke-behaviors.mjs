@@ -8,16 +8,13 @@
 //  - socket replaced (4000) while requesting -> errReplaced (item 16)
 //  - "Try again" with the desktop offline shows the message on the Stream screen (item 7)
 // Env: PLAYWRIGHT_CORE, CHROME.
-import { createRequire } from "node:module";
+import { loadChromium } from "./playwright.mjs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
-const PW = process.env.PLAYWRIGHT_CORE || "/workspace/camlooper/remote-v2/phase1/spike/harness/node_modules/playwright-core";
-let chromium;
-try { ({ chromium } = require(PW)); } catch { ({ chromium } = require("playwright-core")); }
+const chromium = await loadChromium();
 
 const srv = spawn(process.execPath, [path.join(HERE, "serve-phone.mjs")], { env: { ...process.env, PORT: "0", UPSTREAM: "http://127.0.0.1:9" }, stdio: ["ignore", "pipe", "inherit"] });
 const port = await new Promise((resolve, reject) => {

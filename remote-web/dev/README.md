@@ -55,8 +55,18 @@ node smoke-stream.mjs     # phone page (fake camera) → fake desktop peer throu
 node smoke-behaviors.mjs  # mic note/mute, stale stream_stop, codec rejection, relay too_large, 4000, retry msg
 ```
 
-The smoke scripts use `playwright-core` (by default from `../../spike/harness/node_modules`;
-override with `PLAYWRIGHT_CORE=`) and `/usr/bin/google-chrome` (`CHROME=`). All `/v1` traffic is
+The smoke scripts need `playwright-core` (the library only; it downloads no browser) and
+drive the system Chrome, `/usr/bin/google-chrome` (override with `CHROME=`). It is not a
+dependency of the app, so install it without touching `package.json`:
+
+```bash
+npm i --no-save playwright-core        # in the repo root; lands in the git-ignored node_modules/
+```
+
+or reuse a copy installed elsewhere:
+`PLAYWRIGHT_CORE=/path/to/node_modules/playwright-core node smoke-stream.mjs`. The lookup is
+in `playwright.mjs`: `$PLAYWRIGHT_CORE` if set, otherwise a normal `import("playwright-core")`.
+Without either, the scripts exit with status 2 and say so. All `/v1` traffic is
 mocked, so they never contact api.camlooper.com. `smoke-stream.mjs` checks the signaling order
 (`stream_request` → accept → `offer` → trickled candidates + end-of-candidates → answer), that
 H.264 42e01f is offered first, that the offer only carries H.264 constrained baseline / VP8 / rtx and
