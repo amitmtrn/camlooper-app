@@ -510,6 +510,27 @@ enum SessionEnd {
     Revoked(String),
 }
 
+/// The pairing the relay task last worked for, to notice a replacement that happened while
+/// no socket was up (during a connect attempt or the backoff sleep), where no relay session
+/// ends with [`SessionEnd::Shutdown`] to stop the stream.
+#[derive(Default)]
+struct PairWatch(Option<String>);
+
+impl PairWatch {
+    /// Note the pairing now in use. `true` when it replaces a different one: a stream of
+    /// the earlier pairing's phone may still be live peer to peer and must be stopped.
+    fn replaced_by(&mut self, pair_id: &str) -> bool {
+        let replaced = self.0.as_deref().is_some_and(|last| last != pair_id);
+        self.0 = Some(pair_id.to_string());
+        replaced
+    }
+
+    /// Unlinked: whatever comes next replaces nothing.
+    fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
 async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
     let mut backoff = Backoff::default();
     let (stream, outbound) = super::stream::commands::install(app.clone());
@@ -520,6 +541,7 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
     let mut backlog: VecDeque<(Instant, OutboundFrame)> = VecDeque::new();
     // Which sessions frames may be about on the current pairing.
     let mut scope = PairScope::default();
+    let mut last_pair = PairWatch::default();
     loop {
         let pairing = { state().pairing.clone() };
         let Some(pairing) = pairing else {
@@ -527,6 +549,7 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
             // reconnect, where no relay session was up to notice. An unpaired phone must not
             // keep feeding the camera over the peer-to-peer path it already has.
             stream.stop(StopReason::User).await;
+            last_pair.clear();
             // Park. No client, no DNS, no socket until a code is entered.
             match rx.recv().await {
                 None => return,
@@ -536,6 +559,12 @@ async fn run_task(app: AppHandle, mut rx: mpsc::UnboundedReceiver<Control>) {
                 }
             }
         };
+        if last_pair.replaced_by(&pairing.pair_id) {
+            // Relinked while the socket was down: the previous pairing's phone must not keep
+            // feeding the camera under the new one.
+            eprintln!("remote: the pairing was replaced; stopping any stream of the previous one");
+            stream.stop(StopReason::User).await;
+        }
         let Some(base) = api_base() else {
             match rx.recv().await {
                 None => return,
@@ -1010,6 +1039,20 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_pairing_is_noticed_without_a_socket() {
+        let mut watch = PairWatch::default();
+        // The first pairing, and the same one again on every reconnect: nothing to stop.
+        assert!(!watch.replaced_by("pair-a"));
+        assert!(!watch.replaced_by("pair-a"));
+        // Relinked during a connect attempt or the backoff sleep.
+        assert!(watch.replaced_by("pair-b"));
+        assert!(!watch.replaced_by("pair-b"));
+        // After an unlink the stream was stopped already; the next pairing replaces nothing.
+        watch.clear();
+        assert!(!watch.replaced_by("pair-c"));
+    }
 
     #[test]
     fn ws_url_swaps_scheme_and_sets_path() {
