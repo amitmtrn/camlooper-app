@@ -251,7 +251,9 @@ protocol is in [remote-protocol.md](remote-protocol.md).
 - **Commands / events:** `remote_stream_status`, `remote_stream_accept`, `remote_stream_reject`,
   `remote_stream_stop`; `remote://stream-status` is the UI's single source of truth (it
   carries a growing `seq`, and `sessionId`/`deviceName`/`expiresAt` while a request is
-  pending — the confirm dialog is derived from it). `remote://stream-request` and
+  pending — the confirm dialog is derived from it and keyed by `sessionId` + `expiresAt`,
+  since a phone may reuse an id; `releasing` is set while a given-up session still holds the
+  camera, which the UI treats as busy although `state` is `error`). `remote://stream-request` and
   `remote://stream-request-dismissed` are informational only.
 - **Consent guards:** a request raises the window without taking keyboard focus; the dialog
   never focuses Accept and keeps it disabled ~1.2 s after it becomes visible/focused;

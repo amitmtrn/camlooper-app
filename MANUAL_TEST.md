@@ -622,7 +622,7 @@ builds them).
 <!-- Newest entries first. -->
 
 ### Phone camera stream into v4l2: confirm dialog, live banner, stop, tray, headless CLI (remote v2, phase 1)
-_Added 2026-11-24, dialog safety steps (15–21) added the same day · Linux · `src-tauri/src/remote/stream/`, `src-tauri/src/tray.rs`, `src-tauri/examples/phone_stream_cli.rs`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`_
+_Added 2026-11-24, dialog safety steps (15–21) and steps 22–24 added the same day · Linux · `src-tauri/src/remote/stream/`, `src-tauri/src/tray.rs`, `src-tauri/examples/phone_stream_cli.rs`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`_
 
 A phone streams its camera over WebRTC and the stream becomes the v4l2loopback camera. In
 the app the user must accept every request in a dialog; the headless CLI (part B) accepts
@@ -645,7 +645,11 @@ fields. It also covers: an Accept less than 800 ms after the request being refus
 grows with every change, a second Stop ≥ 5 s into a hung stop forcing it (ending as an error,
 not idle), the tray tooltip
 saying "live" only when live, and the phone's name being cut to 40 characters with control
-and bidi-override characters removed.
+and bidi-override characters removed. Also: the tray being updated without its lock held (and
+a language change during the update being applied), a relink while the relay socket is down
+being noticed, a session released before its camera handoff began not claiming the camera
+afterwards, the status carrying `releasing` (and counting as busy) after a give-up, and a
+pending request ending when the wall clock passes its `expiresAt`.
 `cargo test --test phone_stream_loopback` covers the phone closing its connection (ends idle,
 no error) and junk datagrams sent at the receiver's ports. Part A covers what needs eyes.
 
@@ -703,6 +707,15 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
 20. Shrink the window to its smallest size and repeat step 5 up to the dialog.
 21. Dismissed error. Produce the red message of step 10 (mobile data), click its **×**, then
     click another window and back on CamLooper, and hide/show it from the tray.
+22. Dropdown open. Open the language picker at the top of the window (the list is showing)
+    and leave it open. Tap **Start streaming** on the phone. Click **Decline** with the
+    mouse. Repeat with the output resolution picker under **Advanced**, and answer with
+    **Tab** and **Enter** on **Decline** instead of the mouse.
+23. Escape after a failed accept. Repeat step 13 up to the first click on **Accept** (computer
+    offline, toast shown). Without clicking anything else, press **Tab** twice, then **Esc**.
+24. Suspend. Tap **Start streaming**; with the dialog up, suspend the computer
+    (`systemctl suspend`), wait at least 70 s, and wake it. Run the app from a terminal so
+    its stderr is visible, and note the time of the wake.
 
 **Expected:**
 - Step 1: under "Linked with <phone>" a small grey line: "Stream your phone's camera: open
@@ -783,6 +796,14 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
   reached.
 - Step 21: the red message stays gone after each of those. (It comes back only for a *new*
   failure.)
+- Step 22: the dropdown list closes the moment the dialog appears, and stays closed after
+  the dialog is gone (it does not pop open again). **Decline** reacts to the first click and
+  to the keyboard; focus never sits in the closed list.
+- Step 23: after the toast, **Tab** still moves between **Decline** and **Accept** and
+  **Esc** closes the dialog (the phone shows "declined"). The keys are not dead.
+- Step 24: after the wake the dialog is gone within a second or two, the taskbar entry
+  stops flashing, and the phone shows that the request timed out within a few seconds of the
+  wake — not up to a minute later. A new **Start streaming** right away brings a new dialog.
 - Step 11: dialog and banner text are translated and laid out right-to-left (icon and title
   on the right, buttons on the left); in the banner the "1280×720 · 30 fps · H.264 · 00:12"
   part still reads left-to-right with no scrambled digits.
@@ -805,7 +826,15 @@ no error) and junk datagrams sent at the receiver's ports. Part A covers what ne
   stop (or the watchdog giving up by itself) ends in the red error banner, not in a clean
   idle: the old session still holds the camera, so playback may refuse to start and the
   phone's next request is answered "busy" until it has shut down — then the error clears by
-  itself. This needs a hung driver to see and is covered by `cargo test --lib` instead.
+  itself. Until then the playback and camera controls stay grey with the "phone" note under
+  them although the banner is the red error, and **Quit** takes up to 3 s: both intended.
+  This needs a hung driver to see and is covered by `cargo test --lib` instead.
+- Not reproducible by hand with the current phone page: a phone that sends a second request
+  with the **same** session id (the page makes a new id each time), and a relink done while
+  the relay socket is down with a stream still live. The first is a UI rule with no
+  automated check (the dialog is keyed by session id plus `expiresAt`); if you have a test
+  client that can reuse an id, decline request "X", wait 15 s, send "X" again: a fresh dialog
+  must appear, with both buttons working.
 - Stop pressed while the polkit prompt is open (Linux, first accept after boot): the prompt
   closes by itself within a second or two (stderr: `phone stream: ended (user)`) and the
   banner disappears. On the Windows Store build the UAC prompt cannot be closed by the app:
