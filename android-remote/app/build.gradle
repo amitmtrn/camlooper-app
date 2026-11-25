@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The phone page lives in ../../remote-web (single source of truth). It is copied into the
+// APK's assets at build time and served locally by WebViewAssetLoader (see MainActivity).
+def remoteWebDir = file("${rootDir}/../remote-web")
+def generatedAssets = layout.buildDirectory.dir("generated/remoteWebAssets")
+
+tasks.register('copyRemoteWeb', Copy) {
+    from(remoteWebDir) { include 'index.html' }
+    into generatedAssets.map { it.dir('remote-app') }
+}
+
+android {
+    namespace 'com.camlooper.remote'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.camlooper.remote'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0-phase1'
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    sourceSets {
+        main.assets.srcDirs += generatedAssets
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+preBuild.dependsOn 'copyRemoteWeb'
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

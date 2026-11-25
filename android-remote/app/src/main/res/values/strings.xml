@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">CamLooper Remote</string>
+    <string name="perm_denied">CamLooper Remote needs camera and microphone access to stream. Allow it in Settings → Apps → CamLooper Remote → Permissions.</string>
+</resources>
