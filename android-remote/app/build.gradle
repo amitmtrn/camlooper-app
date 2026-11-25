@@ -9,7 +9,8 @@ def generatedAssets = layout.buildDirectory.dir("generated/remoteWebAssets")
 
 tasks.register('copyRemoteWeb', Copy) {
     from(remoteWebDir) { include 'index.html' }
-    into generatedAssets.map { it.dir('remote-app') }
+    // AssetsPathHandler maps https://camlooper.com/remote-app/<file> to assets/<file>.
+    into generatedAssets
 }
 
 android {
