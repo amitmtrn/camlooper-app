@@ -298,7 +298,9 @@ impl VideoProcessor {
                 .unwrap_or("")
                 .to_lowercase();
             
-            if !matches!(file_extension.as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "m4v") {
+            // "3gp" is what phones record; it only arrives through the phone-video path
+            // (remote/stream/file_receive.rs), and like mp4/mov it is an ISO media file.
+            if !matches!(file_extension.as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm" | "flv" | "wmv" | "m4v" | "3gp") {
                 return Err(anyhow!("Unsupported video format: {}", file_extension));
             }
             
@@ -430,7 +432,7 @@ impl VideoProcessor {
             }
             
             // Try to parse MP4 file using mp4 crate for real video information
-            let video_info = if file_extension == "mp4" || file_extension == "mov" || file_extension == "m4v" {
+            let video_info = if matches!(file_extension.as_str(), "mp4" | "mov" | "m4v" | "3gp") {
                 match Self::parse_mp4_file(&file_path, original_filename) {
                     Ok(info) => {
                         println!("Successfully parsed MP4 file: {:?}", info);
@@ -1457,6 +1459,14 @@ pub(crate) fn spawn_sink_reader(
     running: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     VideoProcessor::spawn_sink_reader(stdout, sink, geometry, running)
+}
+
+/// The loaded clip: where it is on disk and the name it was loaded under.
+pub async fn loaded_video() -> Option<(PathBuf, String)> {
+    let processor = VIDEO_PROCESSOR.lock().await;
+    let path = processor.video_path.clone()?;
+    let name = processor.video_info.as_ref().map(|i| i.filename.clone()).unwrap_or_default();
+    Some((path, name))
 }
 
 /// Whether a clip is loaded (so playback can be resumed after the phone stream).

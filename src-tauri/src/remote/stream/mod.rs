@@ -15,12 +15,15 @@
 //! * [`runner`] — one session: camera handoff, receiver, ffmpeg restarts.
 //! * [`rtc`] — str0m receiver task, candidate gathering, STUN.
 //! * [`media`] — Annex-B / IVF writers, SPS/VP8 size parsing, PLI limiter.
+//! * [`file_receive`] — phase 3: a video file from the phone over a data channel (protocol,
+//!   storage, the loop engine's interface); the desktop loops it like a locally picked one.
 //! * [`handoff`] — the app's camera handoff (pause the video loop, start the camera).
 //! * [`commands`] — Tauri glue: the global manager, events and commands for the UI.
 //!
 //! Everything except `handoff` and `commands` is Tauri-independent and runs headless
 //! (`examples/phone_stream_cli.rs`, `tests/phone_stream_loopback.rs`).
 pub mod commands;
+pub mod file_receive;
 pub mod handoff;
 pub mod machine;
 pub mod manager;
@@ -30,9 +33,10 @@ pub mod runner;
 pub mod signal;
 
 pub use handoff::phone_owns_camera;
-pub use machine::{Phase, StreamRequest, StreamStatus};
-pub use manager::{ChannelDecisions, DecisionEvent, DecisionSink, SessionBackend, StreamManager};
-pub use runner::{CameraControl, CameraTarget, Cancel, FixedCamera, IceSource, NoStun, SessionDeps};
+pub use file_receive::{FileDeps, LoopPlayer, LoopState, PhoneVideoStore};
+pub use machine::{FilePhase, FileStatus, Phase, StreamRequest, StreamStatus};
+pub use manager::{ChannelDecisions, DecisionEvent, DecisionSink, LoopDeps, SessionBackend, StreamManager};
+pub use runner::{CameraControl, CameraTarget, Cancel, FixedCamera, IceSource, NoStun, SessionDeps, SessionKind};
 
 use super::protocol::ServerMessage;
 
@@ -98,7 +102,7 @@ mod tests {
 
     struct NeverStarts;
     impl SessionBackend for NeverStarts {
-        fn start(&self, _: &str, _: u64, _: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
+        fn start(&self, _: &str, _: u64, _: SessionKind, _: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
             mpsc::unbounded_channel().0
         }
     }

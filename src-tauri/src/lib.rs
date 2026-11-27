@@ -437,6 +437,10 @@ pub fn run() {
                     api.prevent_exit();
                 }
             }
+            // Videos received from the phone do not outlive the run.
+            if let tauri::RunEvent::Exit = &_event {
+                remote::stream::commands::sweep_phone_videos_for_exit();
+            }
             // macOS: clicking the Dock icon while the window is hidden brings it back.
             // (`Reopen` only exists on macOS.)
             #[cfg(target_os = "macos")]

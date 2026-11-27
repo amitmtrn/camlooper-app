@@ -7,9 +7,13 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use super::file_receive::{LoopPlayer, NoLoop, PhoneVideoStore};
 use super::machine::{Action, DecisionError, Machine, StreamRequest, StreamStatus};
-use super::runner::{SessionCommand, SessionEvent};
-use super::signal::{parse_signal, parse_stop, sanitize_label, OutboundFrame, StopReason, MAX_DEVICE_LABEL};
+use super::runner::{SessionCommand, SessionEvent, SessionKind};
+use super::signal::{
+    clean_file_name, parse_signal, parse_stop, sanitize_label, LoopAction, OutboundFrame, SignalError, StopReason, StreamSignal,
+    MAX_DEVICE_LABEL, MAX_LOOP_ERROR,
+};
 
 /// Where "may this phone stream?" goes. The app's implementation (`commands::UiDecisions`)
 /// shows a confirm dialog; the user's answer comes back through [`StreamManager::accept`] / [`StreamManager::reject`].
@@ -43,10 +47,12 @@ impl DecisionSink for ChannelDecisions {
 pub trait SessionBackend: Send + Sync {
     /// `epoch` is the machine's local id for this session task: unlike the phone-chosen
     /// `session_id` it never repeats, so it is what the camera handoff is keyed on.
+    /// `kind` says whether this is the phone's camera or a video file to receive.
     fn start(
         &self,
         session_id: &str,
         epoch: u64,
+        kind: SessionKind,
         events: mpsc::UnboundedSender<SessionEvent>,
     ) -> mpsc::UnboundedSender<SessionCommand>;
 }
@@ -56,9 +62,61 @@ impl SessionBackend for Arc<super::runner::SessionDeps> {
         &self,
         _session_id: &str,
         epoch: u64,
+        kind: SessionKind,
         events: mpsc::UnboundedSender<SessionEvent>,
     ) -> mpsc::UnboundedSender<SessionCommand> {
-        super::runner::spawn_session(self.clone(), epoch, events)
+        super::runner::spawn_session(self.clone(), epoch, kind, events)
+    }
+}
+
+/// The desktop's loop, for `loop_control` / `loop_status`.
+#[derive(Clone)]
+pub struct LoopDeps {
+    pub player: Arc<dyn LoopPlayer>,
+    /// Where phone videos are stored: a loaded video from there is `fromPhone`.
+    pub store: Option<PhoneVideoStore>,
+}
+
+impl LoopDeps {
+    /// Nothing to control (headless tools, tests): every status says "not playing".
+    pub fn none() -> Self {
+        Self { player: Arc::new(NoLoop), store: None }
+    }
+}
+
+/// `loop_status.error` when a `loop_control` came while a phone session was active.
+pub const LOOP_BUSY: &str = "busy";
+
+/// One `loop_status` to produce: after doing `action` (unless refused), or just reporting.
+struct LoopJob {
+    session_id: String,
+    action: Option<LoopAction>,
+    refused: bool,
+}
+
+/// Executes loop jobs one at a time, in order (a `stop` followed by a `start` must not
+/// overtake each other), off the manager task: the loop engine's lock can be held for
+/// seconds while a video loads.
+async fn loop_worker(mut jobs: mpsc::UnboundedReceiver<LoopJob>, deps: LoopDeps, out: mpsc::UnboundedSender<OutboundFrame>) {
+    while let Some(job) = jobs.recv().await {
+        let result = match (job.refused, job.action) {
+            (true, _) => Err(LOOP_BUSY.to_string()),
+            (false, Some(LoopAction::Stop)) => deps.player.stop().await.map_err(|e| e.to_string()),
+            (false, Some(LoopAction::Start)) => deps.player.start().await.map_err(|e| e.to_string()),
+            (false, Some(LoopAction::Status) | None) => Ok(()),
+        };
+        let state = deps.player.state().await;
+        let from_phone = match (&deps.store, &state.path) {
+            (Some(store), Some(path)) => store.contains(path),
+            _ => false,
+        };
+        let _ = out.send(OutboundFrame::Signal(StreamSignal::LoopStatus {
+            session_id: job.session_id,
+            playing: state.playing,
+            name: state.name.as_deref().and_then(clean_file_name),
+            from_phone,
+            error: result.err().and_then(|e| sanitize_label(&e, MAX_LOOP_ERROR)),
+        }));
     }
 }
 
@@ -88,10 +146,21 @@ impl StreamManager {
         backend: Arc<dyn SessionBackend>,
         decisions: Arc<dyn DecisionSink>,
     ) -> (StreamManager, mpsc::UnboundedReceiver<OutboundFrame>) {
+        Self::spawn_with_loop(backend, decisions, LoopDeps::none())
+    }
+
+    /// [`Self::spawn`] with the desktop's loop engine, which `loop_control` acts on.
+    pub fn spawn_with_loop(
+        backend: Arc<dyn SessionBackend>,
+        decisions: Arc<dyn DecisionSink>,
+        loops: LoopDeps,
+    ) -> (StreamManager, mpsc::UnboundedReceiver<OutboundFrame>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = watch::channel(StreamStatus::default());
-        tokio::spawn(run(rx, tx.downgrade(), backend, decisions, out_tx, status_tx));
+        let (loop_tx, loop_rx) = mpsc::unbounded_channel();
+        tokio::spawn(loop_worker(loop_rx, loops, out_tx.clone()));
+        tokio::spawn(run(rx, tx.downgrade(), backend, decisions, out_tx, status_tx, loop_tx));
         (StreamManager { tx, status: status_rx }, out_rx)
     }
 
@@ -156,6 +225,7 @@ async fn run(
     decisions: Arc<dyn DecisionSink>,
     out: mpsc::UnboundedSender<OutboundFrame>,
     status: watch::Sender<StreamStatus>,
+    loops: mpsc::UnboundedSender<LoopJob>,
 ) {
     let mut m = Machine::new();
     let mut session_tx: Option<(u64, mpsc::UnboundedSender<SessionCommand>)> = None;
@@ -170,6 +240,12 @@ async fn run(
                 match input {
                     Input::Signal(data) => match parse_signal(&data) {
                         Ok(sig) => m.on_signal(sig, now),
+                        // A request this desktop cannot take (too large, not a video):
+                        // answered at once, whatever else is going on.
+                        Err(SignalError::Refused { session_id, reason }) => {
+                            eprintln!("phone stream: refusing a request from the phone ({reason:?})");
+                            vec![Action::Send(OutboundFrame::Signal(StreamSignal::StreamReject { session_id, reason }))]
+                        }
                         Err(e) => {
                             eprintln!("phone stream: ignoring a signal from the phone ({e})");
                             vec![]
@@ -229,13 +305,20 @@ async fn run(
                     let _ = out.send(frame);
                 }
                 Action::AskUser(req) => {
-                    eprintln!("phone stream: {} asks to stream its camera", req.device_name.as_deref().unwrap_or("the phone"));
+                    let what = if req.file.is_some() { "loop a video" } else { "stream its camera" };
+                    eprintln!("phone stream: {} asks to {what}", req.device_name.as_deref().unwrap_or("the phone"));
                     decisions.request(req);
                 }
                 Action::DismissRequest(id) => decisions.dismissed(&id),
-                Action::StartSession { session_id, epoch } => {
+                Action::Loop { session_id, action, refused } => {
+                    let _ = loops.send(LoopJob { session_id, action: Some(action), refused });
+                }
+                Action::ReportLoop { session_id } => {
+                    let _ = loops.send(LoopJob { session_id, action: None, refused: false });
+                }
+                Action::StartSession { session_id, epoch, kind } => {
                     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
-                    let cmd = backend.start(&session_id, epoch, ev_tx);
+                    let cmd = backend.start(&session_id, epoch, kind, ev_tx);
                     session_tx = Some((epoch, cmd));
                     let Some(me) = self_tx.upgrade() else { continue };
                     tokio::spawn(async move {
@@ -281,7 +364,10 @@ mod tests {
     use super::*;
     use crate::remote::stream::machine::Phase;
     use crate::remote::stream::runner::MediaStats;
-    use crate::remote::stream::signal::StreamSignal;
+    use crate::remote::stream::file_receive::testing::FakeLoop;
+    use crate::remote::stream::machine::FilePhase;
+    use crate::remote::stream::runner::FileStage;
+    use crate::remote::stream::signal::{StreamMode, StreamSignal};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -299,15 +385,33 @@ mod tests {
     }
 
     impl SessionBackend for FakeBackend {
-        fn start(&self, _id: &str, epoch: u64, events: mpsc::UnboundedSender<SessionEvent>) -> mpsc::UnboundedSender<SessionCommand> {
+        fn start(
+            &self,
+            _id: &str,
+            epoch: u64,
+            kind: SessionKind,
+            events: mpsc::UnboundedSender<SessionEvent>,
+        ) -> mpsc::UnboundedSender<SessionCommand> {
             let (tx, mut rx) = mpsc::unbounded_channel::<SessionCommand>();
             let log = self.commands.clone();
+            log.lock().unwrap().push(format!("start {kind:?}"));
             let hang_on_stop = self.hang_on_stop;
             self.started.lock().unwrap().push((epoch, events.clone()));
             tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
                     log.lock().unwrap().push(format!("{cmd:?}"));
                     match cmd {
+                        // A file session: the whole transfer happens at once.
+                        SessionCommand::Offer(_) if matches!(kind, SessionKind::File(_)) => {
+                            let SessionKind::File(file) = &kind else { unreachable!() };
+                            let _ = events.send(SessionEvent::Answer("v=0 answer".into()));
+                            let _ = events.send(SessionEvent::FileProgress { received: 0 });
+                            let _ = events.send(SessionEvent::FileProgress { received: file.size });
+                            let _ = events.send(SessionEvent::FileStage(FileStage::Processing));
+                            let _ = events.send(SessionEvent::FileStage(FileStage::Looping));
+                            let _ = events.send(SessionEvent::Closed { reason: StopReason::Done, error: None });
+                            return;
+                        }
                         SessionCommand::Offer(_) => {
                             let _ = events.send(SessionEvent::Answer("v=0 answer".into()));
                             let _ = events.send(SessionEvent::Live(MediaStats {
@@ -440,7 +544,7 @@ mod tests {
         assert!(!publish(&mut published, m.status()), "nothing changed yet");
         assert_eq!(published.seq, 0);
 
-        m.on_signal(StreamSignal::StreamRequest { session_id: "s".into(), device_label: None }, t);
+        m.on_signal(StreamSignal::StreamRequest { session_id: "s".into(), device_label: None, mode: StreamMode::Live, file: None }, t);
         assert!(publish(&mut published, m.status()));
         assert_eq!((published.seq, published.state), (1, Phase::Requested));
         assert!(!publish(&mut published, m.status()), "same status, same seq");
@@ -480,5 +584,125 @@ mod tests {
         }
         assert!(frames.contains(&OutboundFrame::StreamStop { session_id: "s".into(), reason: StopReason::User }), "{frames:?}");
         assert!(!frames.iter().any(|f| matches!(f, OutboundFrame::Signal(StreamSignal::StreamReject { .. }))));
+    }
+
+    fn with_loop(
+        backend: Arc<FakeBackend>,
+        player: Arc<FakeLoop>,
+        store: &PhoneVideoStore,
+    ) -> (StreamManager, mpsc::UnboundedReceiver<OutboundFrame>, mpsc::UnboundedReceiver<DecisionEvent>) {
+        let (dtx, drx) = mpsc::unbounded_channel();
+        let loops = LoopDeps { player, store: Some(store.clone()) };
+        let (m, out) = StreamManager::spawn_with_loop(backend, Arc::new(ChannelDecisions(dtx)), loops);
+        (m, out, drx)
+    }
+
+    #[tokio::test]
+    async fn loop_control_stops_starts_and_reports_the_desktops_loop() {
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let from_phone = store.dir().join("phone-0123456789abcdef.mp4");
+        let player = FakeLoop::loaded("holiday\u{202e}.mp4", &from_phone, true);
+        let (m, mut out, _drx) = with_loop(Arc::new(FakeBackend::default()), player.clone(), &store);
+
+        // No session is opened for any of this.
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"status"}));
+        assert_eq!(
+            next_frame(&mut out).await,
+            json!({"type":"signal","data":{"kind":"loop_status","sessionId":"c1","playing":true,"name":"holiday.mp4","fromPhone":true}})
+        );
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c2","action":"stop"}));
+        assert_eq!(
+            next_frame(&mut out).await["data"],
+            json!({"kind":"loop_status","sessionId":"c2","playing":false,"name":"holiday.mp4","fromPhone":true})
+        );
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c3","action":"start"}));
+        assert_eq!(next_frame(&mut out).await["data"]["playing"], true);
+        assert_eq!(player.calls(), vec!["stop", "start"]);
+        assert_eq!(m.status().state, Phase::Idle);
+        // An action this desktop does not know is not acted on (and not answered).
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c4","action":"rewind"}));
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c5","action":"status"}));
+        assert_eq!(next_frame(&mut out).await["data"]["sessionId"], "c5");
+
+        // A video the user picked on the desktop is not `fromPhone`.
+        let player = FakeLoop::loaded("desk.mp4", std::path::Path::new("/tmp/desk.mp4"), false);
+        let (m, mut out, _drx) = with_loop(Arc::new(FakeBackend::default()), player, &store);
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"status"}));
+        assert_eq!(
+            next_frame(&mut out).await["data"],
+            json!({"kind":"loop_status","sessionId":"c1","playing":false,"name":"desk.mp4","fromPhone":false})
+        );
+
+        // Nothing loaded: `start` is answered with an error, and still with the state.
+        let (m, mut out, _drx) = with_loop(Arc::new(FakeBackend::default()), Arc::new(FakeLoop::default()), &store);
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"start"}));
+        assert_eq!(
+            next_frame(&mut out).await["data"],
+            json!({"kind":"loop_status","sessionId":"c1","playing":false,"fromPhone":false,"error":"No video is loaded."})
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_control_during_a_session_is_refused_with_an_error_status() {
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let player = FakeLoop::loaded("desk.mp4", std::path::Path::new("/tmp/desk.mp4"), true);
+        let (m, mut out, mut drx) = with_loop(Arc::new(FakeBackend::default()), player.clone(), &store);
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"s"}));
+        drx.recv().await.unwrap();
+        m.accept("s").await.unwrap();
+        m.on_relay_signal(json!({"kind":"offer","sessionId":"s","sdp":"v=0"}));
+        wait_state(&m, Phase::Live).await;
+        while out.try_recv().is_ok() {}
+
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"stop"}));
+        assert_eq!(
+            next_frame(&mut out).await["data"],
+            json!({"kind":"loop_status","sessionId":"c1","playing":true,"name":"desk.mp4","fromPhone":false,"error":"busy"})
+        );
+        assert!(player.calls().is_empty(), "nothing was done to the loop");
+        assert_eq!(m.status().state, Phase::Live);
+    }
+
+    #[tokio::test]
+    async fn a_file_session_through_the_manager() {
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let backend = Arc::new(FakeBackend::default());
+        let player = Arc::new(FakeLoop::default());
+        let (m, mut out, mut drx) = with_loop(backend.clone(), player.clone(), &store);
+
+        // Requests this desktop cannot take are answered without asking the user.
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"big","mode":"file","file":{"name":"a.mp4","size":314572801u64,"mime":"video/mp4"}}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"big","reason":"too_large"}));
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"pdf","mode":"file","file":{"name":"a.pdf","size":10,"mime":"application/pdf"}}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"pdf","reason":"unsupported"}));
+        assert!(drx.try_recv().is_err());
+        assert_eq!(m.status().state, Phase::Idle);
+
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"f1","deviceLabel":"Pixel","mode":"file","file":{"name":"clip.mp4","size":2048,"mime":"video/mp4"}}));
+        let DecisionEvent::Request(req) = drx.recv().await.unwrap() else { panic!() };
+        assert_eq!((req.mode, req.file.as_ref().map(|f| (f.name.as_str(), f.size))), (StreamMode::File, Some(("clip.mp4", 2048))));
+        let st = m.status();
+        assert_eq!((st.state, st.mode, st.file.as_ref().map(|f| f.phase)), (Phase::Requested, StreamMode::File, Some(FilePhase::Pending)));
+        // While it waits for an answer, a second request is busy.
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"other"}));
+        assert_eq!(next_frame(&mut out).await["data"]["reason"], "busy");
+
+        m.accept("f1").await.unwrap();
+        assert_eq!(next_frame(&mut out).await["data"]["kind"], "stream_accept");
+        assert_eq!(next_frame(&mut out).await["data"]["state"], "connecting");
+        assert!(backend.commands.lock().unwrap()[0].starts_with("start File(FileOffer"), "the backend is told it is a file session");
+        m.on_relay_signal(json!({"kind":"offer","sessionId":"f1","sdp":"v=0 offer"}));
+        assert_eq!(next_frame(&mut out).await["data"]["kind"], "answer");
+        // The good ending: `done`, then the loop's state. Never an error.
+        assert_eq!(next_frame(&mut out).await, json!({"type":"stream_stop","data":{"sessionId":"f1","reason":"done"}}));
+        assert_eq!(next_frame(&mut out).await["data"]["kind"], "loop_status");
+        wait_state(&m, Phase::Idle).await;
+        let st = m.status();
+        assert_eq!((st.last_error, st.last_error_code, st.ended_by_phone), (None, None, false));
+        let file = st.file.expect("the outcome stays in the status");
+        assert_eq!((file.phase, file.received, file.size), (FilePhase::Looping, 2048, 2048));
+        // And the machine is free for the next request.
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"next"}));
+        assert!(matches!(drx.recv().await.unwrap(), DecisionEvent::Request(_)));
     }
 }

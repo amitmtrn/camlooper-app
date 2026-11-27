@@ -21,16 +21,82 @@ pub const MAX_DEVICE_LABEL: usize = 40;
 pub const MAX_REMOTE_CANDIDATES: usize = 32;
 /// Relay frame size limit (UTF-8 bytes), enforced again on the way out.
 pub const MAX_RELAY_FRAME_BYTES: usize = 16 * 1024;
+/// The largest video a phone may send for looping (300 MiB).
+pub const MAX_PHONE_VIDEO_BYTES: u64 = 300 * 1024 * 1024;
+/// A phone video's name is shown, never used as a path; it is cut to this many characters.
+pub const MAX_FILE_NAME: usize = 120;
+const MAX_MIME: usize = 100;
+/// `loop_status.error` is short text for the phone UI.
+pub const MAX_LOOP_ERROR: usize = 120;
+/// File extensions a phone video may have (also what the stored file is named with).
+pub const PHONE_VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "3gp"];
+
+/// What a phone session carries: its live camera, or one video file to loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamMode {
+    #[default]
+    Live,
+    File,
+}
+
+impl StreamMode {
+    fn is_live(&self) -> bool {
+        *self == StreamMode::Live
+    }
+}
+
+/// The video a `mode: "file"` request announces. After [`parse_signal`]: `name` is cleaned
+/// for display, `size` is within `1..=`[`MAX_PHONE_VIDEO_BYTES`] and the type is a video.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileOffer {
+    pub name: String,
+    pub size: u64,
+    #[serde(default)]
+    pub mime: String,
+}
+
+impl FileOffer {
+    /// The name's extension, lower case, if it is one of [`PHONE_VIDEO_EXTENSIONS`].
+    pub fn name_extension(&self) -> Option<&'static str> {
+        let (stem, ext) = self.name.rsplit_once('.')?;
+        if stem.is_empty() {
+            return None;
+        }
+        let ext = ext.to_ascii_lowercase();
+        PHONE_VIDEO_EXTENSIONS.iter().copied().find(|e| *e == ext)
+    }
+
+    /// The MIME type without parameters, lower case (`video/mp4; codecs=…` → `video/mp4`).
+    pub fn mime_essence(&self) -> String {
+        self.mime.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()
+    }
+}
+
+/// What the phone asks of the desktop's loop (`loop_control.action`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopAction {
+    Stop,
+    Start,
+    Status,
+}
 
 /// One signaling message (`signal.data`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum StreamSignal {
-    /// phone → desktop: "may I stream my camera to you?"
+    /// phone → desktop: "may I stream my camera to you?" — or, with `mode: "file"`, "may I
+    /// loop this video on your camera?". No `mode` means live (older phone pages).
     StreamRequest {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_label: Option<String>,
+        #[serde(default, skip_serializing_if = "StreamMode::is_live")]
+        mode: StreamMode,
+        /// Present exactly when `mode` is `file`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<FileOffer>,
     },
     /// desktop → phone: the user accepted; send the offer.
     StreamAccept { session_id: String },
@@ -63,6 +129,22 @@ pub enum StreamSignal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codec: Option<String>,
     },
+    /// phone → desktop: act on the video loaded on the desktop. `sessionId` is any valid id;
+    /// no session needs to be open. Always answered with `loop_status`.
+    LoopControl { session_id: String, action: LoopAction },
+    /// desktop → phone: the desktop's loop, as an answer to `loop_control` and after a phone
+    /// video was loaded.
+    LoopStatus {
+        session_id: String,
+        playing: bool,
+        /// Display name of the loaded video.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// The loaded video came from the phone.
+        from_phone: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 fn null_as_empty<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -75,7 +157,11 @@ pub enum RejectReason {
     Declined,
     Busy,
     Timeout,
+    /// Not something this desktop can take: not a video, an unknown `mode`, a `file` request
+    /// without a usable `file`.
     Unsupported,
+    /// The announced video is over [`MAX_PHONE_VIDEO_BYTES`].
+    TooLarge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +183,9 @@ pub enum StopReason {
     /// with a reason of its own followed. A normal ending, never sent to the phone.
     PeerStopped,
     Timeout,
+    /// A file session finished: the video was received and is looping. A success on both
+    /// sides, never an error.
+    Done,
     Other(String),
 }
 
@@ -109,6 +198,7 @@ impl StopReason {
             StopReason::PeerOffline => "peer_offline",
             StopReason::PeerStopped => "peer_stopped",
             StopReason::Timeout => "timeout",
+            StopReason::Done => "done",
             StopReason::Other(s) => s,
         }
     }
@@ -121,13 +211,14 @@ impl StopReason {
             "peer_offline" => StopReason::PeerOffline,
             "peer_stopped" => StopReason::PeerStopped,
             "timeout" => StopReason::Timeout,
+            "done" | "finished" => StopReason::Done,
             other => StopReason::Other(sanitize_label(other, 32).unwrap_or_else(|| "unknown".into())),
         }
     }
 
     /// Whether this ending is a failure worth surfacing as `lastError`.
     pub fn is_failure(&self) -> bool {
-        !matches!(self, StopReason::User | StopReason::PeerOffline | StopReason::PeerStopped)
+        !matches!(self, StopReason::User | StopReason::PeerOffline | StopReason::PeerStopped | StopReason::Done)
     }
 }
 
@@ -146,6 +237,9 @@ pub enum SignalError {
     TooLarge(&'static str),
     BadSdp,
     BadCandidate,
+    /// A `stream_request` that is well-formed enough to answer, and the answer is no
+    /// (`stream_reject` with this reason): the video is too large, not a video, …
+    Refused { session_id: String, reason: RejectReason },
 }
 
 impl std::fmt::Display for SignalError {
@@ -158,11 +252,22 @@ impl std::fmt::Display for SignalError {
             SignalError::TooLarge(what) => write!(f, "{what} too large"),
             SignalError::BadSdp => f.write_str("sdp is not a session description"),
             SignalError::BadCandidate => f.write_str("candidate is not an ICE candidate line"),
+            SignalError::Refused { reason, .. } => write!(f, "request refused ({reason:?})"),
         }
     }
 }
 
-const KNOWN_KINDS: &[&str] = &["stream_request", "stream_accept", "stream_reject", "offer", "answer", "candidate", "status"];
+const KNOWN_KINDS: &[&str] = &[
+    "stream_request",
+    "stream_accept",
+    "stream_reject",
+    "offer",
+    "answer",
+    "candidate",
+    "status",
+    "loop_control",
+    "loop_status",
+];
 
 /// Parse and validate `signal.data` from the phone. Values are normalised: the device label
 /// is trimmed and stripped of control characters, an `a=` prefix on a candidate is removed.
@@ -172,8 +277,63 @@ pub fn parse_signal(data: &Value) -> Result<StreamSignal, SignalError> {
     if !KNOWN_KINDS.contains(&kind) {
         return Err(SignalError::UnknownKind(kind.chars().take(32).collect()));
     }
+    if kind == "stream_request" {
+        return parse_request(obj);
+    }
     let sig: StreamSignal = serde_json::from_value(data.clone()).map_err(|e| SignalError::Malformed(e.to_string()))?;
     validate(sig)
+}
+
+/// `stream_request`, read by hand: a request that names a session but asks for something
+/// this desktop cannot take is *refused* (the phone gets a `stream_reject` with the reason)
+/// rather than dropped as malformed, which would leave the phone waiting.
+fn parse_request(obj: &serde_json::Map<String, Value>) -> Result<StreamSignal, SignalError> {
+    let session_id = match obj.get("sessionId") {
+        Some(Value::String(id)) => id.clone(),
+        Some(_) => return Err(SignalError::Malformed("sessionId is not a string".into())),
+        None => return Err(SignalError::Malformed("missing field `sessionId`".into())),
+    };
+    if !valid_session_id(&session_id) {
+        return Err(SignalError::BadSessionId);
+    }
+    let refuse = |reason| SignalError::Refused { session_id: session_id.clone(), reason };
+    let device_label = obj.get("deviceLabel").and_then(Value::as_str).and_then(|l| sanitize_label(l, MAX_DEVICE_LABEL));
+    let mode = match obj.get("mode") {
+        None | Some(Value::Null) => StreamMode::Live,
+        Some(Value::String(m)) if m == "live" => StreamMode::Live,
+        Some(Value::String(m)) if m == "file" => StreamMode::File,
+        // A mode from a newer phone page.
+        Some(_) => return Err(refuse(RejectReason::Unsupported)),
+    };
+    if mode == StreamMode::Live {
+        return Ok(StreamSignal::StreamRequest { session_id, device_label, mode, file: None });
+    }
+    let file = obj.get("file").and_then(Value::as_object).ok_or_else(|| refuse(RejectReason::Unsupported))?;
+    let name = file
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(clean_file_name)
+        .ok_or_else(|| refuse(RejectReason::Unsupported))?;
+    let mime = clean_mime(file.get("mime").and_then(Value::as_str).unwrap_or_default());
+    let size = match file.get("size") {
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(0) => return Err(refuse(RejectReason::Unsupported)),
+            Some(size) if size > MAX_PHONE_VIDEO_BYTES => return Err(refuse(RejectReason::TooLarge)),
+            Some(size) => size,
+            // Not a non-negative integer: a whole float beyond u64 is still "too large",
+            // anything else (negative, fractional) is not a size.
+            None if n.as_f64().is_some_and(|f| f.is_finite() && f > MAX_PHONE_VIDEO_BYTES as f64) => {
+                return Err(refuse(RejectReason::TooLarge))
+            }
+            None => return Err(refuse(RejectReason::Unsupported)),
+        },
+        _ => return Err(refuse(RejectReason::Unsupported)),
+    };
+    let offer = FileOffer { name, size, mime };
+    if !(offer.mime_essence().starts_with("video/") || offer.name_extension().is_some()) {
+        return Err(refuse(RejectReason::Unsupported));
+    }
+    Ok(StreamSignal::StreamRequest { session_id, device_label, mode, file: Some(offer) })
 }
 
 pub fn valid_session_id(id: &str) -> bool {
@@ -214,14 +374,28 @@ pub fn sanitize_label(s: &str, max: usize) -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
+/// A phone video's name as it is shown: see [`sanitize_label`]; at most [`MAX_FILE_NAME`]
+/// characters. Display only — the stored file's name is never derived from it.
+pub fn clean_file_name(name: &str) -> Option<String> {
+    sanitize_label(name, MAX_FILE_NAME)
+}
+
+/// A MIME type reduced to printable ASCII and a sane length.
+pub fn clean_mime(mime: &str) -> String {
+    mime.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').take(MAX_MIME).collect::<String>().trim().to_string()
+}
+
 fn validate(sig: StreamSignal) -> Result<StreamSignal, SignalError> {
     if !valid_session_id(sig.session_id()) {
         return Err(SignalError::BadSessionId);
     }
     Ok(match sig {
-        StreamSignal::StreamRequest { session_id, device_label } => StreamSignal::StreamRequest {
+        StreamSignal::LoopStatus { session_id, playing, name, from_phone, error } => StreamSignal::LoopStatus {
             session_id,
-            device_label: device_label.and_then(|l| sanitize_label(&l, MAX_DEVICE_LABEL)),
+            playing,
+            name: name.and_then(|n| sanitize_label(&n, MAX_FILE_NAME)),
+            from_phone,
+            error: error.and_then(|e| sanitize_label(&e, MAX_LOOP_ERROR)),
         },
         StreamSignal::Offer { session_id, sdp } => {
             check_sdp(&sdp)?;
@@ -265,7 +439,9 @@ impl StreamSignal {
             | StreamSignal::Offer { session_id, .. }
             | StreamSignal::Answer { session_id, .. }
             | StreamSignal::Candidate { session_id, .. }
-            | StreamSignal::Status { session_id, .. } => session_id,
+            | StreamSignal::Status { session_id, .. }
+            | StreamSignal::LoopControl { session_id, .. }
+            | StreamSignal::LoopStatus { session_id, .. } => session_id,
         }
     }
 
@@ -278,6 +454,8 @@ impl StreamSignal {
             StreamSignal::Answer { .. } => "answer",
             StreamSignal::Candidate { .. } => "candidate",
             StreamSignal::Status { .. } => "status",
+            StreamSignal::LoopControl { .. } => "loop_control",
+            StreamSignal::LoopStatus { .. } => "loop_status",
         }
     }
 }
@@ -426,15 +604,160 @@ mod tests {
         assert!(!shown.chars().any(|c| c.is_control() || c == '\u{202e}'));
     }
 
+    fn file_req(file: Value) -> Result<StreamSignal, SignalError> {
+        parse_signal(&json!({"kind":"stream_request","sessionId":"f1","mode":"file","file":file}))
+    }
+    fn refused(reason: RejectReason) -> Result<StreamSignal, SignalError> {
+        Err(SignalError::Refused { session_id: "f1".into(), reason })
+    }
+
+    #[test]
+    fn a_request_without_a_mode_is_a_live_request() {
+        // What the phone page sent before file mode existed, and what it serializes back to.
+        let old = json!({"kind":"stream_request","sessionId":"s1","deviceLabel":"Pixel"});
+        let sig = parse_signal(&old).unwrap();
+        assert_eq!(
+            sig,
+            StreamSignal::StreamRequest { session_id: "s1".into(), device_label: Some("Pixel".into()), mode: StreamMode::Live, file: None }
+        );
+        assert_eq!(serde_json::to_value(&sig).unwrap(), old);
+        // An explicit live mode is the same; a stray `file` on it is dropped.
+        let explicit = json!({"kind":"stream_request","sessionId":"s1","deviceLabel":"Pixel","mode":"live","file":{"name":"x.mp4","size":1,"mime":"video/mp4"}});
+        assert_eq!(parse_signal(&explicit).unwrap(), sig);
+        assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"s1","deviceLabel":"Pixel","mode":null})).unwrap(), sig);
+    }
+
+    #[test]
+    fn a_file_request_carries_the_validated_file() {
+        let sig = file_req(json!({"name":"holiday.MP4","size":1048576,"mime":"video/mp4"})).unwrap();
+        let StreamSignal::StreamRequest { mode, file: Some(file), .. } = &sig else { panic!("{sig:?}") };
+        assert_eq!(*mode, StreamMode::File);
+        assert_eq!(*file, FileOffer { name: "holiday.MP4".into(), size: 1048576, mime: "video/mp4".into() });
+        assert_eq!(file.name_extension(), Some("mp4"));
+        assert_eq!(
+            serde_json::to_value(&sig).unwrap(),
+            json!({"kind":"stream_request","sessionId":"f1","mode":"file","file":{"name":"holiday.MP4","size":1048576,"mime":"video/mp4"}})
+        );
+        // The limits are inclusive.
+        assert!(file_req(json!({"name":"a.mp4","size":1,"mime":"video/mp4"})).is_ok());
+        assert!(file_req(json!({"name":"a.mp4","size":MAX_PHONE_VIDEO_BYTES,"mime":"video/mp4"})).is_ok());
+        assert_eq!(MAX_PHONE_VIDEO_BYTES, 314_572_800);
+    }
+
+    #[test]
+    fn bad_sizes_are_refused() {
+        let with_size = |size: Value| file_req(json!({"name":"a.mp4","size":size,"mime":"video/mp4"}));
+        assert_eq!(with_size(json!(MAX_PHONE_VIDEO_BYTES + 1)), refused(RejectReason::TooLarge));
+        assert_eq!(with_size(json!(u64::MAX)), refused(RejectReason::TooLarge));
+        assert_eq!(with_size(json!(1e30)), refused(RejectReason::TooLarge));
+        assert_eq!(with_size(json!(0)), refused(RejectReason::Unsupported));
+        assert_eq!(with_size(json!(-5)), refused(RejectReason::Unsupported));
+        assert_eq!(with_size(json!(1000.5)), refused(RejectReason::Unsupported));
+        assert_eq!(with_size(json!("1000")), refused(RejectReason::Unsupported));
+        assert_eq!(with_size(Value::Null), refused(RejectReason::Unsupported));
+        assert_eq!(file_req(json!({"name":"a.mp4","mime":"video/mp4"})), refused(RejectReason::Unsupported));
+    }
+
+    #[test]
+    fn a_file_request_needs_a_file_that_is_a_video() {
+        // Missing or misshapen `file`.
+        assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"f1","mode":"file"})), refused(RejectReason::Unsupported));
+        assert_eq!(file_req(json!("a.mp4")), refused(RejectReason::Unsupported));
+        assert_eq!(file_req(json!({"size":10,"mime":"video/mp4"})), refused(RejectReason::Unsupported));
+        assert_eq!(file_req(json!({"name":" \u{7} ","size":10,"mime":"video/mp4"})), refused(RejectReason::Unsupported));
+        // Neither a video type nor a video extension.
+        assert_eq!(file_req(json!({"name":"notes.pdf","size":10,"mime":"application/pdf"})), refused(RejectReason::Unsupported));
+        assert_eq!(file_req(json!({"name":"clip.avi","size":10,"mime":""})), refused(RejectReason::Unsupported));
+        assert_eq!(file_req(json!({"name":".mp4","size":10})), refused(RejectReason::Unsupported));
+        // Either one is enough.
+        assert!(file_req(json!({"name":"clip","size":10,"mime":"video/quicktime"})).is_ok());
+        assert!(file_req(json!({"name":"clip.unknown","size":10,"mime":"Video/MP4; codecs=avc1"})).is_ok());
+        for ext in PHONE_VIDEO_EXTENSIONS {
+            assert!(file_req(json!({"name":format!("clip.{}", ext.to_uppercase()),"size":10,"mime":"application/octet-stream"})).is_ok(), "{ext}");
+        }
+        // A mode this desktop does not know is answered, not ignored.
+        assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"f1","mode":"screen"})), refused(RejectReason::Unsupported));
+        assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"f1","mode":7})), refused(RejectReason::Unsupported));
+        // Without a usable session id there is nobody to answer.
+        assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"bad id","mode":"file"})), Err(SignalError::BadSessionId));
+    }
+
+    #[test]
+    fn a_file_name_is_cleaned_for_display_and_is_never_a_path() {
+        let name = format!("\u{202e}../../etc/pass\nwd\u{200b}{}.mp4", "x".repeat(300));
+        let StreamSignal::StreamRequest { file: Some(file), .. } = file_req(json!({"name":name,"size":10,"mime":"video/mp4"})).unwrap()
+        else {
+            panic!("not a file request")
+        };
+        assert_eq!(file.name.chars().count(), MAX_FILE_NAME);
+        assert_eq!(MAX_FILE_NAME, 120);
+        assert!(file.name.starts_with("../../etc/passwdxxx"), "{:?}", file.name);
+        assert!(!file.name.chars().any(|c| c.is_control() || c == '\u{202e}' || c == '\u{200b}'));
+        // Cut off before its extension: the type still decides.
+        assert_eq!(file.name_extension(), None);
+        let StreamSignal::StreamRequest { file: Some(file), .. } =
+            file_req(json!({"name":"  my clip.mov  ","size":10,"mime":"video/quicktime\r\nx: y"})).unwrap()
+        else {
+            panic!("not a file request")
+        };
+        assert_eq!((file.name.as_str(), file.mime.as_str()), ("my clip.mov", "video/quicktimex: y"));
+    }
+
+    #[test]
+    fn loop_control_and_loop_status() {
+        for (text, action) in [("stop", LoopAction::Stop), ("start", LoopAction::Start), ("status", LoopAction::Status)] {
+            assert_eq!(
+                parse_signal(&json!({"kind":"loop_control","sessionId":"c1","action":text})).unwrap(),
+                StreamSignal::LoopControl { session_id: "c1".into(), action }
+            );
+        }
+        // An unknown or missing action, or no session id to answer on.
+        assert!(matches!(parse_signal(&json!({"kind":"loop_control","sessionId":"c1","action":"rewind"})), Err(SignalError::Malformed(_))));
+        assert!(matches!(parse_signal(&json!({"kind":"loop_control","sessionId":"c1"})), Err(SignalError::Malformed(_))));
+        assert!(matches!(parse_signal(&json!({"kind":"loop_control","sessionId":"c1","action":1})), Err(SignalError::Malformed(_))));
+        assert_eq!(parse_signal(&json!({"kind":"loop_control","sessionId":"","action":"stop"})), Err(SignalError::BadSessionId));
+
+        let s = |sig: StreamSignal| serde_json::to_value(sig).unwrap();
+        assert_eq!(
+            s(StreamSignal::LoopStatus { session_id: "c1".into(), playing: true, name: Some("clip.mp4".into()), from_phone: true, error: None }),
+            json!({"kind":"loop_status","sessionId":"c1","playing":true,"name":"clip.mp4","fromPhone":true})
+        );
+        assert_eq!(
+            s(StreamSignal::LoopStatus { session_id: "c1".into(), playing: false, name: None, from_phone: false, error: Some("busy".into()) }),
+            json!({"kind":"loop_status","sessionId":"c1","playing":false,"fromPhone":false,"error":"busy"})
+        );
+        assert_eq!(
+            s(StreamSignal::StreamReject { session_id: "s".into(), reason: RejectReason::TooLarge }),
+            json!({"kind":"stream_reject","sessionId":"s","reason":"too_large"})
+        );
+        assert_eq!(
+            s(StreamSignal::StreamReject { session_id: "s".into(), reason: RejectReason::Unsupported }),
+            json!({"kind":"stream_reject","sessionId":"s","reason":"unsupported"})
+        );
+    }
+
+    #[test]
+    fn a_finished_file_session_is_not_a_failure() {
+        assert_eq!(StopReason::parse("done"), StopReason::Done);
+        assert_eq!(StopReason::parse("finished"), StopReason::Done);
+        assert_eq!(StopReason::Done.as_str(), "done");
+        assert!(!StopReason::Done.is_failure());
+        let stop = OutboundFrame::StreamStop { session_id: "s".into(), reason: StopReason::Done };
+        assert_eq!(
+            serde_json::from_str::<Value>(&stop.to_json().unwrap()).unwrap(),
+            json!({"type":"stream_stop","data":{"sessionId":"s","reason":"done"}})
+        );
+    }
+
     #[test]
     fn parses_every_phone_message() {
         assert_eq!(
             parse_signal(&json!({"kind":"stream_request","sessionId":"s1","deviceLabel":"  Pixel\u{7}  9 "})).unwrap(),
-            StreamSignal::StreamRequest { session_id: "s1".into(), device_label: Some("Pixel  9".into()) }
+            StreamSignal::StreamRequest { session_id: "s1".into(), device_label: Some("Pixel  9".into()), mode: StreamMode::Live, file: None }
         );
         assert_eq!(
             parse_signal(&json!({"kind":"stream_request","sessionId":"s1"})).unwrap(),
-            StreamSignal::StreamRequest { session_id: "s1".into(), device_label: None }
+            StreamSignal::StreamRequest { session_id: "s1".into(), device_label: None, mode: StreamMode::Live, file: None }
         );
         assert_eq!(
             parse_signal(&json!({"kind":"offer","sessionId":"s1","sdp":"v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\n"})).unwrap(),
@@ -547,6 +870,7 @@ mod tests {
         assert!(matches!(parse_signal(&json!({"kind":"teleport","sessionId":"s"})), Err(SignalError::UnknownKind(_))));
         assert!(matches!(parse_signal(&json!({"sessionId":"s"})), Err(SignalError::UnknownKind(_))));
         assert!(matches!(parse_signal(&json!({"kind":"stream_request"})), Err(SignalError::Malformed(e)) if e.contains("sessionId")));
+        assert!(matches!(parse_signal(&json!({"kind":"stream_request","sessionId":7})), Err(SignalError::Malformed(_))));
         assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":""})), Err(SignalError::BadSessionId));
         assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"has space"})), Err(SignalError::BadSessionId));
         assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"x".repeat(65)})), Err(SignalError::BadSessionId));

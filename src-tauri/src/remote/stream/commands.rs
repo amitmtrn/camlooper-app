@@ -11,7 +11,17 @@
 //!   `{sessionId}`: informational (logging); the UI must not depend on their order relative
 //!   to the status events, which travel through a separate task.
 //! * `remote://stream-stop-failed` — error code: the tray's "Stop phone camera" failed.
+//! * `remote://phone-video-loaded` — `{video: VideoInfo, playing: true}`: a video received
+//!   from the phone was loaded and is looping. `video` is exactly what `load_video_file` /
+//!   `stream_upload_and_load_video` return for a desktop-picked file, so the UI can put it
+//!   where it puts those. The virtual camera is running by then (started here if it was off).
+//! * `remote://loop-changed` — `{playing}`: the phone stopped or started the loop
+//!   (`loop_control`), which the UI otherwise only does itself.
+//!
+//! [`StreamStatus`] also carries `mode` (`"live"` | `"file"`) and, for a file session,
+//! `file: {name, size, received, phase, error?}` — see `machine.rs`.
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,13 +30,99 @@ use once_cell::sync::OnceCell;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
+use super::file_receive::{FileDeps, LoopPlayer, LoopState, PhoneVideoStore};
 use super::handoff::AppCamera;
 use super::machine::{Phase, StreamRequest, StreamStatus};
-use super::manager::{DecisionSink, StreamManager};
+use super::manager::{DecisionSink, LoopDeps, StreamManager};
 use super::runner::{IceSource, SessionDeps};
-use super::signal::{OutboundFrame, StopReason};
+use super::signal::{OutboundFrame, StopReason, StreamMode};
 
 static MANAGER: OnceCell<StreamManager> = OnceCell::new();
+/// `<app data dir>/phone-videos/`, for the sweep on exit.
+static PHONE_VIDEOS: OnceCell<PhoneVideoStore> = OnceCell::new();
+
+/// The app's loop engine (`video_processor`), driven the way the UI drives it.
+struct AppLoop(AppHandle);
+
+impl AppLoop {
+    fn loop_changed(&self, playing: bool) {
+        let _ = self.0.emit("remote://loop-changed", serde_json::json!({ "playing": playing }));
+    }
+
+    /// What the UI does before it starts playback: the in-app camera off the virtual camera
+    /// (never under a recording), the virtual camera on.
+    async fn prepare_camera(&self) -> anyhow::Result<()> {
+        let (capture_running, recording) = crate::camera_capture::capture_activity().await;
+        if recording {
+            return Err(anyhow::anyhow!("A camera recording is in progress."));
+        }
+        if capture_running {
+            let _ = crate::camera_capture::stop_camera_preview().await;
+        }
+        super::handoff::ensure_virtual_camera().await?;
+        Ok(())
+    }
+}
+
+impl LoopPlayer for AppLoop {
+    fn state(&self) -> BoxFuture<'_, LoopState> {
+        Box::pin(async {
+            let playing = crate::video_processor::get_video_stream_status().await.is_playing;
+            match crate::video_processor::loaded_video().await {
+                Some((path, name)) => LoopState { playing, name: Some(name), path: Some(path) },
+                None => LoopState { playing, name: None, path: None },
+            }
+        })
+    }
+
+    fn stop(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async {
+            crate::video_processor::stop_video_stream().await?;
+            self.loop_changed(false);
+            Ok(())
+        })
+    }
+
+    fn start(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async {
+            if !crate::video_processor::has_video_loaded().await {
+                return Err(anyhow::anyhow!("No video is loaded."));
+            }
+            self.prepare_camera().await?;
+            crate::video_processor::start_video_stream().await?;
+            self.loop_changed(true);
+            Ok(())
+        })
+    }
+
+    fn play_file<'a>(&'a self, path: &'a Path, display_name: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            // The loop that is playing, if any, and its ffmpeg: gone before the next starts.
+            crate::video_processor::stop_video_stream().await?;
+            if !crate::video_processor::wait_for_playback_exit(Duration::from_secs(5)).await {
+                return Err(anyhow::anyhow!("video playback did not stop"));
+            }
+            let video = crate::video_processor::load_video_file_with_original_name(
+                path.to_string_lossy().into_owned(),
+                display_name.to_string(),
+            )
+            .await?;
+            self.prepare_camera().await?;
+            crate::video_processor::start_video_stream().await?;
+            let _ = self.0.emit("remote://phone-video-loaded", serde_json::json!({ "video": video, "playing": true }));
+            Ok(())
+        })
+    }
+}
+
+/// The app is exiting: no phone video is restored on the next start (the app does not
+/// remember the last loaded video), so none is kept. Best effort — a file still held open
+/// by a playing ffmpeg (Windows) is removed by the sweep at the next start.
+pub fn sweep_phone_videos_for_exit() {
+    if let Some(store) = PHONE_VIDEOS.get() {
+        store.sweep(None);
+    }
+}
 
 /// An accept is refused until the request has been in front of the user this long. The dialog
 /// keeps its Accept button disabled for longer than this; the check here is the backstop for
@@ -90,13 +186,31 @@ pub(crate) fn install(app: AppHandle) -> (StreamManager, mpsc::UnboundedReceiver
         eprintln!("phone stream: {e}");
         std::path::PathBuf::from("ffmpeg")
     });
-    let deps = Arc::new(SessionDeps::new(ffmpeg, Arc::new(AppCamera::default()), Arc::new(RelayIce)));
-    let (manager, outbound) = StreamManager::spawn(Arc::new(deps), Arc::new(UiDecisions(app.clone())));
+    let app_data = app.path().app_data_dir().unwrap_or_else(|e| {
+        eprintln!("phone stream: no app data directory ({e}); phone videos go to the temp directory");
+        std::env::temp_dir().join("camlooper")
+    });
+    let store = PhoneVideoStore::in_app_data(&app_data);
+    // Left over from the last run (a crash, a file that was still open at exit). Nothing
+    // is loaded yet and nothing will be restored, so everything goes.
+    let swept = store.sweep(None);
+    if swept > 0 {
+        eprintln!("phone stream: removed {swept} leftover phone video file(s)");
+    }
+    let _ = PHONE_VIDEOS.set(store.clone());
+    let player: Arc<dyn LoopPlayer> = Arc::new(AppLoop(app.clone()));
+    let mut deps = SessionDeps::new(ffmpeg, Arc::new(AppCamera::default()), Arc::new(RelayIce));
+    deps.files = Some(FileDeps::new(store.clone(), player.clone()));
+    let (manager, outbound) = StreamManager::spawn_with_loop(
+        Arc::new(Arc::new(deps)),
+        Arc::new(UiDecisions(app.clone())),
+        LoopDeps { player, store: Some(store) },
+    );
     let mut status = manager.subscribe();
     tokio::spawn(async move {
         while status.changed().await.is_ok() {
             let s = status.borrow_and_update().clone();
-            crate::tray::set_phone_stream(&app, tray_state(s.state));
+            crate::tray::set_phone_stream(&app, tray_state(s.state, s.mode));
             let _ = app.emit("remote://stream-status", s);
         }
     });
@@ -104,10 +218,13 @@ pub(crate) fn install(app: AppHandle) -> (StreamManager, mpsc::UnboundedReceiver
     (manager, outbound)
 }
 
-fn tray_state(phase: Phase) -> crate::tray::PhoneTray {
+fn tray_state(phase: Phase, mode: StreamMode) -> crate::tray::PhoneTray {
     use crate::tray::PhoneTray;
     match phase {
         Phase::Connecting => PhoneTray::Connecting,
+        // A video being received is a session that Stop can cancel, but no camera is
+        // "live": the tray must not say so.
+        Phase::Live if mode == StreamMode::File => PhoneTray::Connecting,
         Phase::Live => PhoneTray::Live,
         Phase::Stopping => PhoneTray::Stopping,
         Phase::Idle | Phase::Requested | Phase::Error => PhoneTray::Idle,
@@ -216,10 +333,16 @@ mod tests {
     #[test]
     fn the_tray_follows_the_phase() {
         use crate::tray::PhoneTray;
-        assert_eq!(tray_state(Phase::Requested), PhoneTray::Idle);
-        assert_eq!(tray_state(Phase::Connecting), PhoneTray::Connecting);
-        assert_eq!(tray_state(Phase::Live), PhoneTray::Live);
-        assert_eq!(tray_state(Phase::Stopping), PhoneTray::Stopping);
-        assert_eq!(tray_state(Phase::Error), PhoneTray::Idle);
+        let live = StreamMode::Live;
+        assert_eq!(tray_state(Phase::Requested, live), PhoneTray::Idle);
+        assert_eq!(tray_state(Phase::Connecting, live), PhoneTray::Connecting);
+        assert_eq!(tray_state(Phase::Live, live), PhoneTray::Live);
+        assert_eq!(tray_state(Phase::Stopping, live), PhoneTray::Stopping);
+        assert_eq!(tray_state(Phase::Error, live), PhoneTray::Idle);
+        // A file transfer can be stopped from the tray, but it is never "camera live";
+        // idle with the last transfer's outcome still in the status is idle.
+        assert_eq!(tray_state(Phase::Live, StreamMode::File), PhoneTray::Connecting);
+        assert_eq!(tray_state(Phase::Stopping, StreamMode::File), PhoneTray::Stopping);
+        assert_eq!(tray_state(Phase::Idle, StreamMode::File), PhoneTray::Idle);
     }
 }

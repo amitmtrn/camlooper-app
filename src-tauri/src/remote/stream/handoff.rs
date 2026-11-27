@@ -141,6 +141,8 @@ impl AppCamera {
         }
 
         if !virtual_camera::get_virtual_camera_status().await.is_active {
+            // (The same steps as `ensure_virtual_camera`, spelled out here because each is
+            // noted in `undo` and the wait can be cancelled.)
             // The step that can wait on the user (polkit / UAC). When the session ends
             // meanwhile, do not sit in it: dropping the Linux future kills pkexec, which
             // closes the prompt. The Windows registration runs on a blocking thread and its
@@ -196,6 +198,21 @@ impl CameraControl for AppCamera {
             }
         })
     }
+}
+
+/// Make sure the virtual camera is running, starting it the way the UI does (driver or
+/// kernel module first — at most one system prompt). For a loop that is started from the
+/// phone: the window may be hidden in the tray, so nothing else would turn the camera on.
+/// Returns whether it had to be started.
+pub(super) async fn ensure_virtual_camera() -> Result<bool> {
+    if virtual_camera::get_virtual_camera_status().await.is_active {
+        return Ok(false);
+    }
+    prepare_platform_camera().await?;
+    let (width, height) = virtual_camera::output_resolution();
+    let config = VirtualCameraConfig { width, height, fps: 30, ..VirtualCameraConfig::default() };
+    virtual_camera::start_virtual_camera_with(Some(config), None).await?;
+    Ok(true)
 }
 
 #[cfg(target_os = "linux")]

@@ -30,6 +30,13 @@
 //!   arrives here before (or without) the relay's `stream_stop`. That is reported as
 //!   [`RtcClose::PeerClosed`], a normal ending, not an error.
 //!
+//! * **File sessions** ([`RtcMode::File`]). The same task, sockets and ICE/DTLS, but the offer
+//!   has only an `m=application` section and the phone opens one reliable data channel. Its
+//!   messages are forwarded *in order and without loss*: when the consumer (which writes them
+//!   to disk) falls behind, the task stops reading the network until it has caught up, and
+//!   SCTP's flow control slows the phone down. No media timeout applies — the consumer has
+//!   its own idle timeout.
+//!
 //! Privacy: SDP and candidate addresses are logged at debug level only.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -38,6 +45,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use str0m::bwe::Bitrate;
 use str0m::change::SdpOffer;
+use str0m::channel::ChannelId;
 use str0m::format::Codec as SCodec;
 use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
@@ -45,6 +53,7 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use super::file_receive::DATA_CHANNEL_LABEL;
 use super::media::{h264_is_keyframe, vp8_is_keyframe, PliLimiter};
 use super::signal::{StopReason, MAX_REMOTE_CANDIDATES, MAX_SDP_BYTES};
 use crate::pipeline::EncodedCodec;
@@ -92,6 +101,15 @@ pub struct EncodedFrame {
     pub data: Arc<[u8]>,
 }
 
+/// What the session is for, which decides the offer it accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtcMode {
+    /// The phone's camera: the offer must carry video.
+    Live,
+    /// One video file over a data channel: the offer must carry no media at all.
+    File,
+}
+
 #[derive(Debug)]
 pub enum RtcCommand {
     /// A remote trickle candidate (`candidate:…`); empty = end-of-candidates.
@@ -99,6 +117,8 @@ pub enum RtcCommand {
     RequestKeyframe,
     /// The consumer dropped frames; treat the stream as discontinuous.
     FramesDropped,
+    /// Send a text message on the file data channel (queued until the channel can take it).
+    ChannelText(String),
     Stop,
 }
 
@@ -106,6 +126,13 @@ pub enum RtcCommand {
 pub enum RtcEvent {
     IceConnected,
     Frame(EncodedFrame),
+    /// The phone opened the file data channel.
+    ChannelOpen,
+    /// A text / binary message on the file data channel, in order, none dropped.
+    ChannelText(String),
+    ChannelBinary(Vec<u8>),
+    /// The phone closed the file data channel (but not the connection).
+    ChannelClosed,
     /// The task has ended. `Stopped` when asked to.
     Closed(RtcClose),
 }
@@ -230,9 +257,10 @@ pub fn accept_offer(
     transport: LocalTransport,
     offer_sdp: &str,
     opts: RtcOptions,
+    mode: RtcMode,
 ) -> Result<(String, mpsc::UnboundedSender<RtcCommand>, mpsc::Receiver<RtcEvent>)> {
     let start = Instant::now();
-    let mut rtc = build_rtc(start);
+    let mut rtc = build_rtc(start, mode);
     for c in &transport.candidates {
         rtc.add_local_candidate(c.clone());
     }
@@ -245,6 +273,10 @@ pub fn accept_offer(
         log::debug!("phone stream: unreadable offer SDP: {e}");
         anyhow!("the phone's offer could not be read")
     })?;
+    if !offer_matches_mode(&offer_sdp, mode) {
+        log::debug!("phone stream: the offer's sections do not fit a {mode:?} session");
+        return Err(anyhow!("the phone's offer does not match the request"));
+    }
     let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
         log::debug!("phone stream: offer not acceptable: {e}");
         anyhow!("the phone's offer is not supported")
@@ -257,15 +289,41 @@ pub fn accept_offer(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = mpsc::channel(FRAME_QUEUE);
     let limits = CandidateLimits { used: offer_candidates, allow_loopback };
-    tokio::spawn(run(rtc, transport.sockets, opts, start, limits, cmd_rx, ev_tx));
+    tokio::spawn(run(rtc, transport.sockets, RunSetup { opts, mode, start, limits }, cmd_rx, ev_tx));
     Ok((answer, cmd_tx, ev_rx))
 }
 
-fn build_rtc(start: Instant) -> Rtc {
+/// Whether the offer's media sections are what `mode` allows. A file session is a data
+/// channel and nothing else (no camera or microphone rides along with a file transfer); a
+/// live session must bring video, and a data-channel-only offer is not one.
+fn offer_matches_mode(sdp: &str, mode: RtcMode) -> bool {
+    let (mut media, mut video, mut application) = (0, 0, 0);
+    for line in sdp.lines() {
+        let Some(m) = line.trim().strip_prefix("m=") else { continue };
+        match m.split_whitespace().next().unwrap_or_default() {
+            "application" => application += 1,
+            "video" => {
+                video += 1;
+                media += 1;
+            }
+            _ => media += 1,
+        }
+    }
+    match mode {
+        RtcMode::Live => video >= 1,
+        RtcMode::File => application == 1 && media == 0,
+    }
+}
+
+fn build_rtc(start: Instant, mode: RtcMode) -> Rtc {
     let mut cfg = RtcConfig::new()
         .set_crypto_provider(Arc::new(str0m_purecrypto::default_provider()))
         .clear_codecs()
         .set_stats_interval(None);
+    if mode == RtcMode::File {
+        // No codecs: only the SCTP association (data channels) is negotiated.
+        return cfg.build(start);
+    }
     // H.264 first: str0m answers with the first local codec the offer also has, and with
     // VP8 configured first it picked VP8 even when Chrome preferred H.264 (spike finding).
     // Android phones usually have a hardware H.264 encoder, which costs them less battery.
@@ -328,15 +386,22 @@ struct Udp {
     data: Vec<u8>,
 }
 
+/// What the session task is started with, besides the `Rtc` and its sockets.
+struct RunSetup {
+    opts: RtcOptions,
+    mode: RtcMode,
+    start: Instant,
+    limits: CandidateLimits,
+}
+
 async fn run(
     mut rtc: Rtc,
     sockets: Vec<(SocketAddr, Arc<UdpSocket>)>,
-    opts: RtcOptions,
-    start: Instant,
-    mut limits: CandidateLimits,
+    setup: RunSetup,
     mut cmd_rx: mpsc::UnboundedReceiver<RtcCommand>,
     ev_tx: mpsc::Sender<RtcEvent>,
 ) {
+    let RunSetup { opts, mode, start, mut limits } = setup;
     let (udp_tx, mut udp_rx) = mpsc::channel::<Udp>(1024);
     let readers: Vec<_> = sockets.iter().map(|(local, s)| spawn_reader(*local, s.clone(), udp_tx.clone())).collect();
     drop(udp_tx);
@@ -349,17 +414,43 @@ async fn run(
         next_remb: start,
         discontinuity: false,
         peer_closed: false,
+        file_channel: None,
+        outbox: std::collections::VecDeque::new(),
+        pending_text: std::collections::VecDeque::new(),
         ignored: 0,
         frames: 0,
         dropped: 0,
         plis: 0,
     };
-    let close = loop {
+    let close = 'main: loop {
+        // 0. File sessions: hand over what the data channel delivered, waiting for the
+        //    consumer if it is behind. Nothing is read from the network meanwhile, which is
+        //    what slows the phone down; commands are still served, so a stop is never stuck.
+        while let Some(ev) = st.outbox.pop_front() {
+            tokio::select! {
+                biased;
+                cmd = cmd_rx.recv() => {
+                    st.outbox.push_front(ev);
+                    match cmd {
+                        Some(RtcCommand::Stop) | None => break 'main RtcClose::Stopped,
+                        Some(cmd) => handle_command(&mut rtc, cmd, &mut st, &mut limits),
+                    }
+                }
+                permit = ev_tx.reserve() => match permit {
+                    Ok(permit) => permit.send(ev),
+                    Err(_) => break 'main RtcClose::Stopped,
+                },
+            }
+        }
+        flush_channel_text(&mut rtc, &mut st);
         // 1. Drain everything str0m wants to do.
         let timeout = match drain(&mut rtc, &sockets, &mut st, &ev_tx) {
             Ok(t) => t,
             Err(close) => break close,
         };
+        if !st.outbox.is_empty() && !st.peer_closed {
+            continue;
+        }
         if st.peer_closed {
             // The close_notify reply went out in the drain above.
             break RtcClose::PeerClosed;
@@ -369,7 +460,7 @@ async fn run(
         if st.connected_at.is_none() && now.duration_since(start) >= opts.ice_timeout {
             break RtcClose::Failed { reason: StopReason::IceFailed, detail: "no ICE connection".into() };
         }
-        if let Some(c) = st.connected_at {
+        if let (Some(c), RtcMode::Live) = (st.connected_at, mode) {
             let since = st.last_media.unwrap_or(c);
             if now.duration_since(since) >= opts.media_timeout {
                 break RtcClose::Failed { reason: StopReason::Timeout, detail: "no video from the phone".into() };
@@ -419,20 +510,11 @@ async fn run(
                 None => break RtcClose::Failed { reason: StopReason::Error, detail: "network sockets closed".into() },
             },
             cmd = cmd_rx.recv() => match cmd {
-                Some(RtcCommand::RemoteCandidate(c)) => {
-                    add_remote_candidate(&mut rtc, &c, &mut limits);
-                    Ok(())
-                }
-                Some(RtcCommand::RequestKeyframe) => {
-                    st.pli.want();
-                    Ok(())
-                }
-                Some(RtcCommand::FramesDropped) => {
-                    st.discontinuity = true;
-                    st.pli.want();
-                    Ok(())
-                }
                 Some(RtcCommand::Stop) | None => break RtcClose::Stopped,
+                Some(cmd) => {
+                    handle_command(&mut rtc, cmd, &mut st, &mut limits);
+                    Ok(())
+                }
             },
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {
                 rtc.handle_input(Input::Timeout(Instant::now())).map_err(|e| e.to_string())
@@ -447,6 +529,9 @@ async fn run(
         }
     };
 
+    // Last words for the phone (a file session's `looping` / `error`) go out before the close.
+    flush_channel_text(&mut rtc, &mut st);
+    let _ = drain(&mut rtc, &sockets, &mut st, &ev_tx);
     rtc.disconnect();
     // Flush whatever the disconnect produced (DTLS close alert) best effort.
     let _ = drain(&mut rtc, &sockets, &mut st, &ev_tx);
@@ -478,11 +563,56 @@ struct LoopState {
     discontinuity: bool,
     /// The phone closed the connection (str0m's `Event::Closed`).
     peer_closed: bool,
+    /// The phone's file data channel, once open.
+    file_channel: Option<ChannelId>,
+    /// Data channel events not yet handed to the consumer (see step 0 of the loop).
+    outbox: std::collections::VecDeque<RtcEvent>,
+    /// Text for the phone that the channel could not take yet.
+    pending_text: std::collections::VecDeque<String>,
     /// Datagrams that were not for this session or that str0m rejected.
     ignored: u64,
     frames: u64,
     dropped: u64,
     plis: u64,
+}
+
+/// Every command but `Stop`, which the callers handle (it ends the loop).
+fn handle_command(rtc: &mut Rtc, cmd: RtcCommand, st: &mut LoopState, limits: &mut CandidateLimits) {
+    match cmd {
+        RtcCommand::RemoteCandidate(c) => add_remote_candidate(rtc, &c, limits),
+        RtcCommand::RequestKeyframe => st.pli.want(),
+        RtcCommand::FramesDropped => {
+            st.discontinuity = true;
+            st.pli.want();
+        }
+        RtcCommand::ChannelText(text) => {
+            // Bounded: these are a handful of short status lines per second at most.
+            if st.pending_text.len() < 64 {
+                st.pending_text.push_back(text);
+            }
+            flush_channel_text(rtc, st);
+        }
+        RtcCommand::Stop => {}
+    }
+}
+
+/// Write queued text to the file data channel, in order, as far as its send buffer allows.
+fn flush_channel_text(rtc: &mut Rtc, st: &mut LoopState) {
+    let Some(id) = st.file_channel else { return };
+    while let Some(text) = st.pending_text.front() {
+        let Some(mut channel) = rtc.channel(id) else { return };
+        match channel.write(false, text.as_bytes()) {
+            Ok(true) => {
+                st.pending_text.pop_front();
+            }
+            Ok(false) => return, // send buffer full: retried on the next pass
+            Err(e) => {
+                log::debug!("phone stream: could not write to the data channel: {e}");
+                st.pending_text.clear();
+                return;
+            }
+        }
+    }
 }
 
 /// Poll str0m until it asks to be woken at a time. Transmits go out immediately.
@@ -523,6 +653,26 @@ fn drain(
                         st.connected_at = Some(Instant::now());
                         let _ = ev_tx.try_send(RtcEvent::IceConnected);
                     }
+                }
+                Event::ChannelOpen(id, label) => {
+                    if label == DATA_CHANNEL_LABEL && st.file_channel.is_none() {
+                        st.file_channel = Some(id);
+                        st.outbox.push_back(RtcEvent::ChannelOpen);
+                    } else {
+                        log::debug!("phone stream: ignoring a data channel that is not the file channel");
+                    }
+                }
+                Event::ChannelData(d) if Some(d.id) == st.file_channel => {
+                    st.outbox.push_back(if d.binary {
+                        RtcEvent::ChannelBinary(d.data)
+                    } else {
+                        RtcEvent::ChannelText(String::from_utf8_lossy(&d.data).into_owned())
+                    });
+                }
+                Event::ChannelClose(id) if Some(id) == st.file_channel => {
+                    st.file_channel = None;
+                    st.pending_text.clear();
+                    st.outbox.push_back(RtcEvent::ChannelClosed);
                 }
                 Event::MediaAdded(m) if m.kind == MediaKind::Video && st.video_mid.is_none() => {
                     st.video_mid = Some(m.mid);
@@ -837,7 +987,7 @@ mod tests {
         assert!(!filtered.contains("127.0.0.1 50001") && !filtered.contains(".local"));
         assert!(filtered.contains("a=fingerprint:") && filtered.ends_with("\r\n"), "everything else is untouched");
         // And the trickle path shares the budget.
-        let mut rtc = build_rtc(Instant::now());
+        let mut rtc = build_rtc(Instant::now(), RtcMode::Live);
         let mut limits = CandidateLimits { used: kept, allow_loopback: false };
         add_remote_candidate(&mut rtc, "candidate:1 1 udp 2122260223 192.168.9.9 50000 typ host", &mut limits);
         assert_eq!(limits.used, MAX_REMOTE_CANDIDATES);
@@ -852,7 +1002,7 @@ mod tests {
     fn offer_errors_do_not_quote_the_sdp() {
         let t = LocalTransport { sockets: vec![], candidates: vec![] };
         let secret = "v=0\r\no=- 1 2 IN IP4 203.0.113.77\r\nthis is not sdp 203.0.113.77\r\n";
-        let err = accept_offer(t, secret, RtcOptions::default()).expect_err("garbage offer");
+        let err = accept_offer(t, secret, RtcOptions::default(), RtcMode::Live).expect_err("garbage offer");
         let text = format!("{err:#}");
         assert_eq!(text, "the phone's offer could not be read");
     }
@@ -905,7 +1055,7 @@ mod tests {
         // A Chrome-like offer listing VP8 *before* H.264 must still get H.264, and the answer
         // must keep transport-cc (TWCC) and goog-remb so the phone can ramp its bitrate.
         let offer = chrome_like_offer();
-        let mut rtc = build_rtc(Instant::now());
+        let mut rtc = build_rtc(Instant::now(), RtcMode::Live);
         rtc.add_local_candidate(Candidate::host("192.0.2.10:50000".parse().unwrap(), "udp").unwrap());
         let answer = rtc
             .sdp_api()
@@ -924,6 +1074,69 @@ mod tests {
         assert!(answer.contains("transport-wide-cc"), "{answer}");
         assert!(answer.contains("a=candidate:"), "candidates embedded in the answer");
         assert!(answer.len() < MAX_SDP_BYTES);
+    }
+
+    /// What Chrome offers for `pc.createDataChannel(…)` with no tracks.
+    fn datachannel_offer() -> String {
+        [
+            "v=0",
+            "o=- 4611731400430051337 2 IN IP4 127.0.0.1",
+            "s=-",
+            "t=0 0",
+            "a=group:BUNDLE 0",
+            "a=extmap-allow-mixed",
+            "a=msid-semantic: WMS",
+            "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+            "c=IN IP4 0.0.0.0",
+            "a=ice-ufrag:abcd",
+            "a=ice-pwd:abcdefghijklmnopqrstuvwx",
+            "a=ice-options:trickle",
+            "a=fingerprint:sha-256 7B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08",
+            "a=setup:actpass",
+            "a=mid:0",
+            "a=sctp-port:5000",
+            "a=max-message-size:262144",
+            "",
+        ]
+        .join("\r\n")
+    }
+
+    #[test]
+    fn the_offer_must_fit_the_kind_of_session() {
+        let video = chrome_like_offer();
+        let data = datachannel_offer();
+        let both = format!("{video}{}", data.split_once("m=application").map(|(_, rest)| format!("m=application{rest}")).unwrap());
+        assert!(offer_matches_mode(&video, RtcMode::Live));
+        assert!(offer_matches_mode(&both, RtcMode::Live), "a live offer may bring a data channel along");
+        assert!(!offer_matches_mode(&data, RtcMode::Live), "a data-channel-only offer is not a camera");
+        assert!(offer_matches_mode(&data, RtcMode::File));
+        assert!(!offer_matches_mode(&video, RtcMode::File), "no media in a file session");
+        assert!(!offer_matches_mode(&both, RtcMode::File));
+        assert!(!offer_matches_mode("v=0\r\n", RtcMode::File) && !offer_matches_mode("v=0\r\n", RtcMode::Live));
+        let audio_only = video.replace("m=video", "m=audio");
+        assert!(!offer_matches_mode(&audio_only, RtcMode::Live) && !offer_matches_mode(&audio_only, RtcMode::File));
+
+        // …and `accept_offer` refuses before it builds anything.
+        for (offer, mode) in [(&data, RtcMode::Live), (&video, RtcMode::File)] {
+            let t = LocalTransport { sockets: vec![], candidates: vec![] };
+            let err = accept_offer(t, offer, RtcOptions::default(), mode).expect_err("mismatch");
+            assert_eq!(format!("{err:#}"), "the phone's offer does not match the request");
+        }
+    }
+
+    #[test]
+    fn a_file_session_answers_a_datachannel_only_offer() {
+        let mut rtc = build_rtc(Instant::now(), RtcMode::File);
+        rtc.add_local_candidate(Candidate::host("192.0.2.10:50000".parse().unwrap(), "udp").unwrap());
+        let answer = rtc
+            .sdp_api()
+            .accept_offer(SdpOffer::from_sdp_string(&datachannel_offer()).unwrap())
+            .unwrap()
+            .to_sdp_string();
+        assert!(answer.contains("m=application") && answer.contains("webrtc-datachannel"), "{answer}");
+        assert!(answer.contains("a=sctp-port:"), "{answer}");
+        assert!(!answer.contains("m=video") && !answer.contains("m=audio"), "{answer}");
+        assert!(answer.contains("a=candidate:"), "candidates embedded in the answer");
     }
 
     fn chrome_like_offer() -> String {
