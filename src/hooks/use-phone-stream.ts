@@ -273,10 +273,57 @@ export function fileOutcome(next: PhoneStreamStatus, before: PhoneStreamStatus):
   return result;
 }
 
+/**
+ * A loaded video as the backend describes it: what `load_video_file` and
+ * `stream_upload_and_load_video` return for a file picked on the desktop.
+ */
+export interface LoadedVideo {
+  id: string;
+  filename: string;
+  duration: number;
+  width: number;
+  height: number;
+  fps: number;
+  format: string;
+}
+
+/** `remote://phone-video-loaded`: a video from the phone was loaded and started. */
+export interface PhoneVideoLoaded {
+  video: LoadedVideo;
+  playing: boolean;
+}
+
+/** The payload of `remote://phone-video-loaded`, or `null` when it is not one. */
+export function parsePhoneVideoLoaded(payload: unknown): PhoneVideoLoaded | null {
+  const p = payload as { video?: Partial<LoadedVideo> | null; playing?: unknown } | null;
+  const v = p?.video;
+  if (!v || typeof v.filename !== "string") return null;
+  const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0);
+  return {
+    video: {
+      id: typeof v.id === "string" && v.id ? v.id : `phone-${Date.now()}`,
+      filename: v.filename,
+      duration: num(v.duration),
+      width: num(v.width),
+      height: num(v.height),
+      fps: num(v.fps),
+      format: typeof v.format === "string" ? v.format : "",
+    },
+    playing: p?.playing !== false,
+  };
+}
+
 export interface PhoneStreamCallbacks {
   /** The phone ended a session that was up. `mode` says which kind. */
   onStoppedByPhone?: (mode: PhoneStreamMode) => void;
   onStopFailed?: () => void;
+  /**
+   * The backend loaded a video from the phone and started looping it. Arrives before the
+   * status turns `looping` (which is what `onFileLooping` reports).
+   */
+  onPhoneVideoLoaded?: (video: LoadedVideo, playing: boolean) => void;
+  /** The phone stopped or started the loop of the loaded video ("Stop loop" / "Play loop"). */
+  onLoopChanged?: (playing: boolean) => void;
   /** A video from the phone is loaded and looping on the camera. */
   onFileLooping?: (file: PhoneStreamFile, deviceName: string | null) => void;
   /** A video from the phone could not be received or loaded. */
@@ -347,6 +394,13 @@ export function usePhoneStream(options: PhoneStreamCallbacks = {}) {
         listen<PhoneStreamStatus>("remote://stream-status", (e) => applyStatus(e.payload)),
         listen("app://shown", () => void refresh()),
         listen("remote://stream-stop-failed", () => callbacks.current.onStopFailed?.()),
+        listen<unknown>("remote://phone-video-loaded", (e) => {
+          const loaded = parsePhoneVideoLoaded(e.payload);
+          if (loaded) callbacks.current.onPhoneVideoLoaded?.(loaded.video, loaded.playing);
+        }),
+        listen<{ playing?: unknown } | null>("remote://loop-changed", (e) => {
+          if (typeof e.payload?.playing === "boolean") callbacks.current.onLoopChanged?.(e.payload.playing);
+        }),
       ]);
       if (cancelled) {
         subs.forEach((u) => u());

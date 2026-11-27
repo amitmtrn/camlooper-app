@@ -6,7 +6,9 @@
 //    pieces <= 64 KiB, at most ~4 MiB buffered, byte-identical on arrival, progress UI,
 //    "Preparing loop…", "Looping on your computer ✓", then Stop loop / Play loop
 //  - loop_control status is asked once the computer is online
-//  - over 300 MiB / not a video: refused on the phone, nothing sent
+//  - over 300 MiB / not a video / a 0-byte file: refused on the phone, nothing sent
+//  - a dismissed picker (change with no file) changes nothing
+//  - a File whose type is "" (Android, .mov / .mkv) is sent with the type of its extension
 //  - declined / too_large / unsupported rejections, an error from the computer mid-transfer
 //  - Cancel sends stream_stop{reason:user}
 //  - a file sent right after a camera stream: "busy" is retried, then it goes through
@@ -173,6 +175,19 @@ const text = (page, id) => page.textContent("#" + id);
 const visible = (page, id) => page.evaluate((id) => { const el = document.getElementById(id); return !!el && el.getClientRects().length > 0; }, id);
 const must = (cond, msg) => { if (!cond) throw new Error(msg); };
 const pick = async (page, file) => { await page.setInputFiles("#fileInput", file); };
+// What a picker hands over, built in the page: the name, type and size are exactly these,
+// whatever this system's MIME database would say about the extension. `null`: dismissed.
+const pickFake = (page, spec) => page.evaluate((spec) => {
+  const input = document.getElementById("fileInput"), dt = new DataTransfer();
+  if (spec) {
+    const bytes = new Uint8Array(spec.size);
+    for (let i = 0; i < bytes.length; i += 65536) crypto.getRandomValues(bytes.subarray(i, Math.min(bytes.length, i + 65536)));
+    dt.items.add(new File([bytes], spec.name, { type: spec.type }));
+  }
+  input.files = dt.files;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  return input.files.length ? { name: input.files[0].name, type: input.files[0].type, size: input.files[0].size } : null;
+}, spec);
 const settled = (page, re) => page.waitForFunction((src) => new RegExp(src).test(document.getElementById("fileMsg").textContent), re.source, { timeout: 60000 });
 
 const results = [];
@@ -226,7 +241,7 @@ results.push(await scenario("send a video: request, datachannel-only offer, flow
   must(ctl.frames.slice(-2).join() === "loop_control:stop,loop_control:start", "loop_control not sent: " + ctl.frames);
 }));
 
-results.push(await scenario("over 300 MiB, an empty pick and a non-video are refused on the phone", {}, async (page, ctl) => {
+results.push(await scenario("over 300 MiB, a non-video and a 0-byte file are refused on the phone; a dismissed picker keeps the choice", {}, async (page, ctl) => {
   await pick(page, HUGE);
   must(/301\.0 MB.*300 MB/.test(await text(page, "fileMsg")), "no too-large message: " + (await text(page, "fileMsg")));
   must(!(await visible(page, "btnSend")), "Send offered for a file that is too large");
@@ -234,10 +249,43 @@ results.push(await scenario("over 300 MiB, an empty pick and a non-video are ref
   await pick(page, TEXT);
   must(/doesn't look like a video/.test(await text(page, "fileMsg")), "no not-a-video message");
   must(!(await visible(page, "btnSend")), "Send offered for a text file");
+  // A file the picker reports as 0 bytes (a WebView that cannot size a content:// URI).
+  const empty = await pickFake(page, { name: "VID_0001.mp4", type: "video/mp4", size: 0 });
+  must(empty && empty.size === 0, "the fake empty file is not empty");
+  must(/This file is empty/.test(await text(page, "fileMsg")), "no empty-file message: " + (await text(page, "fileMsg")));
+  must(!(await visible(page, "btnSend")), "Send offered for an empty file");
+  must((await text(page, "fileName")) === "VID_0001.mp4" && (await text(page, "fileSize")) === "0.0 MB", "empty file not shown: " + (await text(page, "fileSize")));
   await pick(page, SMALL);
   must((await text(page, "fileMsg")) === "" && (await visible(page, "btnSend")), "a good file after a bad one is not accepted");
+  // The picker is opened again and dismissed: the choice stays as it was.
+  const before = await page.evaluate(() => document.getElementById("filePick").innerHTML);
+  must((await pickFake(page, null)) === null, "the dismissed pick has a file");
+  must((await page.evaluate(() => document.getElementById("filePick").innerHTML)) === before, "a dismissed picker changed the card");
+  must((await text(page, "fileName")) === "small.webm" && (await visible(page, "btnSend")), "the earlier choice was lost");
   must(!ctl.frames.some((f) => f === "stream_request"), "something was sent");
 }));
+
+results.push(await scenario("a dismissed picker with nothing chosen yet does nothing", {}, async (page, ctl) => {
+  await pickFake(page, null);
+  must(!(await visible(page, "btnSend")) && !(await visible(page, "fileInfo")), "something appeared after a dismissed picker");
+  must((await text(page, "fileMsg")) === "" && (await text(page, "btnPick")) === "Choose a video", "the card changed: " + (await text(page, "btnPick")));
+  must(!ctl.frames.some((f) => f === "stream_request"), "something was sent");
+}));
+
+for (const [name, want] of [["VID 2024.MOV", "video/quicktime"], ["clip.mkv", "video/x-matroska"]]) {
+  results.push(await scenario(`a File with an empty type is sent by its extension: ${name}`, {}, async (page, ctl) => {
+    const f = await pickFake(page, { name, type: "", size: 200 * 1024 + 7 });
+    must(f && f.type === "" && f.size === 200 * 1024 + 7, "the fake file has a type: " + JSON.stringify(f));
+    must((await text(page, "fileMsg")) === "" && (await visible(page, "btnSend")), "refused: " + (await text(page, "fileMsg")));
+    await page.click("#btnSend");
+    await settled(page, /Looping on your computer ✓/);
+    const R = await ctl.desk.evaluate(() => ({ ...window.R, pieces: undefined }));
+    const req = R.requests[0];
+    must(req.file.name === name && req.file.mime === want && req.file.size === f.size, "bad request: " + JSON.stringify(req.file));
+    must(R.meta.mime === want && R.meta.name === name && R.meta.size === f.size, "meta differs from the request: " + JSON.stringify(R.meta));
+    must(R.bytes === f.size, `received ${R.bytes} of ${f.size}`);
+  }));
+}
 
 for (const [reason, re] of [["declined", /declined the video/], ["too_large", /too large for the computer/], ["unsupported", /can't play this kind of file/], ["busy", /busy with another phone session/], ["timeout", /didn't answer in time/]]) {
   results.push(await scenario(`rejected: ${reason}`, { reject: reason }, async (page, ctl) => {

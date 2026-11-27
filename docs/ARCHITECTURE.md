@@ -260,6 +260,9 @@ protocol is in [remote-protocol.md](remote-protocol.md).
   `remote_stream_accept` refuses other windows and anything under 800 ms after the request.
 - **Dev:** `cargo run --example phone_stream_cli -- --code 123456 --null` runs the whole path
   headless; `cargo test --test phone_stream_loopback` runs it against a simulated phone.
+  The CLI also takes a phone's "Loop a video": the file is received by `file_receive` and
+  looped by the app's own engine through `loop_engine::EngineLoop` — the same `LoopPlayer`
+  the app installs, with a different `LoopHost` (which camera, who is told).
 - **Not done yet:** the offer is not authenticated end to end — a compromised relay could
   inject video after the user accepts. See "Known limitation / later" in
   [remote-protocol.md](remote-protocol.md) for the proposed design.

@@ -9,7 +9,7 @@
      on *.trycloudflare.com ('self' does not cover wss: in every browser, hence the explicit host).
      script-src hash = the inline script element; dev/update-csp.mjs recomputes it, dev/selftest.mjs checks it.
      frame-ancestors is ignored in <meta>: production must send it (or X-Frame-Options) as a header. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-63e665LW4BZWFCqlp5rGMQB+DpApvSCXHThBDl/zwsA='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rx68Xpg8VNlVMCBeWBQgy8DPALtEG5lOhccd7Qbctqg='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex">
 <title>CamLooper Remote</title>
 <style>
@@ -1423,21 +1423,23 @@ function fileMeta(file) {
     name = chars.slice(0, 120 - tail.length).join("").trim() + tail.join("");
   }
   if (!name) name = "video";
-  const type = String(file.type || "").slice(0, 100);
+  // Android often reports no type at all (or a generic one) for .mov / .mkv: then the
+  // extension decides, and the computer is told the type that goes with it.
+  const type = String(file.type || "").trim().toLowerCase().slice(0, 100);
   const known = own(FILE_EXT_MIME, ext);
-  const isVideo = /^video\//i.test(type);
-  return { ok: isVideo || !!known, meta: { name, size: file.size, mime: isVideo ? type : known || type } };
+  const isVideo = /^video\/./.test(type);
+  return { ok: isVideo || !!known, meta: { name, size: Number(file.size) || 0, mime: isVideo ? type : known || type } };
 }
 
 $("btnPick").onclick = () => { const input = $("fileInput"); input.value = ""; input.click(); };
 $("fileInput").onchange = () => {
   const f = $("fileInput").files && $("fileInput").files[0];
   if (!f) return; // picker dismissed: keep what was chosen before
-  const m = fileMeta(f);
+  const m = fileMeta(f), size = m.meta.size;
   let err = "";
   if (!m.ok) err = STRINGS.fileNotVideo;
-  else if (!(f.size > 0)) err = STRINGS.fileEmpty;
-  else if (f.size > MAX_FILE_BYTES) err = STRINGS.fileTooLarge(mb(f.size));
+  else if (!(size > 0)) err = STRINGS.fileEmpty; // also a WebView that hands over a file it cannot size
+  else if (size > MAX_FILE_BYTES) err = STRINGS.fileTooLarge(mb(size));
   picked = { file: f, meta: m.meta, err };
   renderFile();
   setMsg("fileMsg", err, "err");
@@ -1452,7 +1454,7 @@ function renderFile() {
   $("btnStart").disabled = !!s; // one session at a time
   show("fileInfo", !!picked);
   $("fileName").textContent = picked ? picked.meta.name : "";
-  $("fileSize").textContent = picked ? STRINGS.fileSize(mb(picked.file.size)) : "";
+  $("fileSize").textContent = picked ? STRINGS.fileSize(mb(picked.meta.size)) : "";
   show("btnSend", !!picked && !picked.err);
   $("btnPick").textContent = picked ? STRINGS.chooseOther : STRINGS.chooseVideo;
   $("btnPick").className = "block " + (picked && !picked.err ? "link" : "secondary");

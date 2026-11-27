@@ -90,7 +90,7 @@ enable raises a single UAC prompt to register the driver; that is by design.
 <!-- Newest entries first. -->
 
 ### Loop a video sent from the phone (remote v2, phase 3)
-_Added 2026-11-27 · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, `src-tauri/src/remote/stream/`_
+_Added 2026-11-27, Video info / instant Stop-Play follow-up the same day · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, `src-tauri/src/remote/stream/`_
 
 On the phone page the "Loop a video" card sends one video file straight to the computer
 (WebRTC DataChannel, no upload to a server). The computer asks before taking it, shows the
@@ -102,12 +102,16 @@ file picked on the computer. The phone can then stop and restart that loop.
 desktop: the `stream_request` with `mode: "file"`, a datachannel-only offer, the `meta`
 message equal to the request, pieces of at most 64 KiB, at most ~4 MiB buffered, a
 byte-identical 24 MB file on arrival, the percentage / "Preparing loop…" / "Looping on your
-computer ✓" sequence, Stop loop / Play loop, the 300 MB limit and non-video files refused on
-the phone, every rejection reason, an error from the computer mid-transfer, Cancel, a video
-sent right after a camera stream (the `busy` answer is retried), and no CSP violation.
+computer ✓" sequence, Stop loop / Play loop, the 300 MB limit, non-video files and a 0-byte
+file refused on the phone, a dismissed picker changing nothing, a file whose type is empty
+(as Android reports some `.mov` / `.mkv`) sent with the type of its extension, every rejection
+reason, an error from the computer mid-transfer, Cancel, a video sent right after a camera
+stream (the `busy` answer is retried), and no CSP violation.
 `node remote-web/dev/update-csp.mjs --check` fails if the page's CSP hash is stale. The
 receiving side (storage, size limit, partial-file cleanup) is covered by `cargo test --lib`.
-What is not automated is the two real halves together, which is what the steps below are for.
+The two real halves together, without the app's window, are covered on Linux by the headless
+CLI (see "Headless CLI: loop a video from the phone" under Linux). What is left for the steps
+below is the app's own window and dialogs.
 
 **Setup:** a build of this branch on the computer with a phone already linked (see "Phone
 remote: linking with a code"); phone and computer on the same Wi-Fi; the phone page open in
@@ -149,13 +153,16 @@ camera preview showing "CamLooper Virtual Camera".
    "X MB sent · Y MB confirmed · Z MB in total" (sent runs ahead of confirmed), then
    "Preparing loop…", then green "Looping on your computer ✓". The phone's screen does not
    dim or lock during the transfer.
-6. The main window is on the Loop step with the phone's video playing (the preview moves),
-   and Advanced → Video info shows the phone's file name. The virtual camera shows the
-   phone's video, looping.
+6. The main window is on the Loop step with the phone's video playing (the preview moves).
+   Advanced → Video info shows the phone's file name, its duration, **its resolution (for
+   example `1280x720`), frame rate and format** — the same rows, with the same values, as
+   when that file is picked on the computer with "Loop an existing video". The virtual
+   camera shows the phone's video, looping.
 7. The phone card shows "Looping on your computer now", the file name and **Stop loop**.
    After Stop loop: the label becomes "Loaded on your computer, not playing", the button
-   becomes **Play loop**, and the computer's main window shows the video as stopped within a
-   second. After Play loop both go back, and the computer's preview is moving again.
+   becomes **Play loop**, and the computer's main window shows the video as stopped (the
+   preview clears, the Play button is back) at the same moment the phone's label changes —
+   no visible delay. After Play loop both go back, and the computer's preview is moving again.
 8. The computer's banner disappears; the phone says "The transfer was cancelled on the
    computer." The loop from step 6 is still the one loaded.
 9. The phone says "Cancelled." and shows the picker again; the computer's banner disappears
@@ -166,8 +173,8 @@ camera preview showing "CamLooper Virtual Camera".
     and **Stop loop**, without sending anything.
 
 **Known gotchas:**
-- The computer's Video info card shows no resolution row for a video that came from the
-  phone: the app is not told the frame size for it. Name, duration and format are shown.
+- On Windows the resolution of a video the loader cannot parse (`.webm`, `.mkv`) is an
+  estimate from the file size, exactly as it is for the same file picked on the computer.
 - With natural motion on, "Preparing loop…" can last many seconds for a long video while it
   is decoded; that is not a hang.
 - If the phone page goes to the background (switching apps, locking the screen), Android may
@@ -723,6 +730,67 @@ builds them).
 
 <!-- Newest entries first. -->
 
+### Headless CLI: loop a video from the phone (remote v2, phase 3)
+_Added 2026-11-27 · Linux · `src-tauri/examples/phone_stream_cli.rs`, `src-tauri/src/remote/stream/loop_engine.rs`, `src-tauri/src/virtual_camera.rs`_
+
+`phone_stream_cli` now also takes the phone page's "Loop a video": it receives the file with
+the app's own code into a private temp folder and loops it with the app's own loop engine
+(natural motion on, loop forever) on the device given with `--device`. This is the dev tool
+behind the Linux end-to-end check; nothing here ships.
+
+**Setup:**
+- A v4l2loopback device, e.g. `/dev/video10` as in the phase 1 entry below; `ffmpeg`, `ffplay`.
+- The phone page open (a phone on the same Wi-Fi, or desktop Chrome on
+  `node remote-web/dev/serve-phone.mjs`), showing a 6-digit code. One MP4 of a few MB on it;
+  note its checksum on the computer if you have the same file there: `sha256sum clip.mp4`.
+- In `src-tauri/`: `cargo build --example phone_stream_cli`.
+
+**Steps:**
+1. `./target/debug/examples/phone_stream_cli --code <6 digits> --device /dev/video10 --seconds 150 2>/tmp/cli.err | tee /tmp/cli.jsonl`
+2. On the phone: **Start streaming**, wait for "Live", tap **Stop**.
+3. Straight away (within 10 s): **Choose a video**, pick the MP4, **Send & loop**.
+4. `ffplay -f v4l2 /dev/video10` for longer than the clip lasts.
+5. On the phone tap **Stop loop**, wait two seconds, tap **Play loop**.
+6. While it loops: `ls /tmp/camlooper-cli-*/phone-videos/`.
+7. Press Ctrl-C in the first terminal. Then `ls -d /tmp/camlooper-cli-* 2>/dev/null; grep -vc '^{' /tmp/cli.jsonl`.
+8. Run step 1 again with a new code, do step 2 only, and wait.
+
+**Expected:**
+- Step 2: as in the phase 1 entry (state `live`, then `idle`), followed by
+  `{"event":"live_ended","exitInSeconds":10}`. The CLI does not exit yet.
+- Step 3: `{"event":"stream_request",…,"mode":"file","file":{"mime":"video/mp4","name":"<your file>","size":<bytes>},"autoAccept":true}`,
+  then `file_progress` lines from `"received":0` up to `"received"` = `"size"`, then
+  `{"event":"file_saved","path":"/tmp/camlooper-cli-…/phone-videos/phone-<16 hex>.mp4","sha256":"…","size":…}`
+  — the `sha256` equals `sha256sum` of the original — then
+  `{"event":"video_loaded","video":{"width":…,"height":…,"fps":…,"duration":…,"filename":"<your file>",…}}`,
+  `{"event":"looping","name":"<your file>"}`, a `send` of `stream_stop(done)` and
+  `{"event":"loop_status","playing":true,"fromPhone":true,"name":"<your file>",…}`. From then
+  on one `{"event":"loop","playing":true,…}` line per second. The phone ends on
+  "Looping on your computer ✓".
+- Step 4: the phone's video plays, moving, and keeps moving past the clip's length (natural
+  motion wanders through the clip; there is no freeze at the end).
+- Step 5: `{"event":"loop_changed","playing":false}` and `{"event":"loop_status","playing":false,…}`,
+  the picture in ffplay stops moving; then `loop_changed` / `loop_status` with `"playing":true`
+  and ffplay moves again.
+- Step 6: exactly one file, `phone-<16 hex>.mp4`.
+- Step 7: `{"event":"cleanup","deleted":1,"dirRemoved":true,"loopStopped":true,…}`, then
+  `{"event":"unpaired","revoked":true}`, exit status 0. The `ls` prints nothing (the folder is
+  gone) and the `grep` prints `0`: stdout holds JSON lines only.
+- Step 8: `live_ended`, and ten seconds later `cleanup` with `"deleted":0`, `unpaired`, exit 0.
+
+**Known gotchas:**
+- stderr (`/tmp/cli.err`) also carries what the app prints on stdout ("Virtual camera
+  started…", "Natural motion: playing from N frames…"); that is deliberate, to keep stdout
+  machine-readable.
+- `--device` may be any v4l2loopback device, whatever its label. Without `--device` and
+  `--null` the CLI uses the app's own virtual camera (one polkit prompt if the module is not
+  loaded).
+- If another program (the CamLooper app itself) is writing to the same device, the picture
+  is a mix of both. Use a device of its own for the CLI.
+- A live stream started while the video loops pauses the loop and resumes it when the stream
+  ends; the CLI does not exit after such a stream.
+
+
 ### Phone camera stream into v4l2: confirm dialog, live banner, stop, tray, headless CLI (remote v2, phase 1)
 _Added 2026-11-24, dialog safety steps (15–21) and steps 22–24 added the same day · Linux · `src-tauri/src/remote/stream/`, `src-tauri/src/tray.rs`, `src-tauri/examples/phone_stream_cli.rs`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`_
 
@@ -1000,13 +1068,15 @@ a real network and eyes.
   `"frames"` keeps increasing.
 - Step 5: `Width/Height 1280/720`, `Pixel Format 'RGB3'`; ffmpeg reads 90 frames in about 3 s.
 - Step 6: state `idle` (possibly via `stopping`), **never `error`**, then
+  `{"event":"live_ended","exitInSeconds":10}` and, ten seconds later (the time the phone has
+  to send a video instead, see the phase 3 CLI entry above), a `cleanup` line and
   `{"event":"unpaired","revoked":true}`; the CLI exits with status 0 and the phone page
   returns to its unlinked screen. stderr shows
   `phone stream: receiver closed (closed by the phone)` and `phone stream: ended (user)` or
   `ended (peer_stopped)` — not `ended (error): the connection was closed`.
 - Step 7: within ~10–20 s the CLI logs `phone stream: ended (peer_offline)` or `(timeout)`,
   state goes to `idle` (or `error` if the relay had not yet reported the phone offline), and
-  the CLI exits.
+  the CLI exits ten seconds later.
 - Step 8: the first grep prints `0` for `cli-plain.err` (no SDP or IP address without
   `--debug`) and a number > 0 for `cli-debug.err`. The second grep prints `0` for every file.
 

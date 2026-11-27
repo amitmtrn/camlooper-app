@@ -43,7 +43,7 @@ import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { useWindowShown } from "./hooks/use-window-shown";
 import { useRemote, useRemoteCommands, type OpenMeetingCommand } from "./hooks/use-remote";
 import { RemoteCard, type RemoteCardHandle } from "./components/RemoteCard";
-import { usePhoneStream, cameraBusy, isolate, requestKey, type PhoneStreamFile } from "./hooks/use-phone-stream";
+import { usePhoneStream, cameraBusy, isolate, requestKey, type LoadedVideo } from "./hooks/use-phone-stream";
 import { PhoneStreamBanner, PhoneStreamDialog } from "./components/PhoneStream";
 import { useMeeting, useMeetingStatus } from "@/hooks/use-meeting";
 import { Stepper } from "./components/flow/Stepper";
@@ -283,7 +283,10 @@ function CamLooper() {
     onStoppedByPhone: (mode) =>
       toast(t(mode === 'file' ? 'phoneStream.file.cancelledByPhone' : 'phoneStream.stoppedByPhone')),
     onStopFailed: () => toast.error(t('phoneStream.stopFailed')),
-    onFileLooping: (file, deviceName) => void adoptPhoneVideo(file, deviceName),
+    onPhoneVideoLoaded: (video, playing) => void showPhoneVideo(video, playing),
+    onLoopChanged: (playing) => void followPhoneLoop(playing),
+    onFileLooping: (_file, deviceName) =>
+      toast.success(t('phoneStream.file.looping', { phone: isolate(deviceName || t('phoneStream.yourPhone')) })),
     onFileFailed: (file) =>
       toast.error(t('phoneStream.file.failed'), { description: file.error || undefined }),
   });
@@ -514,43 +517,37 @@ function CamLooper() {
   };
 
   // The phone sent a video and the backend has already loaded and started it (the same
-  // engine as a file picked here). Show it the way a desktop-picked file is shown: loaded,
-  // on the Loop step, playing. The backend only reports playback, not the clip's frame size,
-  // so that row stays out of the info card (width/height 0).
-  const adoptPhoneVideo = async (file: PhoneStreamFile, deviceName: string | null) => {
-    toast.success(t('phoneStream.file.looping', { phone: isolate(deviceName || t('phoneStream.yourPhone')) }));
-    let status: StreamStatus | null = null;
-    try {
-      status = await invoke<StreamStatus>('get_video_stream_status');
-    } catch (error) {
-      console.error('phone video: could not read the stream status:', error);
-    }
-    const duration = status?.duration ?? 0;
-    const fps = status?.target_fps ?? 0;
+  // engine as a file picked here) and says so with `remote://phone-video-loaded`, carrying
+  // the same VideoInfo a desktop-side load returns. Show it the way a desktop-picked file is
+  // shown: loaded, on the Loop step, playing.
+  const showPhoneVideo = async (video: LoadedVideo, playing: boolean) => {
     setSelectedVideo(null);
-    setVideoInfo({
-      id: `phone-${Date.now()}`,
-      filename: file.name,
-      duration,
-      width: 0,
-      height: 0,
-      fps,
-      format: /\.([a-z0-9]{1,5})$/i.exec(file.name)?.[1]?.toLowerCase() ?? '',
-    });
+    setVideoInfo(video);
     setVideoMetadata({
-      name: file.name,
-      duration: `${Math.floor(duration / 60)}:${Math.floor(duration % 60).toString().padStart(2, '0')}`,
-      dimensions: '',
-      fps: fps > 0 ? `${Math.round(fps)}fps` : '',
+      name: video.filename,
+      duration: `${Math.floor(video.duration / 60)}:${Math.floor(video.duration % 60).toString().padStart(2, '0')}`,
+      dimensions: video.width > 0 && video.height > 0 ? `${video.width}x${video.height}` : '',
+      fps: video.fps > 0 ? `${Math.round(video.fps)}fps` : '',
     });
     setUploadError(null);
     setIsLoopingComplete(false);
     // Not out from under a recording that is running.
     if (!isLiveRecording) setStep('loop');
-    // Still buffering for natural motion: the status poll below picks playback up when it starts.
-    if (status?.is_playing) {
-      setIsPlaying(true);
+    setIsPlaying(playing);
+    if (playing) await startFrameReceiving();
+  };
+
+  // "Stop loop" / "Play loop" on the phone (`remote://loop-changed`): the backend has
+  // already done it; the controls here follow at once instead of at the next status poll.
+  const followPhoneLoop = async (playing: boolean) => {
+    if (!videoInfo) return;
+    setIsPlaying(playing);
+    if (playing) {
+      setIsLoopingComplete(false);
       await startFrameReceiving();
+    } else {
+      frameHolder.current.stop();
+      setCurrentFrame(null);
     }
   };
 
@@ -1850,7 +1847,7 @@ function CamLooper() {
                         <span className="text-muted-foreground">{t('advanced.videoDuration')}</span>
                         <span>{Math.floor(videoInfo.duration / 60)}:{Math.floor(videoInfo.duration % 60).toString().padStart(2, '0')}</span>
                       </div>
-                      {/* Unknown for a video the phone sent (see adoptPhoneVideo). */}
+                      {/* Left out when the backend could not tell (a payload without a frame size). */}
                       {videoInfo.width > 0 && videoInfo.height > 0 && (
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">{t('advanced.videoResolution')}</span>
