@@ -124,8 +124,6 @@ public class MainActivity extends Activity {
                 Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
                 pick.addCategory(Intent.CATEGORY_OPENABLE);
                 pick.setType(pickerMimeType(params));
-                pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
-                        params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
                 try {
                     startActivityForResult(Intent.createChooser(pick, getString(R.string.pick_video)), REQ_FILE);
                 } catch (ActivityNotFoundException e) {
@@ -225,13 +223,12 @@ public class MainActivity extends Activity {
         if (cb == null) return;
         Uri[] result = null;
         if (resultCode == RESULT_OK && data != null) {
+            // Single pick (the page never asks for multiple). Only content:// from the picker is
+            // passed on: a hostile picker returning file:// could otherwise expose app-private files.
+            Uri u = data.getData();
             ClipData clip = data.getClipData();
-            if (clip != null && clip.getItemCount() > 0) {
-                result = new Uri[clip.getItemCount()];
-                for (int i = 0; i < clip.getItemCount(); i++) result[i] = clip.getItemAt(i).getUri();
-            } else if (data.getData() != null) {
-                result = new Uri[]{data.getData()};
-            }
+            if (u == null && clip != null && clip.getItemCount() > 0) u = clip.getItemAt(0).getUri();
+            if (u != null && "content".equals(u.getScheme())) result = new Uri[]{u};
         }
         cb.onReceiveValue(result); // null = cancelled; the page must handle "no file picked"
     }
