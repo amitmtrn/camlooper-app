@@ -24,7 +24,9 @@ use futures_util::FutureExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, watch};
 
-use super::file_receive::{self, reply, FileDeps, PartFile, TextStep, Transfer};
+use super::file_receive::{
+    self, reply, FileDeps, PartFile, PhoneContainer, PlayError, PlayRequest, Played, Sniff, TextStep, Transfer,
+};
 use super::media::{FrameOut, StreamWriter};
 use super::rtc::{self, EncodedFrame, RtcClose, RtcCommand, RtcEvent, RtcMode, RtcOptions};
 use super::signal::{FileOffer, StopReason, MAX_REMOTE_CANDIDATES};
@@ -53,7 +55,7 @@ pub struct CameraTarget {
 /// Tells a running [`CameraControl::acquire`] that its session is over. The acquire is still
 /// never dropped half way; it is asked to come back early (give up a system prompt it is
 /// waiting in) so the camera can be handed back sooner.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Cancel(watch::Receiver<bool>);
 
 /// The session's end of a [`Cancel`].
@@ -406,11 +408,14 @@ const FILE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(3);
 const FILE_LINGER: Duration = Duration::from_millis(500);
 const SAVE_FAILED: &str = "The video could not be saved on the computer.";
 const PLAY_FAILED: &str = "The video could not be played on the computer.";
+const PLAY_TIMED_OUT: &str = "Preparing the video on the computer took too long.";
+const NOT_STARTED: &str = "The video was loaded on the computer, but playback could not be started.";
 
 /// How the receiving part of a file session ended.
 enum Received {
-    /// Every byte is in the `.part` file and `end` was seen.
-    Complete(PartFile),
+    /// Every byte is in the `.part` file and `end` was seen; it is a video, to be stored
+    /// under this extension.
+    Complete(PartFile, PhoneContainer, &'static str),
     /// A protocol violation, a stall or a disk error: tell the phone, then end as an error.
     Failed(String),
     /// Stopped, or the connection ended: nothing more to say on the data channel.
@@ -420,13 +425,29 @@ enum Received {
 async fn run_file_session(
     deps: Arc<SessionDeps>,
     offer: FileOffer,
-    mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     events: &mpsc::UnboundedSender<SessionEvent>,
 ) -> Outcome {
     let Some(files) = deps.files.clone() else {
         return (StopReason::Error, Some("this build cannot receive a video from the phone".into()));
     };
+    let (outcome, loaded) = file_session(&deps, &files, offer, cmd_rx, events).await;
+    // On every way out: whatever is not the loaded video goes — the previous phone video
+    // after a success, the new one after a failure or a cancel, a `.part` whose delete did
+    // not go through at the time.
+    files.sweep_unused_keeping(loaded.as_deref()).await;
+    outcome
+}
 
+/// The session itself. Besides the outcome: the path the loop engine says it loaded, if it
+/// loaded the video.
+async fn file_session(
+    deps: &Arc<SessionDeps>,
+    files: &FileDeps,
+    offer: FileOffer,
+    mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
+    events: &mpsc::UnboundedSender<SessionEvent>,
+) -> (Outcome, Option<PathBuf>) {
     // --- 1. sockets, while the phone sends its offer ------------------------------------
     // Nothing here needs undoing, so unlike the camera handoff it is simply dropped on a stop.
     let (transport, sdp, candidates) = {
@@ -449,7 +470,7 @@ async fn run_file_session(
                         transport = Some(t);
                         let _ = events.send(SessionEvent::Prepared);
                     }
-                    Err(e) => return (StopReason::Error, Some(format!("{e:#}"))),
+                    Err(e) => return ((StopReason::Error, Some(format!("{e:#}"))), None),
                 },
                 cmd = cmd_rx.recv() => match cmd {
                     Some(SessionCommand::Offer(o)) => sdp = Some(o),
@@ -458,11 +479,11 @@ async fn run_file_session(
                             candidates.push(c);
                         }
                     }
-                    Some(SessionCommand::Stop(r)) => return (r, None),
-                    None => return (StopReason::Error, Some("session dropped".into())),
+                    Some(SessionCommand::Stop(r)) => return ((r, None), None),
+                    None => return ((StopReason::Error, Some("session dropped".into())), None),
                 },
                 _ = tokio::time::sleep_until(offer_deadline), if sdp.is_none() => {
-                    return (StopReason::Timeout, Some("no offer from the phone".into()));
+                    return ((StopReason::Timeout, Some("no offer from the phone".into())), None);
                 }
             }
         }
@@ -471,7 +492,7 @@ async fn run_file_session(
     // --- 2. answer: a data channel and nothing else ---------------------------------------
     let (answer, rtc_tx, mut rtc_rx) = match rtc::accept_offer(transport, &sdp, deps.rtc.clone(), RtcMode::File) {
         Ok(x) => x,
-        Err(e) => return (StopReason::Error, Some(format!("{e:#}"))),
+        Err(e) => return ((StopReason::Error, Some(format!("{e:#}"))), None),
     };
     let _ = events.send(SessionEvent::Answer(answer));
     for c in candidates {
@@ -482,7 +503,8 @@ async fn run_file_session(
     };
 
     // --- 3. receive ------------------------------------------------------------------------
-    let received = receive_file(&files, &offer, &rtc_tx, &mut rtc_rx, &mut cmd_rx, events).await;
+    let received = receive_file(files, &offer, &rtc_tx, &mut rtc_rx, &mut cmd_rx, events).await;
+    let mut loaded: Option<PathBuf> = None;
     let outcome = match received {
         Received::Ended(outcome) => outcome,
         Received::Failed(message) => {
@@ -490,34 +512,57 @@ async fn run_file_session(
             linger(&rtc_tx, &mut rtc_rx).await;
             (StopReason::Error, Some(message))
         }
-        Received::Complete(part) => match part.commit().await {
+        Received::Complete(part, container, ext) => match part.commit(ext).await {
             Err(e) => {
                 eprintln!("phone video: could not finish the file: {e}");
                 say(reply::error(SAVE_FAILED));
                 linger(&rtc_tx, &mut rtc_rx).await;
                 (StopReason::Error, Some(SAVE_FAILED.into()))
             }
-            Ok(path) => {
+            // `_hold` keeps the committed file out of anybody's sweep until this session's
+            // own, which runs once it is loaded (or not).
+            Ok((path, _hold)) => {
                 say(reply::progress(offer.size));
                 say(reply::saved());
                 let _ = events.send(SessionEvent::FileProgress { received: offer.size });
+                // A stop that is already waiting (it came with the last bytes) is obeyed
+                // before anything is loaded.
+                if let Some(reason) = queued_stop(&rtc_tx, &mut cmd_rx) {
+                    let _ = rtc_tx.send(RtcCommand::Stop);
+                    return ((reason, None), None);
+                }
                 // --- 4. hand it to the loop engine ---------------------------------------
                 let _ = events.send(SessionEvent::FileStage(FileStage::Processing));
                 say(reply::processing());
-                let (played, stopped) = play_received(&files, &offer, path, &rtc_tx, &mut rtc_rx, &mut cmd_rx).await;
-                // Whatever is not loaded now goes: the previous phone video after a
-                // success, the new one after a failure.
-                files.sweep_unused().await;
+                let request = (path, file_receive::load_name(&offer, ext), container);
+                let played = play_received(files, request, &rtc_tx, &mut rtc_rx, &mut cmd_rx).await;
                 match played {
-                    Ok(()) => {
+                    // Looping — also when a stop came while it was loading and could no
+                    // longer prevent it: what the phone, the UI and the camera show must
+                    // be the same thing, so the session ends as the success it was.
+                    PlayEnd::Played(Played::Looping { path }) => {
+                        loaded = Some(path);
                         let _ = events.send(SessionEvent::FileStage(FileStage::Looping));
                         say(reply::looping(&offer.name));
                         linger(&rtc_tx, &mut rtc_rx).await;
-                        // A stop that came while the video was loading could no longer
-                        // prevent it; the session still ends as that stop.
-                        (stopped.unwrap_or(StopReason::Done), None)
+                        (StopReason::Done, None)
                     }
-                    Err(e) => {
+                    // Loaded but not playing: the window was told (it shows the video,
+                    // stopped), the phone hears why here and gets the loop's state after.
+                    PlayEnd::Played(Played::LoadedNotPlaying { path }) => {
+                        loaded = Some(path);
+                        say(reply::error(NOT_STARTED));
+                        linger(&rtc_tx, &mut rtc_rx).await;
+                        (StopReason::Error, Some(NOT_STARTED.into()))
+                    }
+                    // Cancelled in time: nothing was loaded, the loop is as it was.
+                    PlayEnd::Stopped(reason) => (reason, None),
+                    PlayEnd::TimedOut => {
+                        say(reply::error(PLAY_TIMED_OUT));
+                        linger(&rtc_tx, &mut rtc_rx).await;
+                        (StopReason::Timeout, Some(PLAY_TIMED_OUT.into()))
+                    }
+                    PlayEnd::Failed(e) => {
                         eprintln!("phone video: could not play the received video: {e:#}");
                         say(reply::error(PLAY_FAILED));
                         linger(&rtc_tx, &mut rtc_rx).await;
@@ -528,7 +573,25 @@ async fn run_file_session(
         },
     };
     let _ = rtc_tx.send(RtcCommand::Stop);
-    outcome
+    (outcome, loaded)
+}
+
+/// A `Stop` that is already in the queue, if any; candidates on the way are passed on.
+fn queued_stop(
+    rtc_tx: &mpsc::UnboundedSender<RtcCommand>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+) -> Option<StopReason> {
+    loop {
+        match cmd_rx.try_recv() {
+            Ok(SessionCommand::Stop(reason)) => return Some(reason),
+            Ok(SessionCommand::RemoteCandidate(c)) => {
+                let _ = rtc_tx.send(RtcCommand::RemoteCandidate(c));
+            }
+            Ok(SessionCommand::Offer(_)) => {}
+            Err(mpsc::error::TryRecvError::Empty) => return None,
+            Err(mpsc::error::TryRecvError::Disconnected) => return Some(StopReason::Error),
+        }
+    }
 }
 
 /// The transfer itself: `meta`, the chunks, `end`. The partial file is deleted on every way
@@ -545,6 +608,8 @@ async fn receive_file(
     let mut part: Option<PartFile> = None;
     // The byte count last told to the phone and the UI.
     let mut reported: u64 = 0;
+    // The first bytes have been seen to be a video.
+    let mut sniffed = false;
     let mut no_commands = VecDeque::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -560,6 +625,10 @@ async fn receive_file(
                     Ok(TextStep::Started) => {
                         match files.store.create(offer).await {
                             Ok(p) => part = Some(p),
+                            Err(e) if e.kind() == std::io::ErrorKind::StorageFull => {
+                                eprintln!("phone video: not enough free disk space for {} bytes", offer.size);
+                                break Received::Failed(file_receive::NO_SPACE.into());
+                            }
                             Err(e) => {
                                 eprintln!("phone video: could not create the file: {e}");
                                 break Received::Failed(SAVE_FAILED.into());
@@ -569,7 +638,15 @@ async fn receive_file(
                         let _ = events.send(SessionEvent::FileProgress { received: 0 });
                     }
                     Ok(TextStep::Complete) => match part.take() {
-                        Some(p) => return Received::Complete(p),
+                        // The content has the last word on what the file is, also for a
+                        // file too short to have been judged while it arrived.
+                        Some(p) => match accepted_video(offer, p.sniff(true)) {
+                            Some((container, ext)) => return Received::Complete(p, container, ext),
+                            None => {
+                                part = Some(p);
+                                break Received::Failed(file_receive::NOT_A_VIDEO.into());
+                            }
+                        },
                         None => break Received::Failed(SAVE_FAILED.into()),
                     },
                     Ok(TextStep::Ignored) => {}
@@ -585,9 +662,18 @@ async fn receive_file(
                             eprintln!("phone video: could not write the file: {e}");
                             break Received::Failed(SAVE_FAILED.into());
                         }
+                        // Not a video (or not the kind that was announced): stop at the
+                        // first bytes instead of taking the other 300 MiB.
+                        if !sniffed {
+                            match part.as_ref().map(|p| p.sniff(false)) {
+                                Some(Sniff::NeedMore) => {}
+                                Some(sniff) if accepted_video(offer, sniff).is_some() => sniffed = true,
+                                _ => break Received::Failed(file_receive::NOT_A_VIDEO.into()),
+                            }
+                        }
                         if let Some(received) = progress {
                             reported = received;
-                            let _ = rtc_tx.send(RtcCommand::ChannelText(reply::progress(received)));
+                            let _ = rtc_tx.send(RtcCommand::ChannelProgress(reply::progress(received)));
                             let _ = events.send(SessionEvent::FileProgress { received });
                         }
                     }
@@ -618,7 +704,7 @@ async fn receive_file(
                 // the last chunks would otherwise never show.
                 if transfer.received() > reported {
                     reported = transfer.received();
-                    let _ = rtc_tx.send(RtcCommand::ChannelText(reply::progress(reported)));
+                    let _ = rtc_tx.send(RtcCommand::ChannelProgress(reply::progress(reported)));
                     let _ = events.send(SessionEvent::FileProgress { received: reported });
                 }
             }
@@ -630,21 +716,44 @@ async fn receive_file(
     ended
 }
 
+/// What the content must be for the file to be kept: a video ([`Sniff::Video`]) of the
+/// kind the phone announced. Returns its container and the extension it is stored under.
+fn accepted_video(offer: &FileOffer, sniff: Sniff) -> Option<(PhoneContainer, &'static str)> {
+    match sniff {
+        Sniff::Video { container, ext } => file_receive::stored_extension(offer, container, ext).map(|ext| (container, ext)),
+        Sniff::NeedMore | Sniff::NotAVideo => None,
+    }
+}
+
+/// How handing the video to the loop engine ended.
+enum PlayEnd {
+    /// It is loaded (looping, or loaded and not playing).
+    Played(Played),
+    /// A stop came in time: nothing was loaded.
+    Stopped(StopReason),
+    /// [`FileDeps::play_timeout`] passed and the engine gave up: nothing was loaded.
+    TimedOut,
+    Failed(anyhow::Error),
+}
+
 /// Load and start the received video, keeping the connection served meanwhile (loading can
 /// take seconds; the phone is waiting for `looping` on it). The load runs in its own task
-/// and is never dropped half way. Returns its result, and a stop that arrived meanwhile.
+/// and is never dropped half way: a stop — the user's Cancel, the phone's, the deadline —
+/// *asks* it to give up, and it answers whether it still could.
 async fn play_received(
     files: &FileDeps,
-    offer: &FileOffer,
-    path: PathBuf,
+    (path, display_name, container): (PathBuf, String, PhoneContainer),
     rtc_tx: &mpsc::UnboundedSender<RtcCommand>,
     rtc_rx: &mut mpsc::Receiver<RtcEvent>,
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
-) -> (Result<()>, Option<StopReason>) {
+) -> PlayEnd {
     let player = files.player.clone();
-    let name = file_receive::load_name(offer);
-    let mut play = tokio::spawn(async move { player.play_file(&path, &name).await });
+    let (cancel, cancelled) = Cancel::new();
+    let request = PlayRequest { path, display_name, container, cancel: cancelled };
+    let mut play = tokio::spawn(async move { player.play_file(request).await });
+    let deadline = tokio::time::Instant::now() + files.play_timeout;
     let mut stopped: Option<StopReason> = None;
+    let mut timed_out = false;
     let mut connection_gone = false;
     let result = loop {
         tokio::select! {
@@ -655,17 +764,36 @@ async fn play_received(
                 }
             }
             cmd = cmd_rx.recv(), if stopped.is_none() => match cmd {
-                Some(SessionCommand::Stop(r)) => stopped = Some(r),
+                Some(SessionCommand::Stop(r)) => {
+                    stopped = Some(r);
+                    cancel.cancel();
+                }
                 Some(SessionCommand::RemoteCandidate(c)) => {
                     let _ = rtc_tx.send(RtcCommand::RemoteCandidate(c));
                 }
                 Some(SessionCommand::Offer(_)) => {}
-                None => stopped = Some(StopReason::Error),
+                None => {
+                    stopped = Some(StopReason::Error);
+                    cancel.cancel();
+                }
             },
+            _ = tokio::time::sleep_until(deadline), if !timed_out => {
+                timed_out = true;
+                cancel.cancel();
+            }
         }
     };
-    let result = result.unwrap_or_else(|_| Err(anyhow!("loading the video failed unexpectedly")));
-    (result, stopped)
+    match result {
+        Ok(Ok(played)) => PlayEnd::Played(played),
+        // Cancelled by a stop; or by the deadline, when no stop asked for it first.
+        Ok(Err(PlayError::Cancelled)) => match stopped {
+            Some(reason) => PlayEnd::Stopped(reason),
+            None if timed_out => PlayEnd::TimedOut,
+            None => PlayEnd::Failed(anyhow!("loading the video was cancelled")),
+        },
+        Ok(Err(PlayError::Failed(e))) => PlayEnd::Failed(e),
+        Err(_) => PlayEnd::Failed(anyhow!("loading the video failed unexpectedly")),
+    }
 }
 
 /// Keep the connection up until the phone has everything that was said on the channel
@@ -1516,8 +1644,26 @@ mod tests {
 
     impl Desk {
         fn new(player: FakeLoop, idle_timeout: Duration) -> Desk {
+            Desk::build(player, idle_timeout, file_receive::PLAY_TIMEOUT, false)
+        }
+
+        /// `linked_data_dir`: the app knows its data directory through a symlink, so a
+        /// canonicalised path spells it differently.
+        fn build(player: FakeLoop, idle_timeout: Duration, play_timeout: Duration, linked_data_dir: bool) -> Desk {
             let app_data = tempfile::tempdir().unwrap();
-            let store = PhoneVideoStore::in_app_data(app_data.path());
+            let data_dir = if linked_data_dir {
+                let real = app_data.path().join("real");
+                std::fs::create_dir(&real).unwrap();
+                let link = app_data.path().join("link");
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&real, &link).unwrap();
+                #[cfg(not(unix))]
+                std::fs::create_dir(&link).unwrap();
+                link
+            } else {
+                app_data.path().to_path_buf()
+            };
+            let store = PhoneVideoStore::in_app_data(&data_dir);
             let player = Arc::new(player);
             let camera = ProbeCamera::new(false, Duration::ZERO);
             // An ffmpeg that does not exist: a file session must never start one.
@@ -1525,6 +1671,7 @@ mod tests {
             d.rtc.bind_ips = Some(vec![std::net::Ipv4Addr::LOCALHOST]);
             let mut files = FileDeps::new(store.clone(), player.clone());
             files.idle_timeout = idle_timeout;
+            files.play_timeout = play_timeout;
             d.files = Some(files);
             let (dtx, decisions) = mpsc::unbounded_channel();
             let (manager, out) = StreamManager::spawn_with_loop(
@@ -1570,6 +1717,23 @@ mod tests {
             st
         }
 
+        async fn wait_phase(&self, phase: FilePhase) {
+            let mut status = self.manager.subscribe();
+            tokio::time::timeout(Duration::from_secs(20), status.wait_for(|s| s.file.as_ref().is_some_and(|f| f.phase == phase)))
+                .await
+                .expect("the phase is reached in time")
+                .unwrap();
+        }
+
+        /// The `loop_status` the phone gets once a file session is over.
+        async fn loop_status(&mut self) -> (bool, Option<String>, bool) {
+            loop {
+                if let OutboundFrame::Signal(StreamSignal::LoopStatus { playing, name, from_phone, .. }) = self.next_out().await {
+                    return (playing, name, from_phone);
+                }
+            }
+        }
+
         async fn wait_received(&self, at_least: u64) {
             let mut status = self.manager.subscribe();
             tokio::time::timeout(
@@ -1595,7 +1759,7 @@ mod tests {
 
     /// Bytes that do not repeat with the chunk size, so a lost, doubled or reordered chunk
     /// changes the file.
-    fn video_bytes(len: usize) -> Vec<u8> {
+    fn noise(len: usize) -> Vec<u8> {
         let mut x: u32 = 0x1234_5678;
         (0..len)
             .map(|_| {
@@ -1605,6 +1769,15 @@ mod tests {
                 x as u8
             })
             .collect()
+    }
+
+    /// [`noise`] behind the first bytes of an MP4 (an `ftyp` box): what the receiver takes
+    /// for a video. (The loop engine is a fake here; nothing parses the rest.)
+    fn video_bytes(len: usize) -> Vec<u8> {
+        let mut data = noise(len);
+        let head = file_receive::tests::mp4_head(b"isom", 24);
+        data[..head.len()].copy_from_slice(&head);
+        data
     }
 
     fn script(name: &str, announced: usize, data: Vec<u8>) -> (Value, PhoneScript) {
@@ -1754,7 +1927,7 @@ mod tests {
         desk.wait_received(1024 * 1024).await;
         let files = desk.files();
         assert_eq!(files.len(), 1, "{files:?}");
-        assert!(files[0].ends_with(".mp4.part"), "written under a .part name: {files:?}");
+        assert!(files[0].ends_with(".part"), "written under a .part name: {files:?}");
         assert_eq!(std::fs::metadata(desk.store.dir().join(&files[0])).unwrap().len(), 1024 * 1024);
 
         match how {
@@ -1823,6 +1996,230 @@ mod tests {
             }
         }
         assert_eq!(loop_status, Some((false, false)));
+    }
+
+    /// A desktop video is looping when the phone's arrives.
+    fn desk_video_playing(desk: &Desk) {
+        *desk.player.state.lock().unwrap() =
+            file_receive::LoopState { playing: true, name: Some("desk.mp4".into()), path: Some("/videos/desk.mp4".into()) };
+    }
+
+    /// H1: Cancel while the video is being loaded cancels the load. Nothing of the phone's
+    /// video is left — not on the camera, not in the window's status, not on disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelling_while_the_video_is_loading_cancels_the_load() {
+        let data = video_bytes(200_000);
+        let (file, script) = script("clip.mp4", data.len(), data);
+        let mut desk = Desk::new(FakeLoop { play_delay: Duration::from_secs(30), ..FakeLoop::default() }, file_receive::IDLE_TIMEOUT);
+        desk_video_playing(&desk);
+        // A phone video from earlier that is no longer loaded: every exit sweeps.
+        std::fs::create_dir_all(desk.store.dir()).unwrap();
+        let stale = desk.store.dir().join("phone-00000000000000aa.mp4");
+        std::fs::write(&stale, b"older").unwrap();
+        let phone = FilePhone::start(script);
+        desk.connect("cancel-1", file, &phone).await;
+
+        desk.wait_phase(FilePhase::Processing).await;
+        let asked = Instant::now();
+        desk.manager.stop(StopReason::User).await;
+        let st = desk.ended().await;
+        assert!(asked.elapsed() < Duration::from_secs(10), "the cancel did not wait for the load");
+        assert_eq!((st.state, st.last_error, st.file), (Phase::Idle, None, None), "a cancel, not an error and not a loop");
+        // The loop is what it was, and the phone is told so.
+        assert_eq!(desk.loop_status().await, (true, Some("desk.mp4".into()), false));
+        assert_eq!(desk.player.calls(), vec!["play_file clip.mp4"]);
+        assert!(desk.player.played_bytes.lock().unwrap().is_none(), "the file was never loaded");
+        assert!(desk.files().is_empty(), "the cancelled video and the stale one are gone: {:?}", desk.files());
+        let _ = phone.ctl.send(PhoneCtl::Close);
+        let report = phone.finish().await;
+        assert!(!report.kinds().contains(&"looping"), "{:?}", report.kinds());
+    }
+
+    /// H1: when the load can no longer be prevented, the stop does not get to say "stopped":
+    /// the video loops, and the window, the phone and the disk all say so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancel_that_comes_too_late_ends_as_looping_everywhere() {
+        let data = video_bytes(200_000);
+        let (file, script) = script("clip.mp4", data.len(), data);
+        let player = FakeLoop { play_delay: Duration::from_millis(1500), ignore_cancel: true, ..FakeLoop::default() };
+        let mut desk = Desk::new(player, file_receive::IDLE_TIMEOUT);
+        desk_video_playing(&desk);
+        let phone = FilePhone::start(script);
+        desk.connect("late-1", file, &phone).await;
+
+        desk.wait_phase(FilePhase::Processing).await;
+        desk.manager.stop(StopReason::User).await;
+        let st = desk.ended().await;
+        assert_eq!((st.state, st.last_error.clone()), (Phase::Idle, None));
+        assert_eq!(st.file.map(|f| f.phase), Some(FilePhase::Looping), "the window adopts the video on this");
+        assert_eq!(desk.loop_status().await, (true, Some("clip.mp4".into()), true));
+        assert_eq!(desk.files().len(), 1, "the looping video stays on disk: {:?}", desk.files());
+        let report = phone.finish().await;
+        assert_eq!(report.kinds().last(), Some(&"looping"), "{:?}", report.kinds());
+    }
+
+    #[tokio::test]
+    async fn a_stop_that_is_already_queued_is_found_before_anything_is_loaded() {
+        let (rtc_tx, mut rtc_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        assert_eq!(queued_stop(&rtc_tx, &mut cmd_rx), None);
+        // A late candidate is passed on; the stop behind it is still found.
+        cmd_tx.send(SessionCommand::RemoteCandidate("candidate:1".into())).unwrap();
+        cmd_tx.send(SessionCommand::Stop(StopReason::User)).unwrap();
+        assert_eq!(queued_stop(&rtc_tx, &mut cmd_rx), Some(StopReason::User));
+        assert!(matches!(rtc_rx.try_recv(), Ok(RtcCommand::RemoteCandidate(c)) if c == "candidate:1"));
+        // The manager is gone: that ends the session too.
+        drop(cmd_tx);
+        assert_eq!(queued_stop(&rtc_tx, &mut cmd_rx), Some(StopReason::Error));
+    }
+
+    /// M4: a load that hangs (a system prompt nobody answers) does not keep the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_load_that_takes_too_long_is_given_up() {
+        let data = video_bytes(200_000);
+        let (file, script) = script("clip.mp4", data.len(), data);
+        let player = FakeLoop { play_delay: Duration::from_secs(120), ..FakeLoop::default() };
+        let mut desk = Desk::build(player, file_receive::IDLE_TIMEOUT, Duration::from_millis(400), false);
+        desk_video_playing(&desk);
+        let phone = FilePhone::start(script);
+        desk.connect("slow-1", file, &phone).await;
+
+        let st = desk.ended().await;
+        assert_eq!((st.state, st.last_error_code.as_deref()), (Phase::Error, Some("timeout")));
+        assert_eq!(st.last_error.as_deref(), Some("Preparing the video on the computer took too long."));
+        assert_eq!(st.file.map(|f| f.phase), Some(FilePhase::Failed));
+        assert_eq!(desk.loop_status().await, (true, Some("desk.mp4".into()), false), "the earlier loop was not touched");
+        assert!(desk.files().is_empty(), "{:?}", desk.files());
+        let report = phone.finish().await;
+        assert_eq!(report.replies.last(), Some(&json!({"t":"error","message":"Preparing the video on the computer took too long."})));
+    }
+
+    /// M3: loaded, but playback could not be started and there was nothing to go back to.
+    /// The phone is told it failed *and* that the video is loaded, not playing; it stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_video_that_loads_but_does_not_start_is_reported_as_loaded_not_playing() {
+        let data = video_bytes(200_000);
+        let (file, script) = script("clip.mp4", data.len(), data);
+        let mut desk = Desk::new(FakeLoop { not_startable: true, ..FakeLoop::default() }, file_receive::IDLE_TIMEOUT);
+        let phone = FilePhone::start(script);
+        desk.connect("idle-1", file, &phone).await;
+
+        let st = desk.ended().await;
+        let message = "The video was loaded on the computer, but playback could not be started.";
+        assert_eq!((st.state, st.last_error.as_deref()), (Phase::Error, Some(message)));
+        assert_eq!(st.file.map(|f| f.phase), Some(FilePhase::Failed));
+        assert_eq!(desk.loop_status().await, (false, Some("clip.mp4".into()), true));
+        assert_eq!(desk.files().len(), 1, "it is the loaded video, so it is kept: {:?}", desk.files());
+        let report = phone.finish().await;
+        assert_eq!(report.replies.last(), Some(&json!({"t":"error","message":message})));
+    }
+
+    /// M3: a video the engine cannot read costs the user nothing: what was looping still is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_video_that_cannot_be_played_leaves_the_earlier_loop_playing() {
+        let data = video_bytes(200_000);
+        let (file, script) = script("broken.mp4", data.len(), data);
+        let mut desk = Desk::new(FakeLoop { fail_play: true, ..FakeLoop::default() }, file_receive::IDLE_TIMEOUT);
+        desk_video_playing(&desk);
+        let phone = FilePhone::start(script);
+        desk.connect("bad-2", file, &phone).await;
+        let st = desk.ended().await;
+        assert_eq!(st.last_error.as_deref(), Some("The video could not be played on the computer."));
+        assert_eq!(desk.loop_status().await, (true, Some("desk.mp4".into()), false));
+        assert!(desk.files().is_empty());
+        let _ = phone.finish().await;
+    }
+
+    /// H2: bytes that are not a video never reach the loader, whatever they are called.
+    async fn not_a_video(name: &str, mime: &str, data: Vec<u8>) {
+        let file = json!({"name":name,"size":data.len(),"mime":mime});
+        let meta = json!({"t":"meta","name":name,"size":data.len(),"mime":mime});
+        let script = PhoneScript { meta, data, chunk: 65536, pause_at: None };
+        let mut desk = Desk::new(FakeLoop::default(), file_receive::IDLE_TIMEOUT);
+        desk_video_playing(&desk);
+        let phone = FilePhone::start(script);
+        desk.connect("fake-1", file, &phone).await;
+
+        let st = desk.ended().await;
+        assert_eq!((st.state, st.last_error.as_deref()), (Phase::Error, Some(file_receive::NOT_A_VIDEO)), "{name}");
+        assert_eq!(st.file.map(|f| f.phase), Some(FilePhase::Failed));
+        assert!(desk.player.calls().is_empty(), "the loop engine never saw it");
+        assert!(desk.files().is_empty(), "{:?}", desk.files());
+        assert_eq!(desk.loop_status().await, (true, Some("desk.mp4".into()), false));
+        let report = phone.finish().await;
+        assert_eq!(report.replies.last(), Some(&json!({"t":"error","message":file_receive::NOT_A_VIDEO})));
+        assert!(!report.kinds().contains(&"saved"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_playlist_named_mp4_is_refused_at_its_first_bytes() {
+        // What ffmpeg would follow to other files if it were left to guess the format.
+        let mut data = b"#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nfile:///etc/passwd\n#EXT-X-ENDLIST\n".to_vec();
+        data.resize(400_000, b'\n');
+        not_a_video("holiday.mp4", "video/mp4", data).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn noise_and_a_file_too_short_to_be_a_video_are_refused() {
+        not_a_video("clip.mp4", "video/mp4", noise(300_000)).await;
+        // Ten bytes: judged when `end` arrives.
+        not_a_video("clip.mp4", "video/mp4", noise(10)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_video_of_another_kind_than_announced_is_refused() {
+        // An MP4, announced as WebM.
+        not_a_video("clip.webm", "video/webm", video_bytes(200_000)).await;
+    }
+
+    /// H2 + L2: the stored extension and the load name follow the content, and the loader is
+    /// told the container it was checked to be.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_file_is_stored_and_loaded_as_what_its_content_is() {
+        // A QuickTime file that the phone calls "clip" with an unknown video type.
+        let mut data = noise(150_000);
+        let head = file_receive::tests::mp4_head(b"qt  ", 24);
+        data[..head.len()].copy_from_slice(&head);
+        let file = json!({"name":"videos/../clip","size":data.len(),"mime":"video/x-whatever"});
+        let meta = json!({"t":"meta","name":"videos/../clip","size":data.len(),"mime":"video/x-whatever"});
+        let mut desk = Desk::new(FakeLoop::default(), file_receive::IDLE_TIMEOUT);
+        let phone = FilePhone::start(PhoneScript { meta, data, chunk: 65536, pause_at: None });
+        desk.connect("qt-1", file, &phone).await;
+        let st = desk.ended().await;
+        assert_eq!(st.file.map(|f| (f.phase, f.name)), Some((FilePhase::Looping, "clip".into())), "the display name is the last component");
+        let files = desk.files();
+        assert!(files.len() == 1 && files[0].ends_with(".mov"), "{files:?}");
+        assert_eq!(desk.player.calls(), vec!["play_file clip.mov"]);
+        assert_eq!(*desk.player.played_container.lock().unwrap(), Some(PhoneContainer::IsoBmff));
+        let _ = phone.finish().await;
+    }
+
+    /// M6: the engine reports the loaded path canonicalised (the data directory is behind a
+    /// symlink). The sweep after the load must keep the looping video, and it is still
+    /// `fromPhone`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_loader_that_canonicalises_the_path_does_not_lose_the_video() {
+        let data = video_bytes(200_000);
+        let (file, script) = script("clip.mp4", data.len(), data.clone());
+        let player = FakeLoop { canonical_paths: true, ..FakeLoop::default() };
+        let mut desk = Desk::build(player, file_receive::IDLE_TIMEOUT, file_receive::PLAY_TIMEOUT, true);
+        std::fs::create_dir_all(desk.store.dir()).unwrap();
+        let older = desk.store.dir().join("phone-00000000000000aa.mp4");
+        std::fs::write(&older, b"older").unwrap();
+        let phone = FilePhone::start(script);
+        desk.connect("canon-1", file, &phone).await;
+
+        let st = desk.ended().await;
+        assert_eq!(st.file.map(|f| f.phase), Some(FilePhase::Looping));
+        let loaded = desk.player.state.lock().unwrap().path.clone().expect("loaded");
+        assert!(!loaded.starts_with(desk.store.dir()), "the engine spells the path differently: {loaded:?}");
+        assert!(loaded.exists(), "the sweep deleted the video that is looping");
+        assert_eq!(std::fs::read(&loaded).unwrap(), data);
+        assert!(!older.exists(), "the previous phone video is still swept");
+        assert_eq!(desk.files().len(), 1);
+        assert_eq!(desk.loop_status().await, (true, Some("clip.mp4".into()), true), "fromPhone survives the other spelling");
+        let _ = phone.finish().await;
     }
 
     #[tokio::test]

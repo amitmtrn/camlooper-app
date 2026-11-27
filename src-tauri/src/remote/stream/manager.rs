@@ -1,18 +1,21 @@
 //! The stream manager: runs the [`Machine`] in one task, executes its actions, and exposes a
 //! small API for the relay client (incoming frames) and the UI (decisions, stop, status).
 //! Tauri-independent; the Tauri wiring lives in `commands.rs` and `client.rs`.
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use super::file_receive::{LoopPlayer, NoLoop, PhoneVideoStore};
+use super::file_receive::{LoopPlayer, NoLoop, PhoneVideoStore, LOOP_RATE_LIMITED};
+pub use super::file_receive::{LOOP_BUSY, LOOP_CAMERA_OFF};
 use super::machine::{Action, DecisionError, Machine, StreamRequest, StreamStatus};
 use super::runner::{SessionCommand, SessionEvent, SessionKind};
 use super::signal::{
-    clean_file_name, parse_signal, parse_stop, sanitize_label, LoopAction, OutboundFrame, SignalError, StopReason, StreamSignal,
-    MAX_DEVICE_LABEL, MAX_LOOP_ERROR,
+    clean_file_name, parse_signal, parse_stop, sanitize_label, LoopAction, OutboundFrame, RejectReason, SignalError, StopReason,
+    StreamMode, StreamSignal, MAX_DEVICE_LABEL, MAX_LOOP_ERROR,
 };
 
 /// Where "may this phone stream?" goes. The app's implementation (`commands::UiDecisions`)
@@ -84,26 +87,93 @@ impl LoopDeps {
     }
 }
 
-/// `loop_status.error` when a `loop_control` came while a phone session was active.
-pub const LOOP_BUSY: &str = "busy";
+/// The phone may `stop` or `start` the loop this often; a faster one is answered with
+/// [`LOOP_RATE_LIMITED`] and not acted on. (`status` only reads.)
+pub const LOOP_ACTION_INTERVAL: Duration = Duration::from_secs(1);
+/// `loop_control` requests waiting for the worker beyond this many are dropped.
+const LOOP_QUEUE: usize = 16;
+/// Refusals of requests this desktop cannot take (`too_large`, `unsupported`) are answered
+/// at most this often; the rest are dropped unanswered. They cost nothing to provoke and
+/// would otherwise be an unmetered way to make this machine send.
+pub const MAX_REFUSALS: usize = 5;
+pub const REFUSAL_WINDOW: Duration = Duration::from_secs(10);
+
+/// At most `max` events per `window`.
+#[derive(Debug)]
+pub struct RateLimit {
+    max: usize,
+    window: Duration,
+    recent: VecDeque<Instant>,
+}
+
+impl RateLimit {
+    pub fn new(max: usize, window: Duration) -> Self {
+        Self { max, window, recent: VecDeque::new() }
+    }
+
+    /// Whether one more event is allowed at `now`; counts it if so.
+    pub fn allow(&mut self, now: Instant) -> bool {
+        while self.recent.front().is_some_and(|t| now.saturating_duration_since(*t) >= self.window) {
+            self.recent.pop_front();
+        }
+        if self.recent.len() >= self.max {
+            return false;
+        }
+        self.recent.push_back(now);
+        true
+    }
+}
 
 /// One `loop_status` to produce: after doing `action` (unless refused), or just reporting.
 struct LoopJob {
     session_id: String,
     action: Option<LoopAction>,
-    refused: bool,
+    /// Decided when the request arrived: not to be acted on, answered with this error code.
+    refusal: Option<&'static str>,
+}
+
+impl LoopJob {
+    /// Nothing to do and nothing to say but the loop's state: a later answer says the same.
+    fn only_reports(&self) -> bool {
+        self.refusal.is_none() && matches!(self.action, None | Some(LoopAction::Status))
+    }
 }
 
 /// Executes loop jobs one at a time, in order (a `stop` followed by a `start` must not
 /// overtake each other), off the manager task: the loop engine's lock can be held for
 /// seconds while a video loads.
-async fn loop_worker(mut jobs: mpsc::UnboundedReceiver<LoopJob>, deps: LoopDeps, out: mpsc::UnboundedSender<OutboundFrame>) {
-    while let Some(job) = jobs.recv().await {
-        let result = match (job.refused, job.action) {
-            (true, _) => Err(LOOP_BUSY.to_string()),
-            (false, Some(LoopAction::Stop)) => deps.player.stop().await.map_err(|e| e.to_string()),
-            (false, Some(LoopAction::Start)) => deps.player.start().await.map_err(|e| e.to_string()),
-            (false, Some(LoopAction::Status) | None) => Ok(()),
+///
+/// `session_active` is the manager's current answer to "is a phone session active or still
+/// shutting down?". It was already asked when the request arrived; the engine asks again
+/// right before it acts, because the request may have waited here meanwhile.
+async fn loop_worker(
+    mut jobs: mpsc::Receiver<LoopJob>,
+    deps: LoopDeps,
+    out: mpsc::UnboundedSender<OutboundFrame>,
+    session_active: Arc<AtomicBool>,
+) {
+    let mut batch: VecDeque<LoopJob> = VecDeque::new();
+    loop {
+        if batch.is_empty() {
+            match jobs.recv().await {
+                Some(job) => batch.push_back(job),
+                None => break,
+            }
+        }
+        while let Ok(job) = jobs.try_recv() {
+            batch.push_back(job);
+        }
+        let Some(job) = batch.pop_front() else { continue };
+        // Status requests that piled up are answered once: whatever is answered next
+        // carries the loop's state too.
+        if job.only_reports() && !batch.is_empty() {
+            continue;
+        }
+        let refused = || session_active.load(Ordering::SeqCst);
+        let result = match (job.refusal, job.action) {
+            (Some(code), _) => Err(code.to_string()),
+            (None, Some(action @ (LoopAction::Stop | LoopAction::Start))) => deps.player.control(action, &refused).await,
+            (None, Some(LoopAction::Status) | None) => Ok(()),
         };
         let state = deps.player.state().await;
         let from_phone = match (&deps.store, &state.path) {
@@ -158,9 +228,13 @@ impl StreamManager {
         let (tx, rx) = mpsc::unbounded_channel();
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = watch::channel(StreamStatus::default());
-        let (loop_tx, loop_rx) = mpsc::unbounded_channel();
-        tokio::spawn(loop_worker(loop_rx, loops, out_tx.clone()));
-        tokio::spawn(run(rx, tx.downgrade(), backend, decisions, out_tx, status_tx, loop_tx));
+        let (loop_tx, loop_rx) = mpsc::channel(LOOP_QUEUE);
+        let session_active = Arc::new(AtomicBool::new(false));
+        // Without a place to put them, videos are not accepted at all.
+        let file_sessions = loops.store.is_some();
+        tokio::spawn(loop_worker(loop_rx, loops, out_tx.clone(), session_active.clone()));
+        let wiring = Wiring { self_tx: tx.downgrade(), backend, decisions, out: out_tx, status: status_tx, loops: loop_tx, session_active, file_sessions };
+        tokio::spawn(run(rx, wiring));
         (StreamManager { tx, status: status_rx }, out_rx)
     }
 
@@ -218,16 +292,30 @@ impl StreamManager {
     }
 }
 
-async fn run(
-    mut rx: mpsc::UnboundedReceiver<Input>,
+/// What the manager task works with.
+struct Wiring {
     self_tx: mpsc::WeakUnboundedSender<Input>,
     backend: Arc<dyn SessionBackend>,
     decisions: Arc<dyn DecisionSink>,
     out: mpsc::UnboundedSender<OutboundFrame>,
     status: watch::Sender<StreamStatus>,
-    loops: mpsc::UnboundedSender<LoopJob>,
-) {
+    loops: mpsc::Sender<LoopJob>,
+    /// For the loop worker: a session is accepted, or a given-up one is still shutting down.
+    session_active: Arc<AtomicBool>,
+    /// Whether `mode: "file"` requests are taken (there is a store for the videos).
+    file_sessions: bool,
+}
+
+async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
+    let Wiring { self_tx, backend, decisions, out, status, loops, session_active, file_sessions } = wiring;
     let mut m = Machine::new();
+    let mut refusals = RateLimit::new(MAX_REFUSALS, REFUSAL_WINDOW);
+    let mut last_loop_action: Option<Instant> = None;
+    let queue = |job: LoopJob| {
+        if loops.try_send(job).is_err() {
+            log::debug!("phone stream: dropping a loop_control (too many are waiting)");
+        }
+    };
     let mut session_tx: Option<(u64, mpsc::UnboundedSender<SessionCommand>)> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -239,12 +327,17 @@ async fn run(
                 let Some(input) = input else { break };
                 match input {
                     Input::Signal(data) => match parse_signal(&data) {
+                        // This desktop has nowhere to put a video (no app data directory).
+                        Ok(StreamSignal::StreamRequest { session_id, mode: StreamMode::File, .. }) if !file_sessions => {
+                            eprintln!("phone stream: refusing a video from the phone (no place to store it)");
+                            refusal(&mut refusals, now, session_id, RejectReason::Unsupported)
+                        }
                         Ok(sig) => m.on_signal(sig, now),
                         // A request this desktop cannot take (too large, not a video):
-                        // answered at once, whatever else is going on.
+                        // answered at once, whatever else is going on — but not without end.
                         Err(SignalError::Refused { session_id, reason }) => {
                             eprintln!("phone stream: refusing a request from the phone ({reason:?})");
-                            vec![Action::Send(OutboundFrame::Signal(StreamSignal::StreamReject { session_id, reason }))]
+                            refusal(&mut refusals, now, session_id, reason)
                         }
                         Err(e) => {
                             eprintln!("phone stream: ignoring a signal from the phone ({e})");
@@ -298,6 +391,9 @@ async fn run(
             _ = tick.tick() => m.tick(now),
         };
 
+        // Before any loop job of this round is queued: what the worker sees when it asks
+        // again must be at least as new as what the machine just decided.
+        session_active.store(m.loop_refused(), Ordering::SeqCst);
         for action in actions {
             match action {
                 Action::Send(frame) => {
@@ -311,11 +407,23 @@ async fn run(
                 }
                 Action::DismissRequest(id) => decisions.dismissed(&id),
                 Action::Loop { session_id, action, refused } => {
-                    let _ = loops.send(LoopJob { session_id, action: Some(action), refused });
+                    let acts = matches!(action, LoopAction::Stop | LoopAction::Start);
+                    // `now` is taken before `select!` waits, so it can be up to a tick old; the
+                    // rate limit must measure from when this request actually arrived.
+                    let now = Instant::now();
+                    let refusal = if refused {
+                        Some(LOOP_BUSY)
+                    } else if acts && last_loop_action.is_some_and(|t| now.saturating_duration_since(t) < LOOP_ACTION_INTERVAL) {
+                        Some(LOOP_RATE_LIMITED)
+                    } else {
+                        None
+                    };
+                    if acts && refusal.is_none() {
+                        last_loop_action = Some(now);
+                    }
+                    queue(LoopJob { session_id, action: Some(action), refusal });
                 }
-                Action::ReportLoop { session_id } => {
-                    let _ = loops.send(LoopJob { session_id, action: None, refused: false });
-                }
+                Action::ReportLoop { session_id } => queue(LoopJob { session_id, action: None, refusal: None }),
                 Action::StartSession { session_id, epoch, kind } => {
                     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
                     let cmd = backend.start(&session_id, epoch, kind, ev_tx);
@@ -339,6 +447,16 @@ async fn run(
         }
         status.send_if_modified(|s| publish(s, m.status()));
     }
+}
+
+/// The answer to a request this desktop cannot take, or nothing once [`MAX_REFUSALS`] were
+/// sent within [`REFUSAL_WINDOW`].
+fn refusal(limit: &mut RateLimit, now: Instant, session_id: String, reason: RejectReason) -> Vec<Action> {
+    if !limit.allow(now) {
+        log::debug!("phone stream: not answering a refused request (too many lately)");
+        return vec![];
+    }
+    vec![Action::Send(OutboundFrame::Signal(StreamSignal::StreamReject { session_id, reason }))]
 }
 
 /// Copy the machine's status into the published one if it differs, stamping the next `seq`.
@@ -615,6 +733,8 @@ mod tests {
             next_frame(&mut out).await["data"],
             json!({"kind":"loop_status","sessionId":"c2","playing":false,"name":"holiday.mp4","fromPhone":true})
         );
+        // (The phone may act on the loop once a second.)
+        tokio::time::sleep(LOOP_ACTION_INTERVAL + Duration::from_millis(50)).await;
         m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c3","action":"start"}));
         assert_eq!(next_frame(&mut out).await["data"]["playing"], true);
         assert_eq!(player.calls(), vec!["stop", "start"]);
@@ -704,5 +824,174 @@ mod tests {
         // And the machine is free for the next request.
         m.on_relay_signal(json!({"kind":"stream_request","sessionId":"next"}));
         assert!(matches!(drx.recv().await.unwrap(), DecisionEvent::Request(_)));
+    }
+
+    #[test]
+    fn a_rate_limit_allows_so_many_per_window() {
+        let t = Instant::now();
+        let ms = Duration::from_millis;
+        let mut limit = RateLimit::new(2, Duration::from_secs(10));
+        assert!(limit.allow(t) && limit.allow(t + ms(1)));
+        assert!(!limit.allow(t + ms(2)) && !limit.allow(t + ms(9_999)));
+        // The first one leaves the window: one more, and only one.
+        assert!(limit.allow(t + ms(10_000)));
+        assert!(!limit.allow(t + ms(10_000)));
+        assert!(limit.allow(t + ms(10_001)));
+    }
+
+    /// M2: `start` and `stop` at most once a second; `status` is not an action.
+    #[tokio::test]
+    async fn loop_actions_from_the_phone_are_rate_limited() {
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let player = FakeLoop::loaded("desk.mp4", std::path::Path::new("/tmp/desk.mp4"), true);
+        let (m, mut out, _drx) = with_loop(Arc::new(FakeBackend::default()), player.clone(), &store);
+        assert_eq!(LOOP_ACTION_INTERVAL, Duration::from_secs(1));
+
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"stop"}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"loop_status","sessionId":"c1","playing":false,"name":"desk.mp4","fromPhone":false}));
+        // Hammering start/stop: answered with the state and an error, not acted on.
+        for (id, action) in [("c2", "start"), ("c3", "stop"), ("c4", "start")] {
+            m.on_relay_signal(json!({"kind":"loop_control","sessionId":id,"action":action}));
+            assert_eq!(
+                next_frame(&mut out).await["data"],
+                json!({"kind":"loop_status","sessionId":id,"playing":false,"name":"desk.mp4","fromPhone":false,"error":"rate_limited"})
+            );
+        }
+        assert_eq!(player.calls(), vec!["stop"]);
+        // Asking is always fine.
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c5","action":"status"}));
+        assert_eq!(next_frame(&mut out).await["data"].get("error"), None);
+        // A second later the next action goes through.
+        tokio::time::sleep(LOOP_ACTION_INTERVAL + Duration::from_millis(50)).await;
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c6","action":"start"}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"loop_status","sessionId":"c6","playing":true,"name":"desk.mp4","fromPhone":false}));
+        assert_eq!(player.calls(), vec!["stop", "start"]);
+    }
+
+    /// M2: the phone can start the loop on a camera that is running, but cannot make the
+    /// computer set one up (that can be a polkit or UAC prompt).
+    #[tokio::test]
+    async fn a_start_from_the_phone_never_turns_the_camera_on() {
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let player = FakeLoop { camera_off: true, ..FakeLoop::default() };
+        *player.state.lock().unwrap() =
+            crate::remote::stream::LoopState { playing: false, name: Some("desk.mp4".into()), path: Some("/tmp/desk.mp4".into()) };
+        let player = Arc::new(player);
+        let (m, mut out, _drx) = with_loop(Arc::new(FakeBackend::default()), player.clone(), &store);
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"start"}));
+        assert_eq!(
+            next_frame(&mut out).await["data"],
+            json!({"kind":"loop_status","sessionId":"c1","playing":false,"name":"desk.mp4","fromPhone":false,"error":"camera_off"})
+        );
+        assert!(player.calls().is_empty(), "start was never called: {:?}", player.calls());
+    }
+
+    fn job(id: &str, action: Option<LoopAction>) -> LoopJob {
+        LoopJob { session_id: id.into(), action, refusal: None }
+    }
+
+    /// M1: the refusal is decided again when the job runs. A session that was accepted
+    /// while the request waited in the queue is seen, and nothing is done to the loop.
+    #[tokio::test]
+    async fn a_queued_loop_action_is_refused_if_a_session_became_active_meanwhile() {
+        let player = FakeLoop::loaded("desk.mp4", std::path::Path::new("/tmp/desk.mp4"), true);
+        let (jobs, rx) = mpsc::channel(LOOP_QUEUE);
+        let (out_tx, mut out) = mpsc::unbounded_channel();
+        let active = Arc::new(AtomicBool::new(false));
+        // Queued while idle (so not refused then)…
+        jobs.send(job("c1", Some(LoopAction::Stop))).await.unwrap();
+        jobs.send(job("c2", Some(LoopAction::Start))).await.unwrap();
+        // …and a session is accepted before the worker gets to them.
+        active.store(true, Ordering::SeqCst);
+        tokio::spawn(loop_worker(rx, LoopDeps { player: player.clone(), store: None }, out_tx, active.clone()));
+        for id in ["c1", "c2"] {
+            assert_eq!(
+                next_frame(&mut out).await["data"],
+                json!({"kind":"loop_status","sessionId":id,"playing":true,"name":"desk.mp4","fromPhone":false,"error":"busy"})
+            );
+        }
+        assert!(player.calls().is_empty(), "nothing was done to the loop");
+        // The session is over: the next one acts.
+        active.store(false, Ordering::SeqCst);
+        jobs.send(job("c3", Some(LoopAction::Stop))).await.unwrap();
+        assert_eq!(next_frame(&mut out).await["data"].get("error"), None);
+        assert_eq!(player.calls(), vec!["stop"]);
+    }
+
+    /// M2: status requests that pile up are answered once; actions and refusals never drop.
+    #[tokio::test]
+    async fn piled_up_status_requests_are_answered_once() {
+        let player = FakeLoop::loaded("desk.mp4", std::path::Path::new("/tmp/desk.mp4"), true);
+        let (jobs, rx) = mpsc::channel(LOOP_QUEUE);
+        let (out_tx, mut out) = mpsc::unbounded_channel();
+        for id in ["s1", "s2", "s3"] {
+            jobs.try_send(job(id, Some(LoopAction::Status))).ok().unwrap();
+        }
+        jobs.try_send(job("report", None)).ok().unwrap();
+        jobs.try_send(job("stop", Some(LoopAction::Stop))).ok().unwrap();
+        jobs.try_send(LoopJob { session_id: "late".into(), action: Some(LoopAction::Start), refusal: Some(LOOP_RATE_LIMITED) }).ok().unwrap();
+        jobs.try_send(job("s4", Some(LoopAction::Status))).ok().unwrap();
+        jobs.try_send(job("s5", Some(LoopAction::Status))).ok().unwrap();
+        // The queue is bounded: one more than it holds is not taken.
+        for n in 0..LOOP_QUEUE {
+            let _ = jobs.try_send(job(&format!("x{n}"), Some(LoopAction::Status)));
+        }
+        assert!(jobs.try_send(job("over", Some(LoopAction::Status))).is_err());
+        tokio::spawn(loop_worker(rx, LoopDeps { player: player.clone(), store: None }, out_tx, Arc::new(AtomicBool::new(false))));
+        let mut answered = vec![];
+        loop {
+            let frame = next_frame(&mut out).await;
+            let id = frame["data"]["sessionId"].as_str().unwrap().to_string();
+            let last = id == format!("x{}", LOOP_QUEUE - 8 - 1);
+            answered.push((id, frame["data"]["playing"].as_bool().unwrap(), frame["data"]["error"].as_str().map(str::to_string)));
+            if last {
+                break;
+            }
+        }
+        assert_eq!(
+            answered,
+            vec![
+                ("stop".to_string(), false, None),
+                ("late".to_string(), false, Some("rate_limited".to_string())),
+                (format!("x{}", LOOP_QUEUE - 8 - 1), false, None),
+            ]
+        );
+        assert_eq!(player.calls(), vec!["stop"]);
+    }
+
+    /// L1: without a place to store them, videos are refused when asked, not after Accept.
+    #[tokio::test]
+    async fn file_requests_are_refused_when_there_is_no_store() {
+        let (dtx, mut drx) = mpsc::unbounded_channel();
+        let (m, mut out) = StreamManager::spawn(Arc::new(FakeBackend::default()), Arc::new(ChannelDecisions(dtx)));
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"f1","mode":"file","file":{"name":"a.mp4","size":10,"mime":"video/mp4"}}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"f1","reason":"unsupported"}));
+        assert!(drx.try_recv().is_err(), "the user is not asked");
+        assert_eq!(m.status().state, Phase::Idle);
+        // The camera stream does not need the store.
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"live"}));
+        assert!(matches!(drx.recv().await.unwrap(), DecisionEvent::Request(_)));
+    }
+
+    /// L6: refusals are cheap to provoke; only so many are answered.
+    #[tokio::test]
+    async fn refusals_of_bad_requests_are_throttled() {
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let (m, mut out, _drx) = with_loop(Arc::new(FakeBackend::default()), Arc::new(FakeLoop::default()), &store);
+        for n in 0..(MAX_REFUSALS + 20) {
+            m.on_relay_signal(json!({"kind":"stream_request","sessionId":format!("big{n}"),"mode":"file","file":{"name":"a.mp4","size":314572801u64,"mime":"video/mp4"}}));
+        }
+        // Something that is always answered, to know the manager is past all of them.
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"marker","action":"status"}));
+        let mut rejects = 0;
+        loop {
+            let frame = next_frame(&mut out).await;
+            match frame["data"]["kind"].as_str() {
+                Some("stream_reject") => rejects += 1,
+                Some("loop_status") => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(rejects, MAX_REFUSALS);
     }
 }

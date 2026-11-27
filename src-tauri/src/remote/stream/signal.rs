@@ -374,10 +374,14 @@ pub fn sanitize_label(s: &str, max: usize) -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
-/// A phone video's name as it is shown: see [`sanitize_label`]; at most [`MAX_FILE_NAME`]
-/// characters. Display only — the stored file's name is never derived from it.
+/// A phone video's name as it is shown: its last path component (a name is not a path:
+/// nothing before a `/` or `\\` survives, and neither does `.` or `..`), then
+/// [`sanitize_label`]; at most [`MAX_FILE_NAME`] characters. Display only — the stored
+/// file's name is never derived from it — but it is also the name the loader is given, and
+/// nothing down there should ever see a separator.
 pub fn clean_file_name(name: &str) -> Option<String> {
-    sanitize_label(name, MAX_FILE_NAME)
+    let last = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    sanitize_label(last, MAX_FILE_NAME).filter(|n| n != "." && n != "..")
 }
 
 /// A MIME type reduced to printable ASCII and a sane length.
@@ -683,6 +687,33 @@ mod tests {
     }
 
     #[test]
+    fn a_file_name_is_reduced_to_its_last_path_component() {
+        for (sent, shown) in [
+            ("holiday.mp4", Some("holiday.mp4")),
+            ("/sdcard/DCIM/Camera/VID_1.mp4", Some("VID_1.mp4")),
+            ("C:\\Users\\me\\Videos\\clip.mov", Some("clip.mov")),
+            ("../../../etc/passwd", Some("passwd")),
+            ("..\\..\\x.3gp", Some("x.3gp")),
+            ("a/b\\c/../d.webm", Some("d.webm")),
+            ("  spaced name .mkv ", Some("spaced name .mkv")),
+            // Nothing left that could be shown: not a name.
+            ("clips/", None),
+            ("..", None),
+            ("a/..", None),
+            (".", None),
+            ("/", None),
+            ("", None),
+        ] {
+            assert_eq!(clean_file_name(sent).as_deref(), shown, "{sent:?}");
+        }
+        // Such a request is refused rather than shown with an empty name.
+        assert!(matches!(
+            file_req(json!({"name":"videos/","size":10,"mime":"video/mp4"})),
+            Err(SignalError::Refused { reason: RejectReason::Unsupported, .. })
+        ));
+    }
+
+    #[test]
     fn a_file_name_is_cleaned_for_display_and_is_never_a_path() {
         let name = format!("\u{202e}../../etc/pass\nwd\u{200b}{}.mp4", "x".repeat(300));
         let StreamSignal::StreamRequest { file: Some(file), .. } = file_req(json!({"name":name,"size":10,"mime":"video/mp4"})).unwrap()
@@ -691,7 +722,9 @@ mod tests {
         };
         assert_eq!(file.name.chars().count(), MAX_FILE_NAME);
         assert_eq!(MAX_FILE_NAME, 120);
-        assert!(file.name.starts_with("../../etc/passwdxxx"), "{:?}", file.name);
+        // Only the last path component is a name: nothing before a separator survives.
+        assert!(file.name.starts_with("passwdxxx"), "{:?}", file.name);
+        assert!(!file.name.contains(['/', '\\']));
         assert!(!file.name.chars().any(|c| c.is_control() || c == '\u{202e}' || c == '\u{200b}'));
         // Cut off before its extension: the type still decides.
         assert_eq!(file.name_extension(), None);

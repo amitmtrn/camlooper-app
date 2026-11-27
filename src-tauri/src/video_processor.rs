@@ -158,6 +158,71 @@ pub struct VideoProcessor {
     /// Frames decoded for natural motion, kept between streams so pause/resume on the same
     /// clip doesn't pay the decode wait again. Cleared when a different video is loaded.
     walk_cache: Arc<RwLock<Option<WalkBuffer>>>,
+    /// `Some` only while the loaded clip is one received from the phone: the container the
+    /// receiver recognised in its first bytes. ffmpeg is then told that demuxer and may open
+    /// nothing but the file itself ([`pipeline::restricted_input_args`]). `None` for every
+    /// clip picked on this computer, which is opened as it always was.
+    phone_container: Option<PhoneContainer>,
+}
+
+/// The container of a video received from the phone, as told by its first bytes
+/// (`remote/stream/file_receive.rs` does the sniffing; nothing else is accepted from a phone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhoneContainer {
+    /// ISO base media: mp4, m4v, mov, 3gp.
+    IsoBmff,
+    /// Matroska: mkv, webm.
+    Matroska,
+}
+
+impl PhoneContainer {
+    /// The name of ffmpeg's demuxer for it (`-f`, and libavformat's `format_whitelist`).
+    pub fn demuxer(self) -> &'static str {
+        match self {
+            PhoneContainer::IsoBmff => "mov",
+            PhoneContainer::Matroska => "matroska",
+        }
+    }
+}
+
+/// A phone video larger than this in either dimension is refused before anything decodes it.
+pub const MAX_PHONE_VIDEO_DIMENSION: u32 = 4096;
+/// A phone video longer than this is refused. (A file with no duration in its header, as a
+/// browser-recorded WebM has, is not: natural motion decodes at most [`WALK_WINDOW_SECS`] of
+/// any clip, and straight playback holds nothing in memory.)
+pub const MAX_PHONE_VIDEO_SECONDS: f64 = 600.0;
+
+/// The limits a phone video must be within once its header has been read.
+pub fn check_phone_video_limits(info: &VideoInfo) -> Result<()> {
+    if info.width == 0 || info.height == 0 {
+        return Err(anyhow!("the video has no picture size"));
+    }
+    if info.width > MAX_PHONE_VIDEO_DIMENSION || info.height > MAX_PHONE_VIDEO_DIMENSION {
+        return Err(anyhow!(
+            "the video is {}x{}; the largest accepted is {MAX_PHONE_VIDEO_DIMENSION}x{MAX_PHONE_VIDEO_DIMENSION}",
+            info.width,
+            info.height
+        ));
+    }
+    if info.duration.is_finite() && info.duration > MAX_PHONE_VIDEO_SECONDS {
+        return Err(anyhow!("the video is {:.0} s long; the longest accepted is {MAX_PHONE_VIDEO_SECONDS:.0} s", info.duration));
+    }
+    Ok(())
+}
+
+/// What is loaded, to put back if its replacement does not work out
+/// ([`loaded_snapshot`] / [`restore_snapshot`]).
+#[derive(Debug, Clone)]
+pub struct LoadedSnapshot {
+    video_info: Option<VideoInfo>,
+    video_path: Option<PathBuf>,
+    phone_container: Option<PhoneContainer>,
+}
+
+impl LoadedSnapshot {
+    pub fn is_loaded(&self) -> bool {
+        self.video_path.is_some()
+    }
 }
 
 /// The natural-motion frame store: JPEGs, appended by the decoder and read at random by
@@ -215,6 +280,7 @@ impl VideoProcessor {
                 memory_usage: 0,
             })),
             walk_cache: Arc::new(RwLock::new(None)),
+            phone_container: None,
         }
     }
 
@@ -226,6 +292,8 @@ impl VideoProcessor {
         // A recording can be written back to a path we've already buffered, so drop the
         // cache on load rather than trusting the path alone to spot new content.
         *self.walk_cache.write().await = None;
+        // A file picked on this computer: opened unrestricted, as always.
+        self.phone_container = None;
 
         #[cfg(not(windows))]
         {
@@ -360,6 +428,7 @@ impl VideoProcessor {
 
     pub async fn load_video_with_original_name(&mut self, file_path: PathBuf, original_filename: &str) -> Result<VideoInfo> {
         *self.walk_cache.write().await = None;
+        self.phone_container = None;
 
         #[cfg(not(windows))]
         {
@@ -465,6 +534,107 @@ impl VideoProcessor {
         }
     }
 
+    /// Read a phone video's header without touching what is loaded: a file that cannot be
+    /// read must not cost the user the loop that is playing. Blocking (file I/O).
+    ///
+    /// The demuxer is the one for `container` and no other, and only the `file` protocol may
+    /// be opened: the bytes came from outside, and libavformat would otherwise pick a
+    /// demuxer by content (a playlist or concat script opens other files and URLs).
+    #[cfg(not(windows))]
+    fn probe_phone_video(file_path: &std::path::Path, display_name: &str, container: PhoneContainer) -> Result<VideoInfo> {
+        ffmpeg::init().ok();
+        let mut options = ffmpeg::Dictionary::new();
+        options.set("protocol_whitelist", "file");
+        options.set("format_whitelist", container.demuxer());
+        let input = ffmpeg::format::input_with_dictionary(file_path, options)?;
+        let video_stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .ok_or_else(|| anyhow!("No video stream found"))?;
+        let codec_context = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
+        let decoder = codec_context.decoder().video()?;
+        let duration = if video_stream.duration() != ffmpeg::ffi::AV_NOPTS_VALUE {
+            video_stream.duration() as f64 * f64::from(video_stream.time_base())
+        } else {
+            input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE)
+        };
+        Ok(VideoInfo {
+            id: Uuid::new_v4().to_string(),
+            filename: display_name.to_string(),
+            duration,
+            width: decoder.width(),
+            height: decoder.height(),
+            fps: f64::from(video_stream.avg_frame_rate()),
+            format: format!("{:?}", decoder.format()),
+        })
+    }
+
+    /// Windows has no libavformat to ask; like [`Self::load_video_with_original_name`] it
+    /// reads an ISO file with the `mp4` crate and estimates the rest. The playing ffmpeg is
+    /// still held to the sniffed demuxer and the `file` protocol.
+    #[cfg(windows)]
+    fn probe_phone_video(file_path: &std::path::Path, display_name: &str, container: PhoneContainer) -> Result<VideoInfo> {
+        let file_size = std::fs::metadata(file_path)?.len();
+        let estimate = |ext: &str| Self::create_estimated_video_info(display_name, file_size, ext);
+        Ok(match container {
+            PhoneContainer::IsoBmff => match Self::parse_mp4_file(&file_path.to_path_buf(), display_name) {
+                Ok(info) => info,
+                Err(e) => {
+                    println!("Failed to parse the phone's MP4 file: {}, falling back to estimation", e);
+                    estimate("mp4")
+                }
+            },
+            PhoneContainer::Matroska => estimate("mkv"),
+        })
+    }
+
+    /// Make an already probed phone video the loaded clip.
+    async fn install_phone_video(&mut self, file_path: PathBuf, info: VideoInfo, container: PhoneContainer) {
+        *self.walk_cache.write().await = None;
+        {
+            let mut status = self.stream_status.write().await;
+            status.duration = info.duration;
+            status.target_fps = Self::target_fps_for(&info);
+        }
+        self.video_info = Some(info);
+        self.video_path = Some(file_path);
+        self.phone_container = Some(container);
+    }
+
+    /// The playback rate a loaded clip gets (what the two loaders set).
+    fn target_fps_for(info: &VideoInfo) -> f64 {
+        #[cfg(not(windows))]
+        {
+            info.fps.max(30.0).min(60.0)
+        }
+        #[cfg(windows)]
+        {
+            info.fps
+        }
+    }
+
+    fn snapshot(&self) -> LoadedSnapshot {
+        LoadedSnapshot {
+            video_info: self.video_info.clone(),
+            video_path: self.video_path.clone(),
+            phone_container: self.phone_container,
+        }
+    }
+
+    /// Put back what [`Self::snapshot`] saw (nothing, if nothing was loaded). The clip keeps
+    /// its `VideoInfo` — the id the UI knows it by — and is not read again.
+    async fn restore(&mut self, snapshot: LoadedSnapshot) {
+        *self.walk_cache.write().await = None;
+        if let Some(info) = snapshot.video_info.as_ref() {
+            let mut status = self.stream_status.write().await;
+            status.duration = info.duration;
+            status.target_fps = Self::target_fps_for(info);
+        }
+        self.video_info = snapshot.video_info;
+        self.video_path = snapshot.video_path;
+        self.phone_container = snapshot.phone_container;
+    }
+
     pub async fn start_streaming(&mut self) -> Result<()> {
         if self.is_streaming.load(Ordering::Relaxed) {
             return Ok(());
@@ -509,6 +679,7 @@ impl VideoProcessor {
             let loop_settings = self.loop_settings.clone();
             let performance_metrics = self.performance_metrics.clone();
             let walk_cache = self.walk_cache.clone();
+            let demuxer = self.phone_container.map(PhoneContainer::demuxer);
 
             let fps = self.video_info.as_ref().map(|info| info.fps).unwrap_or(30.0);
             let width = self.video_info.as_ref().map(|info| info.width).unwrap_or(1920);
@@ -536,6 +707,7 @@ impl VideoProcessor {
                         settings,
                         fps,
                         width,
+                        demuxer,
                     ).await
                 } else {
                     Self::run_loop_pipeline(
@@ -546,6 +718,7 @@ impl VideoProcessor {
                         performance_metrics,
                         settings,
                         fps,
+                        demuxer,
                     ).await
                 };
 
@@ -636,6 +809,7 @@ impl VideoProcessor {
         performance_metrics: Arc<RwLock<PerformanceMetrics>>,
         settings: LoopSettings,
         target_fps: f64,
+        demuxer: Option<&'static str>,
     ) -> Result<()> {
         use std::time::Instant;
 
@@ -661,6 +835,7 @@ impl VideoProcessor {
             source: Source::File {
                 path: video_path.to_string_lossy().into_owned(),
                 stream_loop,
+                demuxer,
             },
             sink: sink.clone(),
             geometry,
@@ -861,6 +1036,7 @@ impl VideoProcessor {
             max_frames,
             is_streaming,
             &store,
+            None,
         )
         .await?;
         let frames = store
@@ -884,6 +1060,7 @@ impl VideoProcessor {
         max_frames: usize,
         is_streaming: &Arc<AtomicBool>,
         store: &SharedFrames,
+        demuxer: Option<&'static str>,
     ) -> Result<bool> {
         // One frame beyond the cap, so that "we hit the cap" and "the clip is exactly the
         // window long" stay distinguishable.
@@ -891,6 +1068,7 @@ impl VideoProcessor {
             video_path,
             store_width,
             max_frames.saturating_add(1),
+            demuxer,
         );
 
         let mut cmd = tokio::process::Command::new(ffmpeg_path);
@@ -976,6 +1154,7 @@ impl VideoProcessor {
         settings: LoopSettings,
         target_fps: f64,
         source_width: u32,
+        demuxer: Option<&'static str>,
     ) -> Result<()> {
         use std::time::{Duration, Instant};
 
@@ -1036,6 +1215,7 @@ impl VideoProcessor {
                             max_frames,
                             &is_streaming,
                             &store,
+                            demuxer,
                         )
                         .await;
                         match result {
@@ -1469,6 +1649,91 @@ pub async fn loaded_video() -> Option<(PathBuf, String)> {
     Some((path, name))
 }
 
+/// Read the header of a video received from the phone and check it against the limits
+/// ([`check_phone_video_limits`]), without changing what is loaded. `timeout` bounds the
+/// read: it runs on a blocking thread, which is left to finish on its own if it is late
+/// (it reads a local file and nothing else, so it does finish).
+pub async fn probe_phone_video(
+    file_path: PathBuf,
+    display_name: String,
+    container: PhoneContainer,
+    timeout: std::time::Duration,
+) -> Result<VideoInfo> {
+    let probe = tokio::task::spawn_blocking(move || VideoProcessor::probe_phone_video(&file_path, &display_name, container));
+    let info = match tokio::time::timeout(timeout, probe).await {
+        Err(_) => return Err(anyhow!("reading the video took too long")),
+        Ok(Err(_)) => return Err(anyhow!("reading the video failed unexpectedly")),
+        Ok(Ok(info)) => info?,
+    };
+    check_phone_video_limits(&info)?;
+    Ok(info)
+}
+
+/// How [`replace_with_phone_video`] ended with the phone video loaded.
+#[derive(Debug)]
+pub enum Replaced {
+    Playing,
+    /// Loaded, but playback could not be started — and nothing was loaded before, so there
+    /// was nothing to go back to.
+    LoadedNotPlaying(anyhow::Error),
+}
+
+/// How [`replace_with_phone_video`] ended with the phone video *not* loaded: what was
+/// loaded before is loaded again, and playing again if it was.
+#[derive(Debug)]
+pub enum ReplaceError {
+    Cancelled,
+    Failed(anyhow::Error),
+}
+
+/// Swap the loaded clip for a phone video that [`probe_phone_video`] accepted, and play it:
+/// stop what plays, wait for its ffmpeg, load, start. All of it under the processor's lock,
+/// so a click in the window (Play, Stop, another file) lands before or after, never in
+/// between. `cancelled` is asked before anything is touched and once more before the
+/// start; from then on the new video plays.
+pub async fn replace_with_phone_video(
+    file_path: PathBuf,
+    info: VideoInfo,
+    container: PhoneContainer,
+    cancelled: &(dyn Fn() -> bool + Send + Sync),
+) -> std::result::Result<Replaced, ReplaceError> {
+    let mut processor = VIDEO_PROCESSOR.lock().await;
+    if cancelled() {
+        return Err(ReplaceError::Cancelled);
+    }
+    let previous = processor.snapshot();
+    let was_playing = processor.is_streaming.load(Ordering::Relaxed);
+    processor.stop_streaming().await.map_err(ReplaceError::Failed)?;
+    if !wait_for_playback_exit(std::time::Duration::from_secs(5)).await {
+        // The old playback task is still alive; a second one must not join it on the
+        // camera. The old clip stays loaded (stopped).
+        return Err(ReplaceError::Failed(anyhow!("video playback did not stop")));
+    }
+    processor.install_phone_video(file_path, info, container).await;
+    if cancelled() {
+        go_back(&mut processor, previous, was_playing).await;
+        return Err(ReplaceError::Cancelled);
+    }
+    match processor.start_streaming().await {
+        Ok(()) => Ok(Replaced::Playing),
+        Err(e) if previous.is_loaded() => {
+            go_back(&mut processor, previous, was_playing).await;
+            Err(ReplaceError::Failed(e))
+        }
+        Err(e) => Ok(Replaced::LoadedNotPlaying(e)),
+    }
+}
+
+/// Undo a phone video's load: the previous clip again, playing if it was.
+async fn go_back(processor: &mut VideoProcessor, previous: LoadedSnapshot, was_playing: bool) {
+    processor.restore(previous).await;
+    if was_playing {
+        if let Err(e) = processor.start_streaming().await {
+            eprintln!("phone video: could not resume the previous video: {e}");
+        }
+    }
+}
+
 /// Whether a clip is loaded (so playback can be resumed after the phone stream).
 pub async fn has_video_loaded() -> bool {
     VIDEO_PROCESSOR.lock().await.video_path.is_some()
@@ -1544,6 +1809,88 @@ mod tests {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    #[test]
+    fn a_phone_video_is_held_to_size_and_length_limits() {
+        let info = |width, height, duration| VideoInfo {
+            id: "x".into(),
+            filename: "clip.mp4".into(),
+            duration,
+            width,
+            height,
+            fps: 30.0,
+            format: "yuv420p".into(),
+        };
+        assert_eq!((MAX_PHONE_VIDEO_DIMENSION, MAX_PHONE_VIDEO_SECONDS), (4096, 600.0));
+        assert!(check_phone_video_limits(&info(1920, 1080, 12.5)).is_ok());
+        assert!(check_phone_video_limits(&info(4096, 4096, 600.0)).is_ok());
+        assert!(check_phone_video_limits(&info(4097, 16, 1.0)).is_err());
+        assert!(check_phone_video_limits(&info(16, 4097, 1.0)).is_err());
+        assert!(check_phone_video_limits(&info(65535, 65535, 1.0)).is_err());
+        assert!(check_phone_video_limits(&info(0, 1080, 1.0)).is_err(), "no picture size is not a video");
+        assert!(check_phone_video_limits(&info(1920, 0, 1.0)).is_err());
+        assert!(check_phone_video_limits(&info(1280, 720, 600.5)).is_err());
+        assert!(check_phone_video_limits(&info(1280, 720, 86_400.0)).is_err());
+        // A header without a duration (a browser-recorded WebM): not refused for that.
+        assert!(check_phone_video_limits(&info(1280, 720, f64::NAN)).is_ok());
+        assert!(check_phone_video_limits(&info(1280, 720, -9.2e12)).is_ok());
+        assert_eq!((PhoneContainer::IsoBmff.demuxer(), PhoneContainer::Matroska.demuxer()), ("mov", "matroska"));
+    }
+
+    /// The header of a phone video is read with the demuxer its first bytes showed and
+    /// nothing else, and only from the file itself.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_phone_video_is_probed_with_its_own_demuxer_only() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mp4 = make_fixture(dir.path(), 1);
+        let t = std::time::Duration::from_secs(20);
+        let probe = |path: PathBuf, container| probe_phone_video(path, "My clip.mp4".into(), container, t);
+
+        let info = probe(mp4.clone(), PhoneContainer::IsoBmff).await.expect("a real mp4 is accepted");
+        assert_eq!((info.width, info.height, info.filename.as_str()), (320, 240, "My clip.mp4"));
+        assert!((info.duration - 1.0).abs() < 0.2 && (info.fps - 30.0).abs() < 0.5, "{info:?}");
+        // The right file under the wrong demuxer: not opened.
+        assert!(probe(mp4.clone(), PhoneContainer::Matroska).await.is_err());
+
+        // A Matroska file, the other way round.
+        let mkv = dir.path().join("fixture.mkv");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&mp4)
+            .args(["-c", "copy"])
+            .arg(&mkv)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(probe(mkv.clone(), PhoneContainer::Matroska).await.is_ok());
+        assert!(probe(mkv, PhoneContainer::IsoBmff).await.is_err());
+
+        // A playlist that names the real video: a libavformat left to guess by content can
+        // open it as HLS and read the file it points to. Not here, whatever the version.
+        let playlist = dir.path().join("playlist.mp4");
+        std::fs::write(&playlist, format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1,\n{}\n#EXT-X-ENDLIST\n", mp4.display())).unwrap();
+        assert!(probe(playlist.clone(), PhoneContainer::IsoBmff).await.is_err());
+        assert!(probe(playlist, PhoneContainer::Matroska).await.is_err());
+
+        // Over the size limit: read fine, refused.
+        let wide = dir.path().join("wide.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=red:size=4100x64:rate=5:duration=1"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&wide)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let refused = probe(wide, PhoneContainer::IsoBmff).await.expect_err("4100 px wide is over the limit");
+        assert!(refused.to_string().contains("4100x64"), "{refused}");
+        // A file that is not there.
+        assert!(probe(dir.path().join("missing.mp4"), PhoneContainer::IsoBmff).await.is_err());
     }
 
     /// A `seconds`-long clip at 30 fps, so the exact frame count is known.

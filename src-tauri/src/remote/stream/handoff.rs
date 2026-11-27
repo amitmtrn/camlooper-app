@@ -111,6 +111,9 @@ pub struct AppCamera {
 
 impl AppCamera {
     async fn acquire_inner(&self, epoch: u64, cancel: Cancel) -> Result<CameraTarget> {
+        // One loop operation at a time (see `loop_engine::loop_operation`): no `loop_control`
+        // and no received video may change what plays between the steps below.
+        let _op = super::loop_engine::loop_operation().await;
         let mut claims = self.claims.lock().await;
         claims.claim(epoch)?;
         let undo = &mut claims.undo;
@@ -175,7 +178,8 @@ impl CameraControl for AppCamera {
 
     fn release(&self, epoch: u64) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            // Waits for an acquire that is still running (it holds the lock throughout).
+            // Waits for an acquire that is still running (it holds both locks throughout).
+            let _op = super::loop_engine::loop_operation().await;
             let mut claims = self.claims.lock().await;
             let Some(u) = claims.release(epoch) else {
                 if claims.undo.claimed {
@@ -309,7 +313,9 @@ mod tests {
 
     #[test]
     fn the_claim_is_cleared_even_when_the_release_unwinds() {
-        // The only test that touches the process-wide flag.
+        // The only test that sets the process-wide flag; the loop engine's test, which
+        // starts real playback (refused while the flag is set), must not run meanwhile.
+        let _engine = crate::remote::stream::loop_engine::ENGINE_TEST.blocking_lock();
         PHONE_OWNS_CAMERA.store(true, Ordering::SeqCst);
         let r = std::panic::catch_unwind(|| {
             let _claim = ClaimGuard;

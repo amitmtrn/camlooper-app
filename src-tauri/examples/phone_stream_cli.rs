@@ -47,7 +47,8 @@ use camlooper_lib::remote::store::{Pairing, Store};
 use camlooper_lib::remote::stream::handoff::{ensure_virtual_camera, AppCamera};
 use camlooper_lib::remote::stream::loop_engine::{self, EngineLoop, LoopHost, VideoInfo};
 use camlooper_lib::remote::stream::rtc::resolve_stun;
-use camlooper_lib::remote::stream::signal::{OutboundFrame, StopReason, StreamMode, StreamSignal};
+use camlooper_lib::remote::stream::file_receive::{PlayError, PlayRequest, Played};
+use camlooper_lib::remote::stream::signal::{LoopAction, OutboundFrame, StopReason, StreamMode, StreamSignal};
 use camlooper_lib::remote::stream::{
     route_server_message, CameraControl, CameraTarget, Cancel, ChannelDecisions, DecisionEvent, FileDeps, FilePhase, IceSource,
     LoopDeps, LoopPlayer, LoopState, Phase, PhoneVideoStore, SessionDeps, StreamManager, StreamStatus,
@@ -243,8 +244,8 @@ impl LoopHost for CliHost {
         emit(json!({"event": "loop_changed", "playing": playing}));
     }
 
-    fn video_loaded(&self, video: &VideoInfo) {
-        emit(json!({"event": "video_loaded", "video": video}));
+    fn video_loaded(&self, video: &VideoInfo, playing: bool) {
+        emit(json!({"event": "video_loaded", "video": video, "playing": playing}));
     }
 }
 
@@ -278,15 +279,24 @@ impl LoopPlayer for ReportingLoop {
     fn start(&self) -> BoxFuture<'_, anyhow::Result<()>> {
         self.0.start()
     }
-    fn play_file<'a>(&'a self, path: &'a Path, display_name: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
+    fn camera_ready(&self) -> BoxFuture<'_, bool> {
+        self.0.camera_ready()
+    }
+    fn control<'a>(&'a self, action: LoopAction, refused: &'a (dyn Fn() -> bool + Send + Sync)) -> BoxFuture<'a, Result<(), String>> {
+        self.0.control(action, refused)
+    }
+    fn play_file(&self, request: PlayRequest) -> BoxFuture<'_, Result<Played, PlayError>> {
         Box::pin(async move {
-            let hashed = path.to_path_buf();
-            let sha256 = tokio::task::spawn_blocking(move || sha256_hex(&hashed)).await?;
-            let size = std::fs::metadata(path).map(|m| m.len()).ok();
+            let (path, name) = (request.path.clone(), request.display_name.clone());
+            let hashed = path.clone();
+            let sha256 = tokio::task::spawn_blocking(move || sha256_hex(&hashed)).await.map_err(anyhow::Error::from)?;
+            let size = std::fs::metadata(&path).map(|m| m.len()).ok();
             emit(json!({"event": "file_saved", "path": path, "sha256": sha256.ok(), "size": size}));
-            self.0.play_file(path, display_name).await?;
-            emit(json!({"event": "looping", "name": display_name}));
-            Ok(())
+            let played = self.0.play_file(request).await?;
+            if matches!(played, Played::Looping { .. }) {
+                emit(json!({"event": "looping", "name": name}));
+            }
+            Ok(played)
         })
     }
 }

@@ -83,6 +83,12 @@ sha2 = "0.11"
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 
+# src/remote/stream/file_receive.rs: the phone-video folder must belong to this user
+# (getuid) and the disk must have room for the announced video (statvfs). Already in
+# Cargo.lock.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # FFmpeg - conditional compilation for different platforms
 # On Windows, use a different implementation to avoid cross-compilation issues
 [target.'cfg(not(windows))'.dependencies]

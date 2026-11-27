@@ -373,6 +373,13 @@ impl Machine {
     /// endless "stopping", but the machine is not free: the session still holds the camera
     /// (a new one could not acquire it), so requests are answered `busy` until its `Closed`
     /// arrives — see [`Self::on_session_event`].
+    /// Whether a `loop_control` must be refused right now: a session was accepted (it owns
+    /// the camera, or is about to load a video), or a given-up one is still shutting down.
+    /// Asked when the request arrives and again by the loop worker right before it acts.
+    pub fn loop_refused(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.accepted) || self.releasing.is_some()
+    }
+
     fn give_up(&mut self) {
         let epoch = self.current_epoch();
         self.releasing = epoch;
@@ -398,8 +405,7 @@ impl Machine {
             // Allowed while a request is merely pending (nothing holds the camera yet); not
             // once a session was accepted, or while a given-up one is still shutting down.
             StreamSignal::LoopControl { session_id, action } => {
-                let refused = self.session.as_ref().is_some_and(|s| s.accepted) || self.releasing.is_some();
-                vec![Action::Loop { session_id, action, refused }]
+                vec![Action::Loop { session_id, action, refused: self.loop_refused() }]
             }
             StreamSignal::Offer { session_id, sdp } => {
                 let Some(s) = self.session.as_mut().filter(|s| s.id == session_id) else {
@@ -703,7 +709,11 @@ impl Machine {
         if let Some(PeerOffline { since, frames: frames_then, confirmed }) = s.peer_offline {
             if s.stop_reason.is_none() && now.duration_since(since) >= PEER_OFFLINE_GRACE {
                 let frames = self.progress();
-                if frames > frames_then {
+                // A video that has arrived in full needs nothing more from the phone: it
+                // is common to switch apps once the upload is done. Stopping the session
+                // now would race the load, for no reason.
+                let all_received = self.status.file.as_ref().is_some_and(|f| matches!(f.phase, FilePhase::Processing | FilePhase::Looping));
+                if frames > frames_then || all_received {
                     // Video is still arriving peer to peer: the stream is healthy without
                     // the relay. A phone known to be off the relay is looked at again after
                     // another grace period; a mere delivery error is forgotten, or it would
@@ -1700,6 +1710,52 @@ mod tests {
         // Offline and nothing arriving for another grace period: the phone is gone.
         let a = m.tick(t + PEER_OFFLINE_GRACE * 2);
         assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::PeerOffline))]);
+    }
+
+    /// Once every byte is in, the phone is not needed any more: it may leave the relay
+    /// (switch apps, lock the screen) without the load being stopped under it.
+    #[test]
+    fn the_phone_going_offline_while_the_video_loads_does_not_stop_the_load() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        receiving(&mut m, "f1", t);
+        m.on_session_event(1, SessionEvent::FileStage(FileStage::Processing), t);
+        assert!(m.on_peer_offline(t).is_empty());
+        for n in 1..=4 {
+            assert!(m.tick(t + PEER_OFFLINE_GRACE * n).is_empty(), "after {n} grace periods");
+        }
+        assert_eq!((m.status().state, file_phase(&m)), (Phase::Live, Some((FilePhase::Processing, 1000))));
+        // It loops: the usual good ending, with the window's status saying so.
+        m.on_session_event(1, SessionEvent::FileStage(FileStage::Looping), t);
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::Done, error: None }, t);
+        assert_eq!((m.status().state, file_phase(&m)), (Phase::Idle, Some((FilePhase::Looping, 1000))));
+    }
+
+    /// A stop was asked for while the video loaded, and the load could no longer be
+    /// prevented: the session reports `Done`, and the status says "looping" — which is what
+    /// the window adopts the video on.
+    #[test]
+    fn a_stop_during_loading_that_came_too_late_ends_as_looping() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        receiving(&mut m, "f1", t);
+        m.on_session_event(1, SessionEvent::FileStage(FileStage::Processing), t);
+        m.stop(StopReason::User, t);
+        assert_eq!(m.status().state, Phase::Stopping);
+        // (`FileStage::Looping` is not shown while stopping; `Closed` carries the outcome.)
+        m.on_session_event(1, SessionEvent::FileStage(FileStage::Looping), t);
+        let a = m.on_session_event(1, SessionEvent::Closed { reason: StopReason::Done, error: None }, t);
+        assert_eq!(a, vec![Action::ReportLoop { session_id: "f1".into() }]);
+        let st = m.status();
+        assert_eq!((st.state, st.last_error.clone(), st.mode), (Phase::Idle, None, StreamMode::File));
+        assert_eq!(file_phase(&m), Some((FilePhase::Looping, 1000)));
+        // The same stop, obeyed in time: no loop, no error, nothing left in the status.
+        let mut m = Machine::new();
+        receiving(&mut m, "f2", t);
+        m.on_session_event(1, SessionEvent::FileStage(FileStage::Processing), t);
+        m.stop(StopReason::User, t);
+        m.on_session_event(1, SessionEvent::Closed { reason: StopReason::User, error: None }, t);
+        assert_eq!((m.status().state, m.status().last_error.clone(), m.status().file.clone()), (Phase::Idle, None, None));
     }
 
     #[test]

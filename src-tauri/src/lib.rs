@@ -156,9 +156,12 @@ async fn upload_chunk_stream(request: ChunkUploadRequest) -> Result<ChunkUploadR
 // Video Processing Commands
 #[tauri::command]
 async fn load_video_file(file_path: String) -> Result<VideoInfo, String> {
-    video_processor::load_video_file(file_path)
+    let video_info = video_processor::load_video_file(file_path)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // A video received from the phone is kept only while it is the loaded one.
+    remote::stream::commands::sweep_unused_phone_videos().await;
+    Ok(video_info)
 }
 
 #[tauri::command]
@@ -235,6 +238,7 @@ async fn stream_upload_and_load_video(filename: String, file_data: Vec<u8>) -> R
         })?;
     
     println!("Video loaded successfully: {:?}", video_info);
+    remote::stream::commands::sweep_unused_phone_videos().await;
     
     Ok(video_info)
 }
@@ -255,6 +259,7 @@ async fn upload_and_load_video(filename: String, file_data: String) -> Result<Vi
     let video_info = video_processor::load_video_file(file_path)
         .await
         .map_err(|e| format!("Video loading failed: {}", e))?;
+    remote::stream::commands::sweep_unused_phone_videos().await;
     
     Ok(video_info)
 }

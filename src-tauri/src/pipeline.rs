@@ -107,6 +107,21 @@ pub fn fit_filter(geom: &Geometry) -> String {
     )
 }
 
+/// Input options for a file whose bytes this computer did not produce (a video received
+/// from the phone), placed before its `-i`.
+///
+/// ffmpeg normally picks the demuxer from the content, and several demuxers are scripts in
+/// disguise: an HLS playlist, a `concat` list or an SDP file named `x.mp4` makes ffmpeg open
+/// whatever other files or URLs it lists and put them on the camera. So the demuxer is named
+/// (`-f`, from the container the receiver recognised in the file's first bytes) and nothing
+/// but the local file itself can be opened (`-protocol_whitelist file`).
+///
+/// Files the user picked on this computer do not get these: their container is not known
+/// in advance, and they were always played this way.
+pub fn restricted_input_args(demuxer: &str) -> [String; 4] {
+    ["-protocol_whitelist".into(), "file".into(), "-f".into(), demuxer.into()]
+}
+
 /// Arguments for the MJPEG *store* used by natural motion.
 ///
 /// Two things matter here and neither was set before:
@@ -119,12 +134,20 @@ pub fn fit_filter(geom: &Geometry) -> String {
 ///
 /// `width` is the *store* width, which the caller should clamp to the source width: encoding
 /// an upscaled frame pays for invented detail at JPEG rates.
-pub fn mjpeg_store_args(video: &Path, width: u32, max_frames: usize) -> Vec<String> {
-    let mut a = vec![
+///
+/// `demuxer` is `Some` only for a file that did not come from this computer (a phone video):
+/// see [`restricted_input_args`]. `None` leaves the input exactly as it always was.
+pub fn mjpeg_store_args(video: &Path, width: u32, max_frames: usize, demuxer: Option<&str>) -> Vec<String> {
+    let mut a: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
         "error".into(),
         "-nostdin".into(),
+    ];
+    if let Some(demuxer) = demuxer {
+        a.extend(restricted_input_args(demuxer));
+    }
+    a.extend([
         "-i".into(),
         video.to_string_lossy().into_owned(),
         // No audio or subtitle decoding for a frame store.
@@ -134,7 +157,7 @@ pub fn mjpeg_store_args(video: &Path, width: u32, max_frames: usize) -> Vec<Stri
         "0:v".into(),
         "-vf".into(),
         format!("scale={width}:-2:flags=lanczos"),
-    ];
+    ]);
     // Enforce the window at the source rather than decoding a long file in full and
     // throwing most of it away.
     a.extend(["-frames:v".into(), max_frames.to_string()]);
@@ -158,7 +181,10 @@ pub enum Source {
     /// A file on disk. `stream_loop` is ffmpeg's own `-stream_loop`: `-1` for endless,
     /// `n` to play `n + 1` times. Looping inside ffmpeg avoids respawning the process once
     /// per pass, which is what the old straight-loop path did.
-    File { path: String, stream_loop: i32 },
+    ///
+    /// `demuxer` is `Some` only for a file received from the phone: the input is then opened
+    /// with [`restricted_input_args`]. `None` (every desktop-picked file) probes as before.
+    File { path: String, stream_loop: i32, demuxer: Option<&'static str> },
     /// MJPEG frames fed in on stdin — the natural-motion walk, replaying its store.
     MjpegStdin { fps: u32 },
     /// A capture device, already expressed as ffmpeg input arguments.
@@ -267,11 +293,14 @@ fn build_input(spec: &PipelineSpec) -> Vec<String> {
     ];
 
     match &spec.source {
-        Source::File { path, stream_loop } => {
+        Source::File { path, stream_loop, demuxer } => {
             // -stream_loop must precede -i: it is an input option.
             a.extend(["-stream_loop".into(), stream_loop.to_string()]);
             if spec.realtime {
                 a.push("-re".into());
+            }
+            if let Some(demuxer) = demuxer {
+                a.extend(restricted_input_args(demuxer));
             }
             a.extend(["-i".into(), path.clone()]);
         }
@@ -367,7 +396,7 @@ mod tests {
 
     fn file_spec(sink: CameraSink) -> PipelineSpec {
         PipelineSpec {
-            source: Source::File { path: "/clip.mp4".into(), stream_loop: -1 },
+            source: Source::File { path: "/clip.mp4".into(), stream_loop: -1, demuxer: None },
             sink,
             geometry: geom(),
             preview: Some(PreviewSpec::default()),
@@ -499,21 +528,49 @@ mod tests {
         // Regression: with no -pix_fmt the encoder picks yuvj420p and re-subsamples chroma
         // onto a shifted grid on every frame. That was the app's largest self-inflicted
         // quality loss.
-        let a = mjpeg_store_args(Path::new("/clip.mp4"), 1280, 1800).join(" ");
+        let a = mjpeg_store_args(Path::new("/clip.mp4"), 1280, 1800, None).join(" ");
         assert!(a.contains("-pix_fmt yuvj422p"), "{a}");
         assert!(a.contains("-q:v 2"), "{a}");
     }
 
     #[test]
+    fn a_phone_video_is_opened_with_a_named_demuxer_and_only_the_file_protocol() {
+        // Desktop-picked files: nothing changes.
+        let plain = mjpeg_store_args(Path::new("/clip.mp4"), 640, 10, None);
+        assert!(!plain.iter().any(|x| x == "-protocol_whitelist" || x == "mov"), "{plain:?}");
+        let spec = |demuxer| PipelineSpec {
+            source: Source::File { path: "/clip.mp4".into(), stream_loop: -1, demuxer },
+            sink: CameraSink::None,
+            geometry: Geometry { width: 1280, height: 720, fps: 30 },
+            preview: None,
+            realtime: true,
+        };
+        let plain = build(&spec(None));
+        assert!(!plain.contains(&"-protocol_whitelist".to_string()), "{plain:?}");
+
+        // Phone videos: both options, as input options (before -i), on both pipelines.
+        for a in [mjpeg_store_args(Path::new("/p.mp4"), 640, 10, Some("mov")), build(&spec(Some("mov")))] {
+            let i = a.iter().position(|x| x == "-i").expect("-i");
+            let w = a.iter().position(|x| x == "-protocol_whitelist").expect("whitelist");
+            assert!(w < i, "{a:?}");
+            assert_eq!(a[w + 1], "file");
+            assert_eq!((a[w + 2].as_str(), a[w + 3].as_str()), ("-f", "mov"), "{a:?}");
+        }
+        let a = build(&spec(Some("matroska")));
+        let w = a.iter().position(|x| x == "-protocol_whitelist").unwrap();
+        assert_eq!(a[w + 3], "matroska");
+    }
+
+    #[test]
     fn the_store_caps_frames_at_the_source() {
-        let a = mjpeg_store_args(Path::new("/clip.mp4"), 640, 900).join(" ");
+        let a = mjpeg_store_args(Path::new("/clip.mp4"), 640, 900, None).join(" ");
         assert!(a.contains("-frames:v 900"), "{a}");
         assert!(a.contains("scale=640:-2"), "{a}");
     }
 
     #[test]
     fn the_store_skips_audio_and_subtitles() {
-        let a = mjpeg_store_args(Path::new("/clip.mp4"), 640, 10).join(" ");
+        let a = mjpeg_store_args(Path::new("/clip.mp4"), 640, 10, None).join(" ");
         assert!(a.contains("-an"), "{a}");
         assert!(a.contains("-sn"), "{a}");
     }
@@ -580,7 +637,7 @@ mod tests {
         let src = make_4x3_fixture(dir.path(), 1);
         let geometry = Geometry { width: 1280, height: 720, fps: 30 };
         let spec = PipelineSpec {
-            source: Source::File { path: src.to_string_lossy().into_owned(), stream_loop: 0 },
+            source: Source::File { path: src.to_string_lossy().into_owned(), stream_loop: 0, demuxer: None },
             sink: CameraSink::RawBgr24Stdout,
             geometry,
             preview: None,
@@ -607,6 +664,55 @@ mod tests {
         assert_eq!(out.stdout.len() / frame, 30, "1s at 30 fps");
     }
 
+    /// The restricted input really plays a video, and really refuses to follow a playlist
+    /// that an unrestricted ffmpeg follows.
+    #[test]
+    fn a_restricted_input_plays_a_video_but_does_not_follow_a_playlist() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = make_4x3_fixture(dir.path(), 1);
+        let geometry = Geometry { width: 1280, height: 720, fps: 30 };
+        let run = |path: &std::path::Path, demuxer| {
+            let spec = PipelineSpec {
+                source: Source::File { path: path.to_string_lossy().into_owned(), stream_loop: 0, demuxer },
+                sink: CameraSink::RawBgr24Stdout,
+                geometry,
+                preview: None,
+                realtime: false,
+            };
+            std::process::Command::new("ffmpeg").args(build(&spec)).output().expect("failed to run the built pipeline")
+        };
+        let frame = CameraSink::RawBgr24Stdout.frame_bytes(&geometry).unwrap();
+
+        // The video itself: all 30 frames, on both pipelines.
+        let out = run(&src, Some("mov"));
+        assert!(out.status.success(), "restricted playback failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.stdout.len() / frame, 30);
+        let store = std::process::Command::new("ffmpeg").args(mjpeg_store_args(&src, 640, 30, Some("mov"))).output().unwrap();
+        assert!(store.status.success() && !store.stdout.is_empty(), "{}", String::from_utf8_lossy(&store.stderr));
+
+        // A playlist that points at it, named like a video. An ffmpeg left to guess the
+        // format by content can take such a file for HLS and play what it names (newer
+        // builds refuse HLS under a foreign extension; the bundled one is not relied on)…
+        let playlist = dir.path().join("holiday.mp4");
+        std::fs::write(
+            &playlist,
+            format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1,\n{}\n#EXT-X-ENDLIST\n", src.display()),
+        )
+        .unwrap();
+        // …held to the demuxer and the `file` protocol, it produces nothing.
+        let out = run(&playlist, Some("mov"));
+        assert!(!out.status.success() || out.stdout.is_empty(), "the playlist was followed");
+        assert_eq!(out.stdout.len(), 0);
+        let store = std::process::Command::new("ffmpeg").args(mjpeg_store_args(&playlist, 640, 30, Some("mov"))).output().unwrap();
+        assert!(store.stdout.is_empty(), "the playlist was followed by the frame store");
+        // And a Matroska file is not opened as something else.
+        assert!(run(&src, Some("matroska")).stdout.is_empty());
+    }
+
     #[test]
     fn a_four_by_three_source_is_pillarboxed_not_stretched() {
         // The regression this filter exists for. A 640x480 source fitted into 1280x720
@@ -621,7 +727,7 @@ mod tests {
         let (w, h) = (1280usize, 720usize);
         let geometry = Geometry { width: w as u32, height: h as u32, fps: 30 };
         let spec = PipelineSpec {
-            source: Source::File { path: src.to_string_lossy().into_owned(), stream_loop: 0 },
+            source: Source::File { path: src.to_string_lossy().into_owned(), stream_loop: 0, demuxer: None },
             sink: CameraSink::RawBgr24Stdout,
             geometry,
             preview: None,

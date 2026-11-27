@@ -53,7 +53,7 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use super::file_receive::DATA_CHANNEL_LABEL;
+use super::file_receive::{DATA_CHANNEL_LABEL, MAX_CHUNK_BYTES};
 use super::media::{h264_is_keyframe, vp8_is_keyframe, PliLimiter};
 use super::signal::{StopReason, MAX_REMOTE_CANDIDATES, MAX_SDP_BYTES};
 use crate::pipeline::EncodedCodec;
@@ -63,6 +63,10 @@ const MAX_HOST_IPS: usize = 4;
 pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const STUN_BUDGET: Duration = Duration::from_millis(800);
 const FRAME_QUEUE: usize = 90;
+/// `progress` reports waiting for the data channel beyond this many are not queued.
+const MAX_PENDING_TEXT: usize = 64;
+/// While the consumer of a file session is behind, str0m's timers run this often.
+const OUTBOX_TIMER: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct RtcOptions {
@@ -118,7 +122,11 @@ pub enum RtcCommand {
     /// The consumer dropped frames; treat the stream as discontinuous.
     FramesDropped,
     /// Send a text message on the file data channel (queued until the channel can take it).
+    /// Never dropped: these are the few messages a transfer ends with.
     ChannelText(String),
+    /// Like [`Self::ChannelText`], for a `progress` report: one that is still waiting when
+    /// the next arrives is replaced by it, and none is queued once the queue is long.
+    ChannelProgress(String),
     /// Answered once every [`Self::ChannelText`] sent before it has been acknowledged by the
     /// phone (SCTP), or at once when there is no channel to deliver on. Dropped unanswered
     /// when the task ends first.
@@ -325,8 +333,10 @@ fn build_rtc(start: Instant, mode: RtcMode) -> Rtc {
         .clear_codecs()
         .set_stats_interval(None);
     if mode == RtcMode::File {
-        // No codecs: only the SCTP association (data channels) is negotiated.
-        return cfg.build(start);
+        // No codecs: only the SCTP association (data channels) is negotiated. The phone
+        // sends pieces of at most 64 KiB; say so (`a=max-message-size`) and let SCTP refuse
+        // anything larger instead of reassembling it first (str0m's default is 256 KiB).
+        return cfg.set_sctp_max_message_size(MAX_CHUNK_BYTES as u32).build(start);
     }
     // H.264 first: str0m answers with the first local codec the offer also has, and with
     // VP8 configured first it picked VP8 even when Chrome preferred H.264 (spike finding).
@@ -411,6 +421,7 @@ async fn run(
     drop(udp_tx);
 
     let mut st = LoopState {
+        mode,
         video_mid: None,
         connected_at: None,
         last_media: None,
@@ -445,6 +456,18 @@ async fn run(
                     Ok(permit) => permit.send(ev),
                     Err(_) => break 'main RtcClose::Stopped,
                 },
+                // The consumer is behind (a slow disk). Nothing is read from the network
+                // meanwhile, but str0m's own timers — ICE consent checks, SACKs,
+                // retransmissions — still have to run, or a long wait ends the connection.
+                _ = tokio::time::sleep(OUTBOX_TIMER) => {
+                    st.outbox.push_front(ev);
+                    if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                        break 'main RtcClose::Failed { reason: StopReason::Error, detail: "the connection failed".into() };
+                    }
+                    if let Err(close) = drain(&mut rtc, &sockets, &mut st, &ev_tx) {
+                        break 'main close;
+                    }
+                }
             }
         }
         flush_channel_text(&mut rtc, &mut st);
@@ -560,6 +583,7 @@ async fn run(
 }
 
 struct LoopState {
+    mode: RtcMode,
     video_mid: Option<Mid>,
     connected_at: Option<Instant>,
     last_media: Option<Instant>,
@@ -573,8 +597,9 @@ struct LoopState {
     file_channel: Option<ChannelId>,
     /// Data channel events not yet handed to the consumer (see step 0 of the loop).
     outbox: std::collections::VecDeque<RtcEvent>,
-    /// Text for the phone that the channel could not take yet.
-    pending_text: std::collections::VecDeque<String>,
+    /// Text for the phone that the channel could not take yet; `true` marks a `progress`
+    /// report, which a newer one may replace.
+    pending_text: std::collections::VecDeque<(String, bool)>,
     /// [`RtcCommand::Delivered`] requests waiting for the phone's acknowledgement.
     delivery_waiters: Vec<tokio::sync::oneshot::Sender<()>>,
     /// Datagrams that were not for this session or that str0m rejected.
@@ -594,14 +619,33 @@ fn handle_command(rtc: &mut Rtc, cmd: RtcCommand, st: &mut LoopState, limits: &m
             st.pli.want();
         }
         RtcCommand::ChannelText(text) => {
-            // Bounded: these are a handful of short status lines per second at most.
-            if st.pending_text.len() < 64 {
-                st.pending_text.push_back(text);
-            }
+            // Never dropped (`saved`, `looping`, `error`, the final `progress`): a session
+            // sends a handful of these in all, so the queue stays bounded by the protocol.
+            st.pending_text.push_back((text, false));
+            flush_channel_text(rtc, st);
+        }
+        RtcCommand::ChannelProgress(text) => {
+            queue_progress(&mut st.pending_text, text);
             flush_channel_text(rtc, st);
         }
         RtcCommand::Delivered(done) => st.delivery_waiters.push(done),
         RtcCommand::Stop => {}
+    }
+}
+
+/// Whether a data channel the phone opened becomes the session's file channel: only in a
+/// file session, only under the agreed label, and only the first one.
+fn adopts_channel(mode: RtcMode, label: &str, have_one: bool) -> bool {
+    mode == RtcMode::File && label == DATA_CHANNEL_LABEL && !have_one
+}
+
+/// Queue a `progress` report: it replaces one that is still waiting at the back (only the
+/// newest count matters), and is dropped when [`MAX_PENDING_TEXT`] messages already wait.
+fn queue_progress(pending: &mut std::collections::VecDeque<(String, bool)>, text: String) {
+    if let Some((waiting, true)) = pending.back_mut() {
+        *waiting = text;
+    } else if pending.len() < MAX_PENDING_TEXT {
+        pending.push_back((text, true));
     }
 }
 
@@ -626,7 +670,7 @@ fn notify_delivered(rtc: &mut Rtc, st: &mut LoopState) {
 /// Write queued text to the file data channel, in order, as far as its send buffer allows.
 fn flush_channel_text(rtc: &mut Rtc, st: &mut LoopState) {
     let Some(id) = st.file_channel else { return };
-    while let Some(text) = st.pending_text.front() {
+    while let Some((text, _)) = st.pending_text.front() {
         let Some(mut channel) = rtc.channel(id) else { return };
         match channel.write(false, text.as_bytes()) {
             Ok(true) => {
@@ -682,7 +726,10 @@ fn drain(
                     }
                 }
                 Event::ChannelOpen(id, label) => {
-                    if label == DATA_CHANNEL_LABEL && st.file_channel.is_none() {
+                    // A live session has no use for a data channel, whatever it is called:
+                    // adopting one would let the phone queue messages into the path the
+                    // video frames take.
+                    if adopts_channel(st.mode, &label, st.file_channel.is_some()) {
                         st.file_channel = Some(id);
                         st.outbox.push_back(RtcEvent::ChannelOpen);
                     } else {
@@ -1164,6 +1211,43 @@ mod tests {
         assert!(answer.contains("a=sctp-port:"), "{answer}");
         assert!(!answer.contains("m=video") && !answer.contains("m=audio"), "{answer}");
         assert!(answer.contains("a=candidate:"), "candidates embedded in the answer");
+        // The phone is told the largest message it may send: one 64 KiB piece. (The phone
+        // page sizes its pieces by this, and SCTP refuses anything larger.)
+        assert!(answer.contains("a=max-message-size:65536"), "{answer}");
+        assert_eq!(MAX_CHUNK_BYTES, 65536);
+    }
+
+    #[test]
+    fn only_a_file_session_adopts_the_file_channel() {
+        assert!(adopts_channel(RtcMode::File, DATA_CHANNEL_LABEL, false));
+        // A live session ignores data channels altogether, also one with the right label.
+        assert!(!adopts_channel(RtcMode::Live, DATA_CHANNEL_LABEL, false));
+        assert!(!adopts_channel(RtcMode::File, "something-else", false));
+        assert!(!adopts_channel(RtcMode::File, DATA_CHANNEL_LABEL, true), "one channel per session");
+    }
+
+    #[test]
+    fn progress_reports_are_coalesced_and_nothing_else_is_ever_dropped() {
+        let mut pending = std::collections::VecDeque::new();
+        let texts = |p: &std::collections::VecDeque<(String, bool)>| p.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
+        // The channel is not taking anything; progress keeps coming.
+        for n in 0..500 {
+            queue_progress(&mut pending, format!("progress {n}"));
+        }
+        assert_eq!(texts(&pending), vec!["progress 499"], "only the newest count waits");
+        // A message that must arrive goes behind it and is not replaced by later progress.
+        pending.push_back(("saved".into(), false));
+        queue_progress(&mut pending, "progress 500".into());
+        queue_progress(&mut pending, "progress 501".into());
+        assert_eq!(texts(&pending), vec!["progress 499", "saved", "progress 501"]);
+        // With the queue long, progress is not queued at all — but the queue itself never
+        // refuses a final message (`handle_command` pushes those unconditionally).
+        while pending.len() < MAX_PENDING_TEXT {
+            pending.push_back(("error".into(), false));
+        }
+        queue_progress(&mut pending, "progress 502".into());
+        assert_eq!(pending.len(), MAX_PENDING_TEXT);
+        assert_eq!(pending.back().map(|(t, _)| t.as_str()), Some("error"));
     }
 
     fn chrome_like_offer() -> String {

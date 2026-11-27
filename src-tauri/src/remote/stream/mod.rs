@@ -37,7 +37,7 @@ pub mod runner;
 pub mod signal;
 
 pub use handoff::phone_owns_camera;
-pub use file_receive::{FileDeps, LoopPlayer, LoopState, PhoneVideoStore};
+pub use file_receive::{FileDeps, LoopPlayer, LoopState, PhoneVideoStore, PlayError, PlayRequest, Played};
 pub use machine::{FilePhase, FileStatus, Phase, StreamRequest, StreamStatus};
 pub use manager::{ChannelDecisions, DecisionEvent, DecisionSink, LoopDeps, SessionBackend, StreamManager};
 pub use runner::{CameraControl, CameraTarget, Cancel, FixedCamera, IceSource, NoStun, SessionDeps, SessionKind};

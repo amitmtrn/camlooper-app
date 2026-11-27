@@ -11,12 +11,15 @@
 //!   `{sessionId}`: informational (logging); the UI must not depend on their order relative
 //!   to the status events, which travel through a separate task.
 //! * `remote://stream-stop-failed` — error code: the tray's "Stop phone camera" failed.
-//! * `remote://phone-video-loaded` — `{video: VideoInfo, playing: true}`: a video received
-//!   from the phone was loaded and is looping. `video` is exactly what `load_video_file` /
-//!   `stream_upload_and_load_video` return for a desktop-picked file, so the UI can put it
-//!   where it puts those. The virtual camera is running by then (started here if it was off).
-//! * `remote://loop-changed` — `{playing}`: the phone stopped or started the loop
-//!   (`loop_control`), which the UI otherwise only does itself.
+//! * `remote://phone-video-loaded` — `{video: VideoInfo, playing}`: a video received from the
+//!   phone was loaded. `playing: true`: it is looping. `playing: false`: it is loaded but
+//!   playback could not be started (and there was no earlier video to go back to). `video`
+//!   is exactly what `load_video_file` / `stream_upload_and_load_video` return for a
+//!   desktop-picked file, so the UI can put it where it puts those. The virtual camera is
+//!   running by then (started here if it was off).
+//! * `remote://loop-changed` — `{playing}`: the loop was stopped or started from here and
+//!   not by the window: the phone's `loop_control`, or a phone video that could not be
+//!   started after the earlier one had been stopped for it.
 //!
 //! [`StreamStatus`] also carries `mode` (`"live"` | `"file"`) and, for a file session,
 //! `file: {name, size, received, phase, error?}` — see `machine.rs`.
@@ -54,8 +57,20 @@ impl LoopHost for AppLoopHost {
         let _ = self.0.emit("remote://loop-changed", serde_json::json!({ "playing": playing }));
     }
 
-    fn video_loaded(&self, video: &VideoInfo) {
-        let _ = self.0.emit("remote://phone-video-loaded", serde_json::json!({ "video": video, "playing": true }));
+    fn video_loaded(&self, video: &VideoInfo, playing: bool) {
+        let _ = self.0.emit("remote://phone-video-loaded", serde_json::json!({ "video": video, "playing": playing }));
+    }
+}
+
+/// A video was loaded from the computer itself (the window's file picker, a recording): a
+/// phone video that was loaded until now is no longer needed on disk. Files a transfer is
+/// working on are left alone by the store.
+pub async fn sweep_unused_phone_videos() {
+    let Some(store) = PHONE_VIDEOS.get() else { return };
+    let loaded = crate::video_processor::loaded_video().await.map(|(path, _)| path);
+    let removed = store.sweep(loaded.as_deref());
+    if removed > 0 {
+        log::debug!("phone stream: removed {removed} phone video file(s) that are no longer loaded");
     }
 }
 
@@ -130,25 +145,34 @@ pub(crate) fn install(app: AppHandle) -> (StreamManager, mpsc::UnboundedReceiver
         eprintln!("phone stream: {e}");
         std::path::PathBuf::from("ffmpeg")
     });
-    let app_data = app.path().app_data_dir().unwrap_or_else(|e| {
-        eprintln!("phone stream: no app data directory ({e}); phone videos go to the temp directory");
-        std::env::temp_dir().join("camlooper")
-    });
-    let store = PhoneVideoStore::in_app_data(&app_data);
-    // Left over from the last run (a crash, a file that was still open at exit). Nothing
-    // is loaded yet and nothing will be restored, so everything goes.
-    let swept = store.sweep(None);
-    if swept > 0 {
-        eprintln!("phone stream: removed {swept} leftover phone video file(s)");
+    // Phone videos go under the app's own data directory and nowhere else. Without one
+    // there is no fallback (a shared temp directory is a place where another user can put
+    // a directory or a symlink first): videos from the phone are then refused outright.
+    let store = match app.path().app_data_dir() {
+        Ok(app_data) => Some(PhoneVideoStore::in_app_data(&app_data)),
+        Err(e) => {
+            eprintln!("phone stream: no app data directory ({e}); videos from the phone are disabled");
+            None
+        }
+    };
+    if let Some(store) = &store {
+        // Left over from the last run (a crash, a file that was still open at exit).
+        // Nothing is loaded yet and nothing will be restored, so everything goes. (A second
+        // instance cannot be looping one of them: `tauri_plugin_single_instance` is the
+        // first plugin registered in lib.rs, long before the relay task calls this.)
+        let swept = store.sweep(None);
+        if swept > 0 {
+            eprintln!("phone stream: removed {swept} leftover phone video file(s)");
+        }
+        let _ = PHONE_VIDEOS.set(store.clone());
     }
-    let _ = PHONE_VIDEOS.set(store.clone());
     let player: Arc<dyn LoopPlayer> = Arc::new(EngineLoop::new(Arc::new(AppLoopHost(app.clone()))));
     let mut deps = SessionDeps::new(ffmpeg, Arc::new(AppCamera::default()), Arc::new(RelayIce));
-    deps.files = Some(FileDeps::new(store.clone(), player.clone()));
+    deps.files = store.clone().map(|store| FileDeps::new(store, player.clone()));
     let (manager, outbound) = StreamManager::spawn_with_loop(
         Arc::new(Arc::new(deps)),
         Arc::new(UiDecisions(app.clone())),
-        LoopDeps { player, store: Some(store) },
+        LoopDeps { player, store },
     );
     let mut status = manager.subscribe();
     tokio::spawn(async move {
