@@ -9,7 +9,10 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
 import android.view.WindowManager;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -37,9 +40,12 @@ public class MainActivity extends Activity {
     static final String PATH = "/remote-app/";
     static final String START_URL = "https://" + HOST + PATH + "index.html";
     private static final int REQ_MEDIA = 42;
+    private static final int REQ_FILE = 43;
 
     private WebView webView;
     private PermissionRequest pendingRequest;
+    /** Callback of the page's pending <input type="file"> (one at a time). */
+    private ValueCallback<Uri[]> fileCallback;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -103,6 +109,31 @@ public class MainActivity extends Activity {
             @Override
             public void onPermissionRequestCanceled(PermissionRequest request) {
                 if (pendingRequest == request) pendingRequest = null;
+            }
+
+            /**
+             * <input type="file" accept="video/*"> ("Loop a video"). Opens the system picker
+             * (Photos/Gallery/Files) for one video; the WebView reads the returned content:// URI
+             * itself through the File/Blob API, nothing is copied by the app.
+             */
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (fileCallback != null) fileCallback.onReceiveValue(null);
+                fileCallback = callback;
+                Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+                pick.addCategory(Intent.CATEGORY_OPENABLE);
+                pick.setType(pickerMimeType(params));
+                pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
+                        params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+                try {
+                    startActivityForResult(Intent.createChooser(pick, getString(R.string.pick_video)), REQ_FILE);
+                } catch (ActivityNotFoundException e) {
+                    fileCallback = null;
+                    callback.onReceiveValue(null);
+                    Toast.makeText(MainActivity.this, R.string.no_picker, Toast.LENGTH_LONG).show();
+                }
+                return true;
             }
         });
 
@@ -172,6 +203,39 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** The page asks for video/*; fall back to video/* for anything odd (never open-ended). */
+    static String pickerMimeType(WebChromeClient.FileChooserParams params) {
+        String[] types = params.getAcceptTypes();
+        if (types != null) {
+            for (String t : types) {
+                if (t != null && t.trim().startsWith("video/")) return t.trim();
+            }
+        }
+        return "video/*";
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode != REQ_FILE) {
+            super.onActivityResult(requestCode, resultCode, data);
+            return;
+        }
+        ValueCallback<Uri[]> cb = fileCallback;
+        fileCallback = null;
+        if (cb == null) return;
+        Uri[] result = null;
+        if (resultCode == RESULT_OK && data != null) {
+            ClipData clip = data.getClipData();
+            if (clip != null && clip.getItemCount() > 0) {
+                result = new Uri[clip.getItemCount()];
+                for (int i = 0; i < clip.getItemCount(); i++) result[i] = clip.getItemAt(i).getUri();
+            } else if (data.getData() != null) {
+                result = new Uri[]{data.getData()};
+            }
+        }
+        cb.onReceiveValue(result); // null = cancelled; the page must handle "no file picked"
+    }
+
     @Override
     public void onBackPressed() {
         if (webView != null && webView.canGoBack()) webView.goBack();
@@ -186,6 +250,10 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (fileCallback != null) {
+            fileCallback.onReceiveValue(null);
+            fileCallback = null;
+        }
         if (webView != null) {
             webView.destroy();
             webView = null;
