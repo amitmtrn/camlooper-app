@@ -2,15 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
-import { Loader2, Smartphone, Square, X } from "lucide-react";
+import { FileVideo, Loader2, Smartphone, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
   codecLabel,
+  fileBannerView,
+  fileProgressPercent,
   FORCE_STOP_AFTER_MS,
   formatElapsed,
+  formatMegabytes,
   isolate,
   phoneErrorKey,
+  sessionFile,
   type PhoneStreamError,
   type PhoneStreamRequest,
   type PhoneStreamStatus,
@@ -96,7 +100,8 @@ function useAcceptArming(): { armed: boolean; isArmed: () => boolean } {
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
- * "Use your phone as the camera?" — shown while the backend waits for a decision (60 s).
+ * "Use your phone as the camera?" — or, for a video the phone wants to send, "Loop a video
+ * from <phone>?" with its name and size — shown while the backend waits for a decision (60 s).
  *
  * A real modal: rendered in a portal on `<body>` with the app root made `inert`, so nothing
  * behind it can be reached by Tab or click and no other overlay can cover it. (Dropdowns
@@ -126,6 +131,7 @@ export function PhoneStreamDialog({
   const phone = isolate(request.deviceName || t("phoneStream.yourPhone"));
   const expired = seconds === 0;
   const { sessionId } = request;
+  const file = request.mode === "file" ? request.file : null;
 
   // Modal for real: everything else inert, focus inside, focus given back afterwards.
   useEffect(() => {
@@ -204,12 +210,29 @@ export function PhoneStreamDialog({
         <div className="flex items-center gap-3">
           <Smartphone className="h-6 w-6 text-primary shrink-0" />
           <h2 id="phone-stream-dialog-title" className="text-lg font-semibold">
-            {t("phoneStream.confirmTitle")}
+            {file ? t("phoneStream.file.confirmTitle", { phone }) : t("phoneStream.confirmTitle")}
           </h2>
         </div>
-        <p id="phone-stream-dialog-desc" className="text-sm text-muted-foreground [overflow-wrap:anywhere]">
-          {t("phoneStream.confirmBody", { phone })}
-        </p>
+        {/* Name and size are part of the description: what is being accepted is read out too. */}
+        <div id="phone-stream-dialog-desc" className="space-y-3">
+          <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">
+            {file ? t("phoneStream.file.confirmBody", { phone }) : t("phoneStream.confirmBody", { phone })}
+          </p>
+          {file && (
+            <div className="flex items-center gap-3 rounded-md border bg-muted/40 p-3">
+              <FileVideo className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <div className="min-w-0">
+                {/* The phone chose this name: its own direction, wrapped anywhere, never markup. */}
+                <p className="text-sm font-medium [overflow-wrap:anywhere]">
+                  <bdi>{file.name}</bdi>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  <bdi>{t("phoneStream.file.size", { value: formatMegabytes(file.size) })}</bdi>
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
         <p id="phone-stream-dialog-countdown" className="text-xs text-muted-foreground" aria-live="off">
           {t("phoneStream.countdown", { seconds })}
         </p>
@@ -237,7 +260,11 @@ export function PhoneStreamDialog({
   );
 }
 
-/** Top-of-window banner while the phone owns the camera, plus the last failure. */
+/**
+ * Top-of-window banner while the phone owns the camera, plus the last failure. For a video
+ * the phone is sending it shows the transfer instead: "Receiving video from <phone> — 45 %"
+ * with a progress bar and Cancel, then "Preparing loop…".
+ */
 export function PhoneStreamBanner({
   status,
   error,
@@ -265,6 +292,67 @@ export function PhoneStreamBanner({
     const id = window.setTimeout(() => setCanForceStop(true), wait);
     return () => window.clearTimeout(id);
   }, [stoppingSince]);
+
+  const fileView = fileBannerView(status);
+  const file = sessionFile(status);
+  if (file) {
+    // A video on its way. Once it loops or has failed the banner is gone: a toast says so.
+    if (!fileView) return null;
+    const percent = fileProgressPercent(file);
+    return (
+      <div className="sticky top-0 z-40 border-b border-primary/40 bg-primary/15 backdrop-blur-sm">
+        <div className="max-w-6xl mx-auto px-4 py-2 flex items-center gap-3">
+          <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" aria-hidden="true" />
+          <div className="flex-1 min-w-0 space-y-1">
+            <p className="text-sm [overflow-wrap:anywhere]">
+              {fileView === "receiving" ? (
+                // The number changes several times a second: not a live region. The progress
+                // bar below carries the value for assistive tech.
+                <span className="font-semibold">
+                  {t("phoneStream.file.receiving", { phone: isolate(phone), percent })}
+                </span>
+              ) : (
+                <span className="font-semibold" role="status" aria-live="polite">
+                  {fileView === "processing"
+                    ? t("phoneStream.file.preparing")
+                    : fileView === "stopping"
+                      ? t("phoneStream.file.cancelling")
+                      : t("phoneStream.connecting", { phone: isolate(phone) })}
+                </span>
+              )}
+              {fileView !== "connecting" && fileView !== "stopping" && (
+                <span className="text-muted-foreground">
+                  {" · "}
+                  <bdi>{file.name}</bdi>
+                </span>
+              )}
+            </p>
+            {fileView === "receiving" && (
+              <div
+                className="h-1.5 w-full overflow-hidden rounded-full bg-primary/20"
+                role="progressbar"
+                aria-label={t("phoneStream.file.receiving", { phone: isolate(phone), percent })}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={percent}
+              >
+                <div className="h-full rounded-full bg-primary transition-[width] duration-200" style={{ width: `${percent}%` }} />
+              </div>
+            )}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onStop}
+            disabled={status.state === "stopping" && !canForceStop}
+            className="shrink-0"
+          >
+            <X className="h-3 w-3" /> {t("phoneStream.file.cancel")}
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (active) {
     const codec = status.state === "live" ? codecLabel(status.codec) : null;

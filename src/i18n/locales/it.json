@@ -198,7 +198,20 @@
     "offline": "CamLooper non è connesso al servizio del telefono in questo momento. Riprova tra un attimo.",
     "stoppedByPhone": "Il telefono ha interrotto lo streaming.",
     "stopFailed": "Impossibile interrompere la fotocamera del telefono. Riprova o esci da CamLooper.",
-    "controlsLocked": "Il telefono sta usando la fotocamera di CamLooper. Interrompi la fotocamera del telefono per usare questi comandi."
+    "controlsLocked": "Il telefono sta usando la fotocamera di CamLooper. Interrompi la fotocamera del telefono per usare questi comandi.",
+    "file": {
+      "confirmTitle": "Riprodurre in loop un video da {{phone}}?",
+      "confirmBody": "{{phone}} vuole riprodurre questo video in loop sulla tua videocamera. Sostituisce il video in riproduzione.",
+      "size": "{{value}} MB",
+      "receiving": "Ricezione del video da {{phone}} — {{percent}} %",
+      "preparing": "Preparazione del loop…",
+      "cancelling": "Annullamento…",
+      "cancel": "Annulla",
+      "looping": "Il video di {{phone}} è ora in loop.",
+      "failed": "Impossibile riprodurre in loop il video dal telefono.",
+      "cancelledByPhone": "Il telefono ha annullato il video.",
+      "expired": "La richiesta è già scaduta. Invia di nuovo il video dal telefono."
+    }
   },
   "tray": {
     "show": "Mostra CamLooper",

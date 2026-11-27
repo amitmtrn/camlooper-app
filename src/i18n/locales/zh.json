@@ -198,7 +198,20 @@
     "offline": "CamLooper 目前未连接到手机服务。请稍后再试。",
     "stoppedByPhone": "手机已停止推流。",
     "stopFailed": "无法停止手机摄像头。请重试，或退出 CamLooper。",
-    "controlsLocked": "你的手机正在使用 CamLooper 摄像头。停止手机摄像头后才能使用这些控件。"
+    "controlsLocked": "你的手机正在使用 CamLooper 摄像头。停止手机摄像头后才能使用这些控件。",
+    "file": {
+      "confirmTitle": "循环播放来自 {{phone}} 的视频？",
+      "confirmBody": "{{phone}} 想在你的摄像头上循环播放这个视频。它会替换当前正在播放的视频。",
+      "size": "{{value}} MB",
+      "receiving": "正在接收来自 {{phone}} 的视频 — {{percent}} %",
+      "preparing": "正在准备循环…",
+      "cancelling": "正在取消…",
+      "cancel": "取消",
+      "looping": "正在循环播放来自 {{phone}} 的视频。",
+      "failed": "无法循环播放手机发来的视频。",
+      "cancelledByPhone": "手机已取消发送视频。",
+      "expired": "该请求已过期。请从手机重新发送视频。"
+    }
   },
   "tray": {
     "show": "显示 CamLooper",

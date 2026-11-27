@@ -198,7 +198,20 @@
     "offline": "CamLooper n'est pas connecté au service du téléphone pour le moment. Réessayez dans un instant.",
     "stoppedByPhone": "Le téléphone a arrêté la diffusion.",
     "stopFailed": "Impossible d'arrêter la caméra du téléphone. Réessayez ou quittez CamLooper.",
-    "controlsLocked": "Votre téléphone utilise la caméra CamLooper. Arrêtez la caméra du téléphone pour utiliser ces commandes."
+    "controlsLocked": "Votre téléphone utilise la caméra CamLooper. Arrêtez la caméra du téléphone pour utiliser ces commandes.",
+    "file": {
+      "confirmTitle": "Lire en boucle une vidéo de {{phone}} ?",
+      "confirmBody": "{{phone}} veut lire cette vidéo en boucle sur votre caméra. Elle remplace la vidéo en cours de lecture.",
+      "size": "{{value}} Mo",
+      "receiving": "Réception de la vidéo de {{phone}} — {{percent}} %",
+      "preparing": "Préparation de la boucle…",
+      "cancelling": "Annulation…",
+      "cancel": "Annuler",
+      "looping": "La vidéo de {{phone}} est maintenant lue en boucle.",
+      "failed": "Impossible de lire en boucle la vidéo de votre téléphone.",
+      "cancelledByPhone": "Le téléphone a annulé la vidéo.",
+      "expired": "Cette demande a déjà expiré. Renvoyez la vidéo depuis votre téléphone."
+    }
   },
   "tray": {
     "show": "Afficher CamLooper",

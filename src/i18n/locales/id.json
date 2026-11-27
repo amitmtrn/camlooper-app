@@ -198,7 +198,20 @@
     "offline": "CamLooper sedang tidak terhubung ke layanan ponsel. Coba lagi sebentar lagi.",
     "stoppedByPhone": "Ponsel berhenti melakukan streaming.",
     "stopFailed": "Tidak dapat menghentikan kamera ponsel. Coba lagi, atau keluar dari CamLooper.",
-    "controlsLocked": "Ponsel Anda sedang menggunakan kamera CamLooper. Hentikan kamera ponsel untuk menggunakan kontrol ini."
+    "controlsLocked": "Ponsel Anda sedang menggunakan kamera CamLooper. Hentikan kamera ponsel untuk menggunakan kontrol ini.",
+    "file": {
+      "confirmTitle": "Putar berulang video dari {{phone}}?",
+      "confirmBody": "{{phone}} ingin memutar video ini berulang di kamera Anda. Video ini menggantikan video yang sedang diputar.",
+      "size": "{{value}} MB",
+      "receiving": "Menerima video dari {{phone}} — {{percent}} %",
+      "preparing": "Menyiapkan pemutaran berulang…",
+      "cancelling": "Membatalkan…",
+      "cancel": "Batal",
+      "looping": "Video dari {{phone}} sekarang diputar berulang.",
+      "failed": "Tidak dapat memutar berulang video dari ponsel Anda.",
+      "cancelledByPhone": "Ponsel membatalkan video.",
+      "expired": "Permintaan itu sudah kedaluwarsa. Kirim lagi videonya dari ponsel Anda."
+    }
   },
   "tray": {
     "show": "Tampilkan CamLooper",

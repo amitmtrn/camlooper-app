@@ -89,6 +89,108 @@ enable raises a single UAC prompt to register the driver; that is by design.
 
 <!-- Newest entries first. -->
 
+### Loop a video sent from the phone (remote v2, phase 3)
+_Added 2026-11-27 · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, `src-tauri/src/remote/stream/`_
+
+On the phone page the "Loop a video" card sends one video file straight to the computer
+(WebRTC DataChannel, no upload to a server). The computer asks before taking it, shows the
+transfer in a banner, then loads the video and loops it on the virtual camera exactly like a
+file picked on the computer. The phone can then stop and restart that loop.
+
+**Already automated, don't repeat by hand:** `node remote-web/dev/smoke-file.mjs` (needs
+`playwright-core` ≥ 1.57, see `remote-web/dev/README.md`) drives the phone page against a fake
+desktop: the `stream_request` with `mode: "file"`, a datachannel-only offer, the `meta`
+message equal to the request, pieces of at most 64 KiB, at most ~4 MiB buffered, a
+byte-identical 24 MB file on arrival, the percentage / "Preparing loop…" / "Looping on your
+computer ✓" sequence, Stop loop / Play loop, the 300 MB limit and non-video files refused on
+the phone, every rejection reason, an error from the computer mid-transfer, Cancel, a video
+sent right after a camera stream (the `busy` answer is retried), and no CSP violation.
+`node remote-web/dev/update-csp.mjs --check` fails if the page's CSP hash is stale. The
+receiving side (storage, size limit, partial-file cleanup) is covered by `cargo test --lib`.
+What is not automated is the two real halves together, which is what the steps below are for.
+
+**Setup:** a build of this branch on the computer with a phone already linked (see "Phone
+remote: linking with a code"); phone and computer on the same Wi-Fi; the phone page open in
+Android Chrome (or the Android wrapper app). On the phone: one normal video of 20–100 MB
+(MP4), and one larger than 300 MB. A video already looping in CamLooper, and a meeting app's
+camera preview showing "CamLooper Virtual Camera".
+
+**Steps:**
+1. On the phone, scroll to **Loop a video** and tap **Choose a video**. Pick the file over
+   300 MB.
+2. Tap **Choose a different video** and pick the normal video. Tap **Send & loop**.
+3. On the computer, read the dialog, then click **Decline**.
+4. On the phone tap **Send & loop** again. On the computer click **Accept** (it is enabled
+   after about a second).
+5. Watch the computer's banner and the phone's card until the transfer ends.
+6. On the computer, look at the main window and at the virtual camera.
+7. On the phone tap **Stop loop**, wait two seconds, then tap **Play loop**.
+8. Send the same video again and, at about 30 %, click **Cancel** in the computer's banner.
+9. Send it again and, at about 30 %, tap **Cancel** on the phone.
+10. On the phone tap **Start streaming**, accept on the computer, wait for "Live", tap
+    **Stop**, and immediately send the video again (accept on the computer).
+11. Reload the phone page.
+
+**Expected:**
+1. The card shows the file's name and size and, in red, "This video is NNN MB. The largest
+   video you can send is 300 MB. …". There is no **Send & loop** button and the computer
+   shows nothing.
+2. Name and size are shown; the phone says "Waiting for the computer to accept…" with a
+   **Cancel** button, and **Start streaming** above is greyed out.
+3. The dialog is titled "Loop a video from <phone name>?" and shows the file name and its
+   size in MB (within 0.1 of what the phone shows). After Decline the phone says "The
+   computer declined the video." and offers **Send & loop** again.
+4. The dialog closes. The video that was already looping on the computer keeps playing, and
+   the video and camera controls stay usable (they are not greyed out as they are for a
+   phone camera stream).
+5. Computer: a banner "Receiving video from <phone name> — NN %" with the file name, a
+   filling bar and **Cancel**, then "Preparing loop…", then the banner disappears and a toast
+   says "Now looping the video from <phone name>." Phone: a large percentage, a bar, and
+   "X MB sent · Y MB confirmed · Z MB in total" (sent runs ahead of confirmed), then
+   "Preparing loop…", then green "Looping on your computer ✓". The phone's screen does not
+   dim or lock during the transfer.
+6. The main window is on the Loop step with the phone's video playing (the preview moves),
+   and Advanced → Video info shows the phone's file name. The virtual camera shows the
+   phone's video, looping.
+7. The phone card shows "Looping on your computer now", the file name and **Stop loop**.
+   After Stop loop: the label becomes "Loaded on your computer, not playing", the button
+   becomes **Play loop**, and the computer's main window shows the video as stopped within a
+   second. After Play loop both go back, and the computer's preview is moving again.
+8. The computer's banner disappears; the phone says "The transfer was cancelled on the
+   computer." The loop from step 6 is still the one loaded.
+9. The phone says "Cancelled." and shows the picker again; the computer's banner disappears
+   and a toast says the phone cancelled the video.
+10. The phone shows "Stopping the camera stream…" for a moment, then the normal transfer,
+    and ends with "Looping on your computer ✓" — never "The computer is busy…".
+11. After the reload the card again shows "Looping on your computer now" with the file name
+    and **Stop loop**, without sending anything.
+
+**Known gotchas:**
+- The computer's Video info card shows no resolution row for a video that came from the
+  phone: the app is not told the frame size for it. Name, duration and format are shown.
+- With natural motion on, "Preparing loop…" can last many seconds for a long video while it
+  is decoded; that is not a hang.
+- If the phone page goes to the background (switching apps, locking the screen), Android may
+  pause the transfer; the computer gives up after 20 s without data and the phone then shows
+  "The connection to your computer was lost before the video arrived."
+- A computer running an older CamLooper treats the request as a camera stream: its dialog
+  says "Use your phone as the camera?" and the phone ends with "Update CamLooper on your
+  computer…". Update the computer.
+- If the virtual camera was off when the video arrives (or when the phone taps **Play
+  loop**), the computer turns it on by itself, as pressing Play does. On Linux without the
+  v4l2loopback module loaded that is one polkit prompt; on the Windows **Store** build
+  before the driver was ever registered it is one UAC prompt (the direct-download build
+  registered it at install time and asks nothing). "Preparing loop…" stays up until the
+  prompt is answered; declining it ends in "The video could not be played on the computer."
+- During the transfer the tray tooltip says the phone is connecting, never "live", and its
+  **Stop phone camera** item cancels the transfer.
+- The received file is kept only while it is the loaded video. To check: during a transfer
+  the folder holds one `phone-<16 hex>.<ext>.part`; while it loops, exactly one
+  `phone-<16 hex>.<ext>` (never the phone's file name); after a cancel or a failure, and
+  after quitting CamLooper, it is empty. Linux: `ls ~/.local/share/com.camlooper.app/phone-videos/`;
+  Windows: `dir "%APPDATA%\com.camlooper.app\phone-videos"`. On Windows a file that was
+  still playing at quit can survive until the next start, which removes it.
+
 ### Auto-join: CamLooper opens the meeting in its own browser window and clicks Join
 _Added 2026-11-09 · All · `src-tauri/src/meeting/`, `src/hooks/use-meeting.ts`, `src/components/RemoteCard.tsx`_
 

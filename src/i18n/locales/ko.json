@@ -198,7 +198,20 @@
     "offline": "CamLooper가 지금 휴대폰 서비스에 연결되어 있지 않습니다. 잠시 후 다시 시도하세요.",
     "stoppedByPhone": "휴대폰에서 스트리밍을 중지했습니다.",
     "stopFailed": "휴대폰 카메라를 중지하지 못했습니다. 다시 시도하거나 CamLooper를 종료하세요.",
-    "controlsLocked": "휴대폰이 CamLooper 카메라를 사용 중입니다. 이 컨트롤을 사용하려면 휴대폰 카메라를 중지하세요."
+    "controlsLocked": "휴대폰이 CamLooper 카메라를 사용 중입니다. 이 컨트롤을 사용하려면 휴대폰 카메라를 중지하세요.",
+    "file": {
+      "confirmTitle": "{{phone}}의 동영상을 반복 재생할까요?",
+      "confirmBody": "{{phone}}에서 이 동영상을 카메라에 반복 재생하려고 합니다. 지금 재생 중인 동영상을 대체합니다.",
+      "size": "{{value}} MB",
+      "receiving": "{{phone}}에서 동영상 수신 중 — {{percent}} %",
+      "preparing": "반복 재생 준비 중…",
+      "cancelling": "취소하는 중…",
+      "cancel": "취소",
+      "looping": "{{phone}}의 동영상을 반복 재생하고 있습니다.",
+      "failed": "휴대폰의 동영상을 반복 재생할 수 없습니다.",
+      "cancelledByPhone": "휴대폰에서 동영상 전송을 취소했습니다.",
+      "expired": "이 요청은 이미 만료되었습니다. 휴대폰에서 동영상을 다시 보내세요."
+    }
   },
   "tray": {
     "show": "CamLooper 표시",

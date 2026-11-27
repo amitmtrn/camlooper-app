@@ -198,7 +198,20 @@
     "offline": "CamLooper no está conectado al servicio del móvil en este momento. Inténtalo de nuevo en un momento.",
     "stoppedByPhone": "El móvil ha dejado de transmitir.",
     "stopFailed": "No se pudo detener la cámara del móvil. Inténtalo de nuevo o cierra CamLooper.",
-    "controlsLocked": "Tu móvil está usando la cámara de CamLooper. Detén la cámara del móvil para usar estos controles."
+    "controlsLocked": "Tu móvil está usando la cámara de CamLooper. Detén la cámara del móvil para usar estos controles.",
+    "file": {
+      "confirmTitle": "¿Reproducir en bucle un vídeo de {{phone}}?",
+      "confirmBody": "{{phone}} quiere reproducir este vídeo en bucle en tu cámara. Sustituye al vídeo que se está reproduciendo ahora.",
+      "size": "{{value}} MB",
+      "receiving": "Recibiendo vídeo de {{phone}} — {{percent}} %",
+      "preparing": "Preparando el bucle…",
+      "cancelling": "Cancelando…",
+      "cancel": "Cancelar",
+      "looping": "El vídeo de {{phone}} ya se reproduce en bucle.",
+      "failed": "No se pudo reproducir en bucle el vídeo de tu teléfono.",
+      "cancelledByPhone": "El teléfono canceló el vídeo.",
+      "expired": "Esa solicitud ya ha caducado. Vuelve a enviar el vídeo desde tu teléfono."
+    }
   },
   "tray": {
     "show": "Mostrar CamLooper",

@@ -240,7 +240,20 @@
     "offline": "CamLooper isn't connected to the phone service right now. Try again in a moment.",
     "stoppedByPhone": "Phone stopped streaming.",
     "stopFailed": "Couldn't stop the phone camera. Try again, or quit CamLooper.",
-    "controlsLocked": "Your phone is using the CamLooper camera. Stop the phone camera to use these controls."
+    "controlsLocked": "Your phone is using the CamLooper camera. Stop the phone camera to use these controls.",
+    "file": {
+      "confirmTitle": "Loop a video from {{phone}}?",
+      "confirmBody": "{{phone}} wants to loop this video on your camera. It replaces the video that is playing now.",
+      "size": "{{value}} MB",
+      "receiving": "Receiving video from {{phone}} — {{percent}} %",
+      "preparing": "Preparing loop…",
+      "cancelling": "Cancelling…",
+      "cancel": "Cancel",
+      "looping": "Now looping the video from {{phone}}.",
+      "failed": "Couldn't loop the video from your phone.",
+      "cancelledByPhone": "The phone cancelled the video.",
+      "expired": "That request has already expired. Send the video from your phone again."
+    }
   },
   "tray": {
     "show": "Show CamLooper",

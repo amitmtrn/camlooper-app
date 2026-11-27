@@ -198,7 +198,20 @@
     "offline": "CamLooper ist gerade nicht mit dem Handy-Dienst verbunden. Versuche es gleich noch einmal.",
     "stoppedByPhone": "Das Handy hat das Streaming beendet.",
     "stopFailed": "Die Handykamera konnte nicht gestoppt werden. Versuche es noch einmal oder beende CamLooper.",
-    "controlsLocked": "Dein Handy verwendet gerade die CamLooper-Kamera. Stoppe die Handykamera, um diese Steuerelemente zu verwenden."
+    "controlsLocked": "Dein Handy verwendet gerade die CamLooper-Kamera. Stoppe die Handykamera, um diese Steuerelemente zu verwenden.",
+    "file": {
+      "confirmTitle": "Video von {{phone}} in Schleife abspielen?",
+      "confirmBody": "{{phone}} möchte dieses Video in Schleife auf deiner Kamera abspielen. Es ersetzt das Video, das gerade läuft.",
+      "size": "{{value}} MB",
+      "receiving": "Video von {{phone}} wird empfangen — {{percent}} %",
+      "preparing": "Schleife wird vorbereitet…",
+      "cancelling": "Wird abgebrochen…",
+      "cancel": "Abbrechen",
+      "looping": "Das Video von {{phone}} läuft jetzt in Schleife.",
+      "failed": "Das Video von deinem Handy konnte nicht abgespielt werden.",
+      "cancelledByPhone": "Das Handy hat das Video abgebrochen.",
+      "expired": "Diese Anfrage ist bereits abgelaufen. Sende das Video noch einmal von deinem Handy."
+    }
   },
   "tray": {
     "show": "CamLooper anzeigen",

@@ -198,7 +198,20 @@
     "offline": "CamLooper şu anda telefon hizmetine bağlı değil. Birazdan tekrar deneyin.",
     "stoppedByPhone": "Telefon yayını durdurdu.",
     "stopFailed": "Telefon kamerası durdurulamadı. Tekrar deneyin veya CamLooper'dan çıkın.",
-    "controlsLocked": "Telefonunuz CamLooper kamerasını kullanıyor. Bu denetimleri kullanmak için telefon kamerasını durdurun."
+    "controlsLocked": "Telefonunuz CamLooper kamerasını kullanıyor. Bu denetimleri kullanmak için telefon kamerasını durdurun.",
+    "file": {
+      "confirmTitle": "{{phone}} cihazından gelen video döngüye alınsın mı?",
+      "confirmBody": "{{phone}} bu videoyu kameranızda döngüde oynatmak istiyor. Şu anda oynatılan videonun yerini alır.",
+      "size": "{{value}} MB",
+      "receiving": "{{phone}} cihazından video alınıyor — %{{percent}}",
+      "preparing": "Döngü hazırlanıyor…",
+      "cancelling": "İptal ediliyor…",
+      "cancel": "İptal",
+      "looping": "{{phone}} cihazından gelen video artık döngüde oynatılıyor.",
+      "failed": "Telefonunuzdan gelen video döngüye alınamadı.",
+      "cancelledByPhone": "Telefon videoyu iptal etti.",
+      "expired": "Bu isteğin süresi zaten doldu. Videoyu telefonunuzdan yeniden gönderin."
+    }
   },
   "tray": {
     "show": "CamLooper'ı göster",

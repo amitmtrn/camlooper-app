@@ -198,7 +198,20 @@
     "offline": "CamLooper hiện không kết nối với dịch vụ điện thoại. Hãy thử lại sau giây lát.",
     "stoppedByPhone": "Điện thoại đã dừng phát trực tiếp.",
     "stopFailed": "Không thể dừng camera điện thoại. Hãy thử lại hoặc thoát CamLooper.",
-    "controlsLocked": "Điện thoại của bạn đang dùng camera CamLooper. Hãy dừng camera điện thoại để dùng các điều khiển này."
+    "controlsLocked": "Điện thoại của bạn đang dùng camera CamLooper. Hãy dừng camera điện thoại để dùng các điều khiển này.",
+    "file": {
+      "confirmTitle": "Phát lặp video từ {{phone}}?",
+      "confirmBody": "{{phone}} muốn phát lặp video này trên camera của bạn. Video này sẽ thay thế video đang phát.",
+      "size": "{{value}} MB",
+      "receiving": "Đang nhận video từ {{phone}} — {{percent}} %",
+      "preparing": "Đang chuẩn bị phát lặp…",
+      "cancelling": "Đang hủy…",
+      "cancel": "Hủy",
+      "looping": "Video từ {{phone}} hiện đang được phát lặp.",
+      "failed": "Không thể phát lặp video từ điện thoại của bạn.",
+      "cancelledByPhone": "Điện thoại đã hủy gửi video.",
+      "expired": "Yêu cầu đó đã hết hạn. Hãy gửi lại video từ điện thoại của bạn."
+    }
   },
   "tray": {
     "show": "Hiện CamLooper",

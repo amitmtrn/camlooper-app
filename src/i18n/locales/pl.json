@@ -200,7 +200,20 @@
     "offline": "CamLooper nie jest teraz połączony z usługą telefonu. Spróbuj ponownie za chwilę.",
     "stoppedByPhone": "Telefon zakończył przesyłanie obrazu.",
     "stopFailed": "Nie udało się zatrzymać kamery telefonu. Spróbuj ponownie lub zamknij CamLooper.",
-    "controlsLocked": "Telefon używa kamery CamLooper. Zatrzymaj kamerę telefonu, aby użyć tych elementów sterujących."
+    "controlsLocked": "Telefon używa kamery CamLooper. Zatrzymaj kamerę telefonu, aby użyć tych elementów sterujących.",
+    "file": {
+      "confirmTitle": "Zapętlić film z {{phone}}?",
+      "confirmBody": "{{phone}} chce odtwarzać ten film w pętli w Twojej kamerze. Zastąpi film, który jest teraz odtwarzany.",
+      "size": "{{value}} MB",
+      "receiving": "Odbieranie filmu z {{phone}} — {{percent}} %",
+      "preparing": "Przygotowywanie pętli…",
+      "cancelling": "Anulowanie…",
+      "cancel": "Anuluj",
+      "looping": "Film z {{phone}} jest teraz odtwarzany w pętli.",
+      "failed": "Nie udało się zapętlić filmu z telefonu.",
+      "cancelledByPhone": "Telefon anulował wysyłanie filmu.",
+      "expired": "Ta prośba już wygasła. Wyślij film z telefonu jeszcze raz."
+    }
   },
   "tray": {
     "show": "Pokaż CamLooper",

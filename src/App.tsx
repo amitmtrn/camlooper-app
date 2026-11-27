@@ -43,7 +43,7 @@ import { useWelcomePopup } from "./hooks/use-welcome-popup";
 import { useWindowShown } from "./hooks/use-window-shown";
 import { useRemote, useRemoteCommands, type OpenMeetingCommand } from "./hooks/use-remote";
 import { RemoteCard, type RemoteCardHandle } from "./components/RemoteCard";
-import { usePhoneStream, cameraBusy, requestKey } from "./hooks/use-phone-stream";
+import { usePhoneStream, cameraBusy, isolate, requestKey, type PhoneStreamFile } from "./hooks/use-phone-stream";
 import { PhoneStreamBanner, PhoneStreamDialog } from "./components/PhoneStream";
 import { useMeeting, useMeetingStatus } from "@/hooks/use-meeting";
 import { Stepper } from "./components/flow/Stepper";
@@ -280,8 +280,12 @@ function CamLooper() {
   const remote = useRemote();
   const phoneStream = usePhoneStream({
     // The phone's own Stop: back to idle with a neutral note, never an error.
-    onStoppedByPhone: () => toast(t('phoneStream.stoppedByPhone')),
+    onStoppedByPhone: (mode) =>
+      toast(t(mode === 'file' ? 'phoneStream.file.cancelledByPhone' : 'phoneStream.stoppedByPhone')),
     onStopFailed: () => toast.error(t('phoneStream.stopFailed')),
+    onFileLooping: (file, deviceName) => void adoptPhoneVideo(file, deviceName),
+    onFileFailed: (file) =>
+      toast.error(t('phoneStream.file.failed'), { description: file.error || undefined }),
   });
   // A phone asking to stream raises the window; that must not also open the welcome page in
   // a browser (which would take the focus away from the question) or count as an app open
@@ -296,8 +300,9 @@ function CamLooper() {
   // controls and say why instead of letting the click fail.
   const phoneBusy = cameraBusy(phoneStream.status);
   const handlePhoneAccept = async (sessionId: string) => {
+    const wasFile = phoneStream.request?.mode === 'file';
     const result = await phoneStream.accept(sessionId);
-    if (result === 'expired') toast.error(t('phoneStream.expired'));
+    if (result === 'expired') toast.error(t(wasFile ? 'phoneStream.file.expired' : 'phoneStream.expired'));
     else if (result === 'offline') toast.warning(t('phoneStream.offline'));
     else if (result === 'failed') toast.error(t('phoneStream.errors.generic'));
     // 'too_soon': the dialog is still there; nothing to say.
@@ -508,6 +513,47 @@ function CamLooper() {
     }
   };
 
+  // The phone sent a video and the backend has already loaded and started it (the same
+  // engine as a file picked here). Show it the way a desktop-picked file is shown: loaded,
+  // on the Loop step, playing. The backend only reports playback, not the clip's frame size,
+  // so that row stays out of the info card (width/height 0).
+  const adoptPhoneVideo = async (file: PhoneStreamFile, deviceName: string | null) => {
+    toast.success(t('phoneStream.file.looping', { phone: isolate(deviceName || t('phoneStream.yourPhone')) }));
+    let status: StreamStatus | null = null;
+    try {
+      status = await invoke<StreamStatus>('get_video_stream_status');
+    } catch (error) {
+      console.error('phone video: could not read the stream status:', error);
+    }
+    const duration = status?.duration ?? 0;
+    const fps = status?.target_fps ?? 0;
+    setSelectedVideo(null);
+    setVideoInfo({
+      id: `phone-${Date.now()}`,
+      filename: file.name,
+      duration,
+      width: 0,
+      height: 0,
+      fps,
+      format: /\.([a-z0-9]{1,5})$/i.exec(file.name)?.[1]?.toLowerCase() ?? '',
+    });
+    setVideoMetadata({
+      name: file.name,
+      duration: `${Math.floor(duration / 60)}:${Math.floor(duration % 60).toString().padStart(2, '0')}`,
+      dimensions: '',
+      fps: fps > 0 ? `${Math.round(fps)}fps` : '',
+    });
+    setUploadError(null);
+    setIsLoopingComplete(false);
+    // Not out from under a recording that is running.
+    if (!isLiveRecording) setStep('loop');
+    // Still buffering for natural motion: the status poll below picks playback up when it starts.
+    if (status?.is_playing) {
+      setIsPlaying(true);
+      await startFrameReceiving();
+    }
+  };
+
   const handlePlayPause = async () => {
     if (!videoInfo) {
       return;
@@ -632,7 +678,12 @@ function CamLooper() {
         // Update virtual camera status periodically to reflect frame count
         updateVirtualCameraStatus();
         
-        if (!status.is_playing && isPlaying) {
+        if (status.is_playing && !isPlaying) {
+          // Playback started without a click here: the linked phone sent a video or pressed
+          // "Play loop", or a phone camera stream ended and handed the loop back.
+          setIsPlaying(true);
+          void startFrameReceiving();
+        } else if (!status.is_playing && isPlaying) {
           setIsPlaying(false);
           frameHolder.current.stop();
           
@@ -1799,14 +1850,19 @@ function CamLooper() {
                         <span className="text-muted-foreground">{t('advanced.videoDuration')}</span>
                         <span>{Math.floor(videoInfo.duration / 60)}:{Math.floor(videoInfo.duration % 60).toString().padStart(2, '0')}</span>
                       </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">{t('advanced.videoResolution')}</span>
-                        <span>{videoInfo.width}x{videoInfo.height}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">{t('advanced.videoFps')}</span>
-                        <span>{Math.round(videoInfo.fps)}</span>
-                      </div>
+                      {/* Unknown for a video the phone sent (see adoptPhoneVideo). */}
+                      {videoInfo.width > 0 && videoInfo.height > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">{t('advanced.videoResolution')}</span>
+                          <span>{videoInfo.width}x{videoInfo.height}</span>
+                        </div>
+                      )}
+                      {videoInfo.fps > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">{t('advanced.videoFps')}</span>
+                          <span>{Math.round(videoInfo.fps)}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">{t('advanced.videoFormat')}</span>
                         <span>{videoInfo.format}</span>

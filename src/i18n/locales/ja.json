@@ -198,7 +198,20 @@
     "offline": "CamLooper は現在スマホ連携サービスに接続されていません。しばらくしてからもう一度お試しください。",
     "stoppedByPhone": "スマホがストリーミングを停止しました。",
     "stopFailed": "スマホカメラを停止できませんでした。もう一度試すか、CamLooper を終了してください。",
-    "controlsLocked": "スマホが CamLooper カメラを使用中です。これらの操作を使うには、スマホカメラを停止してください。"
+    "controlsLocked": "スマホが CamLooper カメラを使用中です。これらの操作を使うには、スマホカメラを停止してください。",
+    "file": {
+      "confirmTitle": "{{phone}} の動画をループ再生しますか？",
+      "confirmBody": "{{phone}} がこの動画をカメラでループ再生しようとしています。現在再生中の動画と置き換わります。",
+      "size": "{{value}} MB",
+      "receiving": "{{phone}} から動画を受信中 — {{percent}} %",
+      "preparing": "ループを準備中…",
+      "cancelling": "キャンセル中…",
+      "cancel": "キャンセル",
+      "looping": "{{phone}} の動画をループ再生しています。",
+      "failed": "スマートフォンの動画をループ再生できませんでした。",
+      "cancelledByPhone": "スマートフォン側で動画の送信がキャンセルされました。",
+      "expired": "このリクエストはすでに期限切れです。スマートフォンからもう一度動画を送信してください。"
+    }
   },
   "tray": {
     "show": "CamLooper を表示",

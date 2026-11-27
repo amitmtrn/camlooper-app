@@ -69,6 +69,7 @@ await phone.routeWebSocket(/\/v1\/mobile\/ws/, (ws) => {
   ws.onMessage(async (msg) => {
     const m = JSON.parse(String(msg));
     if (m.type === "ping") { ws.send('{"type":"pong"}'); return; }
+    if (m.type === "signal" && m.data.kind === "loop_control") return; // the page asks for the loop state on load; not part of a stream
     frames.push(m.type === "signal" ? `signal:${m.data.kind}${m.data.kind === "candidate" && m.data.candidate === "" ? "(end)" : ""}` : `${m.type}:${m.data && m.data.reason}`);
     if (m.type === "signal") await desk.evaluate((d) => window.onSig(d), m.data);
   });

@@ -198,7 +198,20 @@
     "offline": "O CamLooper não está conectado ao serviço do celular no momento. Tente novamente em instantes.",
     "stoppedByPhone": "O celular parou de transmitir.",
     "stopFailed": "Não foi possível parar a câmera do celular. Tente de novo ou feche o CamLooper.",
-    "controlsLocked": "Seu celular está usando a câmera do CamLooper. Pare a câmera do celular para usar estes controles."
+    "controlsLocked": "Seu celular está usando a câmera do CamLooper. Pare a câmera do celular para usar estes controles.",
+    "file": {
+      "confirmTitle": "Repetir um vídeo de {{phone}}?",
+      "confirmBody": "{{phone}} quer reproduzir este vídeo em loop na sua câmera. Ele substitui o vídeo que está sendo reproduzido agora.",
+      "size": "{{value}} MB",
+      "receiving": "Recebendo vídeo de {{phone}} — {{percent}} %",
+      "preparing": "Preparando o loop…",
+      "cancelling": "Cancelando…",
+      "cancel": "Cancelar",
+      "looping": "O vídeo de {{phone}} agora está em loop.",
+      "failed": "Não foi possível reproduzir em loop o vídeo do seu telefone.",
+      "cancelledByPhone": "O telefone cancelou o vídeo.",
+      "expired": "Essa solicitação já expirou. Envie o vídeo do seu telefone novamente."
+    }
   },
   "tray": {
     "show": "Mostrar CamLooper",

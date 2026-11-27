@@ -15,6 +15,23 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type PhoneStreamPhase = "idle" | "requested" | "connecting" | "live" | "stopping" | "error";
 
+/** What a session carries: the phone's live camera, or one video file to loop. */
+export type PhoneStreamMode = "live" | "file";
+
+export type PhoneFilePhase = "pending" | "receiving" | "processing" | "looping" | "failed";
+
+/** The video of a `file` session. `name` comes from the phone: display only. */
+export interface PhoneStreamFile {
+  name: string;
+  /** Bytes the phone announced. */
+  size: number;
+  /** Bytes written so far. */
+  received: number;
+  phase: PhoneFilePhase;
+  /** Short human text, when `phase` is `failed`. */
+  error?: string | null;
+}
+
 export interface PhoneStreamStatus {
   /** Grows with every change the backend publishes. */
   seq: number;
@@ -41,12 +58,19 @@ export interface PhoneStreamStatus {
    * playback and the camera are refused until it lets go.
    */
   releasing: boolean;
+  /** Absent from a backend that only knows live streams: read it with [`sessionMode`]. */
+  mode?: PhoneStreamMode | null;
+  /** Set for `file` sessions only. */
+  file?: PhoneStreamFile | null;
 }
 
 export interface PhoneStreamRequest {
   sessionId: string;
   deviceName: string | null;
   expiresAt: number;
+  mode: PhoneStreamMode;
+  /** The video the phone wants to send, for `mode: "file"`. */
+  file: PhoneStreamFile | null;
 }
 
 export interface PhoneStreamError {
@@ -70,12 +94,54 @@ const IDLE: PhoneStreamStatus = {
   lastErrorCode: null,
   endedByPhone: false,
   releasing: false,
+  mode: "live",
+  file: null,
 };
+
+/** `"file"` only when the status says so and names the file; everything else is a live stream. */
+export function sessionMode(status: Pick<PhoneStreamStatus, "mode" | "file">): PhoneStreamMode {
+  return status.mode === "file" && status.file ? "file" : "live";
+}
+
+/** The file of a `file` session, else `null`. */
+export function sessionFile(status: Pick<PhoneStreamStatus, "mode" | "file">): PhoneStreamFile | null {
+  return sessionMode(status) === "file" ? (status.file ?? null) : null;
+}
+
+/** Whole percent received, 0–100. 100 only once every announced byte is there. */
+export function fileProgressPercent(file: Pick<PhoneStreamFile, "size" | "received">): number {
+  const size = Number(file.size);
+  const received = Number(file.received);
+  if (!(size > 0) || !(received > 0)) return 0;
+  if (received >= size) return 100;
+  return Math.min(99, Math.floor((received / size) * 100));
+}
+
+/** Bytes as megabytes (MiB) with one decimal: `"12.3"`; small files never read as `"0.0"`. */
+export function formatMegabytes(bytes: number): string {
+  const mb = Math.max(0, Number(bytes) || 0) / (1024 * 1024);
+  if (mb > 0 && mb < 0.1) return "0.1";
+  return mb >= 100 ? String(Math.round(mb)) : mb.toFixed(1);
+}
+
+/** What the top banner shows for a `file` session, or `null` for nothing. */
+export type FileBannerView = "connecting" | "receiving" | "processing" | "stopping" | null;
+
+export function fileBannerView(status: PhoneStreamStatus): FileBannerView {
+  const file = sessionFile(status);
+  if (!file || !phoneOwnsCamera(status.state)) return null;
+  // Done, one way or the other: the toast says it, the banner goes.
+  if (file.phase === "looping" || file.phase === "failed") return null;
+  if (status.state === "stopping") return "stopping";
+  if (file.phase === "processing") return "processing";
+  if (file.phase === "receiving") return "receiving";
+  return "connecting";
+}
 
 /** A banner's Stop turns into a force stop this long into `stopping` (machine.rs: `FORCE_STOP_AFTER`, plus a margin). */
 export const FORCE_STOP_AFTER_MS = 5_250;
 
-/** The phone holds the camera: normal video start controls are off. */
+/** A phone session (live or file) is up: the banner shows and Stop applies. */
 export function phoneOwnsCamera(state: PhoneStreamPhase): boolean {
   return state === "connecting" || state === "live" || state === "stopping";
 }
@@ -84,8 +150,13 @@ export function phoneOwnsCamera(state: PhoneStreamPhase): boolean {
  * The video and camera controls are off: the phone holds the camera, or a session that was
  * given up on has not handed it back yet (the backend refuses to start anything until then).
  */
-export function cameraBusy(status: Pick<PhoneStreamStatus, "state" | "releasing">): boolean {
-  return phoneOwnsCamera(status.state) || status.releasing === true;
+export function cameraBusy(
+  status: Pick<PhoneStreamStatus, "state" | "releasing"> & Partial<Pick<PhoneStreamStatus, "mode" | "file">>,
+): boolean {
+  if (status.releasing === true) return true;
+  // A video on its way from the phone does not take the camera: the current loop keeps
+  // playing until the new one replaces it.
+  return phoneOwnsCamera(status.state) && sessionMode(status) === "live";
 }
 
 /** Error codes with their own translated text; anything else uses the generic message. */
@@ -135,7 +206,13 @@ export function isNewerOrSame(next: PhoneStreamStatus, current: PhoneStreamStatu
 /** The request awaiting a decision, from the status alone. */
 export function requestFromStatus(s: PhoneStreamStatus): PhoneStreamRequest | null {
   if (s.state !== "requested" || !s.sessionId || s.expiresAt == null) return null;
-  return { sessionId: s.sessionId, deviceName: s.deviceName, expiresAt: s.expiresAt };
+  return {
+    sessionId: s.sessionId,
+    deviceName: s.deviceName,
+    expiresAt: s.expiresAt,
+    mode: sessionMode(s),
+    file: sessionFile(s),
+  };
 }
 
 /**
@@ -170,7 +247,43 @@ function readDismissedError(): number | null {
   }
 }
 
-export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopFailed?: () => void } = {}) {
+/** What a new status says happened to a phone video, compared with the one before it. */
+export type FileOutcome = "looping" | "failed" | null;
+
+function fileResult(s: PhoneStreamStatus): FileOutcome {
+  const file = sessionFile(s);
+  if (!file) return null;
+  if (file.phase === "looping") return "looping";
+  // A session that broke before the transfer got anywhere (no direct connection, …) ends in
+  // `error` without the file ever being marked: still a failed video.
+  return file.phase === "failed" || s.state === "error" ? "failed" : null;
+}
+
+/**
+ * `looping` / `failed` exactly once per transfer: when the result is first seen. A later
+ * status that only repeats it (the session going idle, a re-read) is not a new result. Never
+ * for the very first status after startup (`before.seq < 0`), which may describe something
+ * that ended long ago.
+ */
+export function fileOutcome(next: PhoneStreamStatus, before: PhoneStreamStatus): FileOutcome {
+  const result = fileResult(next);
+  if (!result || before.seq < 0) return null;
+  const sameSession = next.sessionId === before.sessionId || next.sessionId == null;
+  if (fileResult(before) === result && sameSession) return null;
+  return result;
+}
+
+export interface PhoneStreamCallbacks {
+  /** The phone ended a session that was up. `mode` says which kind. */
+  onStoppedByPhone?: (mode: PhoneStreamMode) => void;
+  onStopFailed?: () => void;
+  /** A video from the phone is loaded and looping on the camera. */
+  onFileLooping?: (file: PhoneStreamFile, deviceName: string | null) => void;
+  /** A video from the phone could not be received or loaded. */
+  onFileFailed?: (file: PhoneStreamFile, deviceName: string | null) => void;
+}
+
+export function usePhoneStream(options: PhoneStreamCallbacks = {}) {
   const callbacks = useRef(options);
   callbacks.current = options;
   const latest = useRef<PhoneStreamStatus>(IDLE);
@@ -189,8 +302,13 @@ export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopF
     latest.current = s;
     // The phone ended a session that was up a moment ago: say so, neutrally. (Not on the
     // first read after startup, where there is no "moment ago".)
-    if (s.state === "idle" && s.endedByPhone && phoneOwnsCamera(before.state)) {
-      callbacks.current.onStoppedByPhone?.();
+    const outcome = fileOutcome(s, before);
+    if (outcome === "looping") callbacks.current.onFileLooping?.(s.file!, s.deviceName);
+    else if (outcome === "failed") callbacks.current.onFileFailed?.(s.file!, s.deviceName);
+    // A video that arrived, or failed with its own message, already said how it ended.
+    const fileSettled = fileResult(s) !== null || fileResult(before) !== null;
+    if (s.state === "idle" && s.endedByPhone && phoneOwnsCamera(before.state) && !fileSettled) {
+      callbacks.current.onStoppedByPhone?.(sessionMode(before));
     }
     // Both marks are about one pending request. Once the status has moved on, drop them,
     // so they cannot apply to a later request that uses the same session id.
@@ -253,10 +371,13 @@ export function usePhoneStream(options: { onStoppedByPhone?: () => void; onStopF
   }, [status, closedRequest]);
   const accepting = request !== null && requestKey(request) === acceptingRequest;
 
-  /** The last failure, until the user dismisses it or a new stream starts. */
+  /**
+   * The last failure, until the user dismisses it or a new stream starts. A failed video
+   * transfer is reported through `onFileFailed` instead (a toast, not the camera banner).
+   */
   const error = useMemo<PhoneStreamError | null>(
     () =>
-      status.state === "error" && status.since !== dismissedErrorSince
+      status.state === "error" && sessionMode(status) === "live" && status.since !== dismissedErrorSince
         ? { code: status.lastErrorCode, detail: status.lastError }
         : null,
     [status, dismissedErrorSince],

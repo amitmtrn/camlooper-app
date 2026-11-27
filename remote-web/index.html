@@ -9,7 +9,7 @@
      on *.trycloudflare.com ('self' does not cover wss: in every browser, hence the explicit host).
      script-src hash = the inline script element; dev/update-csp.mjs recomputes it, dev/selftest.mjs checks it.
      frame-ancestors is ignored in <meta>: production must send it (or X-Frame-Options) as a header. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-kh3Q61fpi49GgbG8jH74DXrVW6dYyUkunKBuntr5Gug='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-63e665LW4BZWFCqlp5rGMQB+DpApvSCXHThBDl/zwsA='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex">
 <title>CamLooper Remote</title>
 <style>
@@ -89,6 +89,13 @@
   .stat { background: var(--card2); border-radius: 12px; padding: 8px 12px; }
   .stat b { display: block; font-size: .75rem; color: var(--muted); font-weight: 500; }
   .stat span { font-variant-numeric: tabular-nums; font-weight: 600; overflow-wrap: anywhere; }
+  .file { background: var(--card2); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+  .file-name { font-weight: 600; overflow-wrap: anywhere; }
+  .pct { font-weight: 700; font-size: 1.8rem; font-variant-numeric: tabular-nums; margin-top: 10px; }
+  .bar { position: relative; height: 14px; border-radius: 999px; background: var(--card2); border: 1px solid var(--line); overflow: hidden; margin: 8px 0 6px; }
+  .bar > i { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: 999px; transition: width .2s linear; }
+  .bar > .sent { background: #7c5cff55; }
+  .bar > .done { background: var(--accent); }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -157,6 +164,41 @@
     <p class="muted small" data-s="micHint"></p>
     <button id="btnStart" class="block big" data-s="startStreaming"></button>
     <p id="camMsg" class="msg"></p>
+  </div>
+
+  <div class="card" id="loopCard">
+    <h2 data-s="loopTitle"></h2>
+    <p class="muted small" data-s="loopIntro"></p>
+    <div id="loopNow" class="banner hidden">
+      <div class="small muted"><span id="loopDot" class="dot"></span><span id="loopNowState"></span></div>
+      <div id="loopNowName" class="file-name"></div>
+      <button id="btnLoopToggle" type="button" class="block secondary"></button>
+      <p id="loopMsg" class="msg"></p>
+    </div>
+    <input id="fileInput" type="file" accept="video/*" class="hidden" tabindex="-1" aria-hidden="true">
+    <div id="filePick">
+      <div id="fileInfo" class="file hidden">
+        <div id="fileName" class="file-name"></div>
+        <div id="fileSize" class="muted small"></div>
+      </div>
+      <button id="btnSend" type="button" class="block big hidden" data-s="sendLoop"></button>
+      <button id="btnPick" type="button" class="block secondary" data-s="chooseVideo"></button>
+    </div>
+    <div id="fileXfer" class="hidden">
+      <div class="file">
+        <div id="xferName" class="file-name"></div>
+        <div id="xferSize" class="muted small"></div>
+      </div>
+      <p id="xferMsg" class="msg" aria-live="polite"></p>
+      <div id="xferProg" class="hidden">
+        <div id="xferPct" class="pct">0 %</div>
+        <div id="xferBar" class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="xferBarSent" class="sent"></i><i id="xferBarDone" class="done"></i></div>
+        <p id="xferNums" class="muted small"></p>
+      </div>
+      <p id="xferKeep" class="muted small" data-s="fileKeepOpen"></p>
+      <button id="btnXferCancel" type="button" class="block danger" data-s="cancel"></button>
+    </div>
+    <p id="fileMsg" class="msg" aria-live="polite"></p>
   </div>
 
   <div class="card">
@@ -315,6 +357,47 @@ const STRINGS = {
     other: "Streaming stopped.",
   },
   streamEnded: "Streaming stopped.",
+  loopTitle: "Loop a video",
+  loopIntro: "Send a video from this phone. Your computer plays it on repeat as its camera.",
+  chooseVideo: "Choose a video",
+  chooseOther: "Choose a different video",
+  sendLoop: "Send & loop",
+  fileSize: (mb) => `${mb} MB`,
+  fileTooLarge: (mb) => `This video is ${mb} MB. The largest video you can send is 300 MB. Pick a shorter one, or trim it first.`,
+  fileEmpty: "This file is empty. Pick another video.",
+  fileNotVideo: "That doesn't look like a video. Pick an MP4, MOV or WebM file.",
+  fileNoRtc: "This browser can't send videos to the computer.",
+  fileStoppingLive: "Stopping the camera stream…",
+  fileSending: "Sending the video…",
+  filePreparing: "Preparing loop…",
+  fileLooping: "Looping on your computer ✓",
+  fileNums: (sent, confirmed, total) => `${sent} MB sent · ${confirmed} MB confirmed · ${total} MB in total`,
+  fileKeepOpen: "Keep this page open and the screen on until the video is sent.",
+  fileCancelled: "Cancelled.",
+  fileLost: "The connection to your computer was lost before the video arrived. Try again.",
+  fileRead: "Couldn't read the video from this phone. Choose it again.",
+  fileDeskError: (m) => `The computer couldn't use this video${m ? `: ${m}` : "."}`,
+  fileReject: {
+    declined: "The computer declined the video.",
+    busy: "The computer is busy with another phone session. Try again in a moment.",
+    timeout: "The computer didn't answer in time.",
+    too_large: "This video is too large for the computer. The limit is 300 MB.",
+    unsupported: "The computer can't play this kind of file. Try an MP4 video, and make sure CamLooper on the computer is up to date.",
+    other: "The computer couldn't accept the video.",
+  },
+  fileStopped: {
+    user: "The transfer was cancelled on the computer.",
+    error: "The computer hit an error and stopped the transfer.",
+    peer_offline: "Your computer went offline.",
+    timeout: "The transfer timed out.",
+    other: "The transfer stopped.",
+  },
+  loopPlaying: "Looping on your computer now",
+  loopStopped: "Loaded on your computer, not playing",
+  stopLoop: "Stop loop",
+  playLoop: "Play loop",
+  loopNoReply: "The computer didn't respond. Try again.",
+  loopFailed: "The computer couldn't do that right now.",
   defaultAndroid: "Android phone",
   defaultIphone: "iPhone",
   defaultPhone: "Phone",
@@ -329,6 +412,10 @@ const STORE = "camlooper-remote-phone-v1";
 const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
 const PING_MS = 25000, ACCEPT_TIMEOUT_MS = 60000, CONNECT_TIMEOUT_MS = 20000, STATUS_POLL_MS = 3000;
 const HTTP_TIMEOUT_MS = 8000, WS_CONNECT_TIMEOUT_MS = 10000;
+// Loop a video: 300 MiB limit, 64 KiB pieces, pause above 4 MiB buffered, resume at 1 MiB.
+const MAX_FILE_BYTES = 314572800, FILE_CHUNK = 65536, BUF_LOW = 1048576, BUF_HIGH = 4194304;
+const FILE_EXT_MIME = { mp4: "video/mp4", m4v: "video/x-m4v", mov: "video/quicktime", webm: "video/webm", mkv: "video/x-matroska", "3gp": "video/3gpp" };
+const LIVE_SETTLE_MS = 800, BUSY_RETRY_MS = 1000, BUSY_RETRY_WINDOW_MS = 8000, FINISH_WAIT_MS = 4000, LOOP_REPLY_MS = 6000;
 const QUALITY = {
   720: { width: 1280, height: 720, maxBitrate: 2500000 },
   480: { width: 848, height: 480, maxBitrate: 1200000 },
@@ -367,8 +454,12 @@ const desk = { online: false, protocol: 0, known: false };
 let ws = null, wsAttempt = 0, wsTimer = null, pingTimer = null, wsLastRx = 0, wsStopped = false, wsReplaced = false;
 let pollTimer = null, countdownTimer = null, ackTimer = null;
 let facing = "user", quality = "720", micMuted = false;
-let session = null;              // current stream session, see startStreaming()
+let session = null;              // current session: live camera (startStreaming) or kind "file" (startFileSend)
 let wakeLock = null;
+let picked = null;               // video chosen for "Loop a video": { file, meta: { name, size, mime }, err }
+let lastLiveEndAt = 0;           // when the last live session ended here (the computer needs a moment to let go)
+const loop = { known: false, playing: false, name: "", fromPhone: false, pending: null }; // the computer's loop, from loop_status
+let loopTimer = null;
 
 function loadPair() {
   try {
@@ -574,6 +665,10 @@ function resetToPair(message) {
   const name = pair && pair.deviceName;
   savePair(null);
   desk.online = false; desk.known = false; desk.protocol = 0;
+  picked = null; clearTimeout(loopTimer);
+  loop.known = false; loop.playing = false; loop.name = ""; loop.fromPhone = false; loop.pending = null;
+  setMsg("fileMsg", ""); setMsg("loopMsg", "");
+  renderFile();
   if (name) $("deviceName").value = name;
   showPairStart(message);
 }
@@ -586,6 +681,7 @@ function showHome(notice, cls) {
   $("myName").textContent = (pair && pair.deviceName) || "";
   banner("homeMsg", notice || "", cls || "");
   renderDesk();
+  renderFile();
 }
 
 function renderDesk() {
@@ -757,6 +853,7 @@ function onFrame(m) {
       desk.known = true; desk.online = !!m.desktopOnline; desk.protocol = Number(m.desktopProtocol) || 0;
       if (m.linked) onLinked(m.desktopName, desk.online);
       renderDesk();
+      askLoopStatus();
       break;
     case "linked":
       desk.known = true;
@@ -768,6 +865,7 @@ function onFrame(m) {
       desk.known = true; desk.online = !!m.online;
       if (m.online) desk.protocol = Number(m.protocol) || desk.protocol;
       renderDesk();
+      if (m.online) askLoopStatus();
       if (!m.online && session && !session.live && !session.ended) endSession(STRINGS.stopped.peer_offline, { failed: true, notify: false, reason: "peer_offline" });
       break;
     case "signal":
@@ -949,6 +1047,7 @@ function setChip(state) {
 }
 
 async function onSignal(d) {
+  if (d.kind === "loop_status") { onLoopStatus(d); return; } // not tied to a session
   const s = session;
   if (!s || s.ended || d.sessionId !== s.id) { dlog("ignoring signal for other session", d.kind); return; }
   dlog("<- signal", d.kind);
@@ -964,17 +1063,21 @@ async function onSignal(d) {
         else if (s.iceOk) endSession(STRINGS.errDtls, { failed: true, reason: "error" });
         else endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
       }, CONNECT_TIMEOUT_MS);
-      await connectPeer(s);
+      if (s.kind === "file") await connectFilePeer(s); else await connectPeer(s);
       break;
     case "stream_reject":
       clearTimeout(s.timers.accept);
+      if (s.kind === "file") { if (s.phase === "requesting") onFileReject(s, d.reason); break; }
       endSession(own(STRINGS.reject, d.reason) || STRINGS.reject.other, { failed: true, notify: false });
       break;
     case "answer":
       if (!s.pc || s.pc.signalingState !== "have-local-offer" || typeof d.sdp !== "string") return;
       await s.pc.setRemoteDescription({ type: "answer", sdp: d.sdp });
       if (session !== s || s.ended) return;
-      if (!videoAccepted(s, d.sdp)) { endSession(STRINGS.errCodec(s.offeredCodecs), { failed: true, reason: "error" }); return; }
+      if (s.kind === "file") {
+        // The answer must keep the data channel (m=application, port != 0).
+        if (!/^m=application [1-9]/m.test(d.sdp)) { endSession(STRINGS.errDeskOld, { failed: true, reason: "error" }); return; }
+      } else if (!videoAccepted(s, d.sdp)) { endSession(STRINGS.errCodec(s.offeredCodecs), { failed: true, reason: "error" }); return; }
       for (const c of s.pendingRemote.splice(0)) await addRemoteCandidate(s, c);
       break;
     case "candidate":
@@ -982,6 +1085,7 @@ async function onSignal(d) {
       await addRemoteCandidate(s, d);
       break;
     case "status":
+      if (s.kind === "file") break;
       if (d.width && d.height) $("deskRecv").textContent = STRINGS.deskRecv(Number(d.width) | 0, Number(d.height) | 0, Number(d.fps) | 0, typeof d.codec === "string" ? d.codec.slice(0, 32) : "");
       if (d.state === "live" && s.pc && !s.live && s.pc.connectionState === "connected") goLive(s);
       break;
@@ -1039,19 +1143,51 @@ function pickAudioCodecs() {
 }
 const codecLabel = (list) => [...new Set(list.filter((c) => !/rtx/i.test(c.mimeType)).map((c) => c.mimeType.replace(/^video\//i, "").replace(/^h264$/i, "H.264")))].join(", ");
 
-async function connectPeer(s) {
-  setChip("connecting"); setMsg("streamMsg", STRINGS.stConnecting);
-  let iceServers = [];
+// ICE servers for a session (live and file use the same). null: the pair was revoked.
+async function getIceServers() {
   try {
     const r = await api("GET", "/v1/ice-servers");
-    if (r && Array.isArray(r.iceServers)) iceServers = r.iceServers;
     dlog("ice-servers turn:", r && r.turn);
+    return r && Array.isArray(r.iceServers) ? r.iceServers : [];
   } catch (e) {
     dlog("ice-servers failed", e.status, e.code);
-    if (e.status === 401) return;
-    iceServers = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
+    if (e.status === 401) return null;
+    return [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
   }
-  if (session !== s || s.ended) return;
+}
+
+// Candidate trickling and connection state, the same for live and file sessions.
+function wirePeer(s, pc) {
+  pc.onicecandidate = (ev) => {
+    if (session !== s || s.ended) return;
+    let data = null;
+    if (ev.candidate && ev.candidate.candidate) data = { kind: "candidate", sessionId: s.id, candidate: ev.candidate.candidate, sdpMid: ev.candidate.sdpMid, sdpMLineIndex: ev.candidate.sdpMLineIndex };
+    else if (!ev.candidate && !s.sentEoc) { s.sentEoc = true; data = { kind: "candidate", sessionId: s.id, candidate: "" }; }
+    if (!data) return;
+    if (s.offerSent) sendSignal(data); else s.localQueue.push(data); // never before the offer
+  };
+  pc.onconnectionstatechange = () => onPcState(s);
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") s.iceOk = true;
+    onPcState(s);
+  };
+}
+
+// Creates and sends the offer, then the candidates gathered meanwhile. false: the session ended.
+async function sendOffer(s, pc) {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  if (session !== s || s.ended) return false;
+  sendSignal({ kind: "offer", sessionId: s.id, sdp: pc.localDescription.sdp });
+  s.offerSent = true;
+  for (const c of s.localQueue.splice(0)) sendSignal(c);
+  return true;
+}
+
+async function connectPeer(s) {
+  setChip("connecting"); setMsg("streamMsg", STRINGS.stConnecting);
+  const iceServers = await getIceServers();
+  if (!iceServers || session !== s || s.ended) return;
 
   const Q = QUALITY[s.quality] || QUALITY[720];
   const pc = new RTCPeerConnection({ iceServers, bundlePolicy: "max-bundle" });
@@ -1070,26 +1206,8 @@ async function connectPeer(s) {
   try { const ac = pickAudioCodecs(); if (atx && ac.length && atx.setCodecPreferences) atx.setCodecPreferences(ac); }
   catch (e) { dlog("setCodecPreferences(audio) failed", e && e.name); }
 
-  pc.onicecandidate = (ev) => {
-    if (session !== s || s.ended) return;
-    let data = null;
-    if (ev.candidate && ev.candidate.candidate) data = { kind: "candidate", sessionId: s.id, candidate: ev.candidate.candidate, sdpMid: ev.candidate.sdpMid, sdpMLineIndex: ev.candidate.sdpMLineIndex };
-    else if (!ev.candidate && !s.sentEoc) { s.sentEoc = true; data = { kind: "candidate", sessionId: s.id, candidate: "" }; }
-    if (!data) return;
-    if (s.offerSent) sendSignal(data); else s.localQueue.push(data); // never before the offer
-  };
-  pc.onconnectionstatechange = () => onPcState(s);
-  pc.oniceconnectionstatechange = () => {
-    if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") s.iceOk = true;
-    onPcState(s);
-  };
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  if (session !== s || s.ended) return;
-  sendSignal({ kind: "offer", sessionId: s.id, sdp: pc.localDescription.sdp });
-  s.offerSent = true;
-  for (const c of s.localQueue.splice(0)) sendSignal(c);
+  wirePeer(s, pc);
+  if (!(await sendOffer(s, pc))) return;
   await applySenderParams(s);
 
   clearInterval(s.timers.stats);
@@ -1122,6 +1240,7 @@ function onPcState(s) {
   const pc = s.pc; if (!pc || session !== s || s.ended) return;
   const cs = pc.connectionState;
   dlog("pc", cs, "/ ice", pc.iceConnectionState);
+  if (s.kind === "file") { onFilePcState(s, cs); return; }
   if (cs === "connected") {
     clearTimeout(s.timers.disc);
     if (!s.live) goLive(s); else { setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok"); }
@@ -1157,6 +1276,7 @@ function onRemoteStop(data) {
   if (data.sessionId ? data.sessionId !== s.id : s.phase !== "requesting") { dlog("ignoring stream_stop for other session"); return; }
   dlog("<- stream_stop", data.reason);
   const reason = typeof data.reason === "string" ? data.reason : "other";
+  if (s.kind === "file") { onFileRemoteStop(s, reason); return; }
   const msg = reason === "ice_failed" ? STRINGS.iceFailed : (own(STRINGS.stopped, reason) || STRINGS.stopped.other);
   endSession(null, { notify: false, silent: true });
   showHome(msg, reason === "user" ? "" : "warn");
@@ -1166,10 +1286,12 @@ function onRemoteStop(data) {
 function endSession(message, opts = {}) {
   const s = session;
   if (!s) return;
+  if (s.kind === "file") { endFileSession(s, message, opts); return; }
   if (!s.ended) {
     s.ended = true;
     const notify = opts.notify !== undefined ? opts.notify : opts.reason !== undefined;
     if (notify) sendStop(s.id, opts.reason || "user");
+    if (s.phase !== "camera") lastLiveEndAt = Date.now(); // the computer knew about this session
     for (const k in s.timers) { clearTimeout(s.timers[k]); clearInterval(s.timers[k]); }
     if (s.pc) { try { s.pc.close(); } catch {} }
     if (s.stream) s.stream.getTracks().forEach((t) => t.stop());
@@ -1276,6 +1398,334 @@ async function updateStats(s) {
     $("stRtt").textContent = sel.currentRoundTripTime != null ? `${Math.round(sel.currentRoundTripTime * 1000)} ms` : "–";
   }
 }
+
+// ---------------------------------------------------------------------------------
+// Loop a video: one file goes to the computer over a WebRTC DataChannel ("camlooper-file"),
+// the computer saves it and plays it on repeat as its camera. Same signaling as a live
+// session (stream_request mode "file" → accept → offer/answer/candidates), no media tracks.
+// ---------------------------------------------------------------------------------
+const mb = (bytes) => { const v = Math.max(0, Number(bytes) || 0) / 1048576; return v > 0 && v < 0.1 ? "0.1" : v.toFixed(1); };
+const cleanText = (v, max) => Array.from(String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()).slice(0, max).join("");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const intoView = (id) => { try { $(id).scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch {} };
+const fileSession = () => (session && !session.ended && session.kind === "file" ? session : null);
+
+// What the computer is told about the file. The name is for display only: no control
+// characters, at most 120 characters (the extension survives the cut). The same values go
+// into the request and into the "meta" message, which the computer compares.
+function fileMeta(file) {
+  let name = String(file.name || "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim();
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  const chars = Array.from(name);
+  if (chars.length > 120) {
+    const tail = dot > 0 && name.length - dot <= 10 ? Array.from(name.slice(dot)) : [];
+    name = chars.slice(0, 120 - tail.length).join("").trim() + tail.join("");
+  }
+  if (!name) name = "video";
+  const type = String(file.type || "").slice(0, 100);
+  const known = own(FILE_EXT_MIME, ext);
+  const isVideo = /^video\//i.test(type);
+  return { ok: isVideo || !!known, meta: { name, size: file.size, mime: isVideo ? type : known || type } };
+}
+
+$("btnPick").onclick = () => { const input = $("fileInput"); input.value = ""; input.click(); };
+$("fileInput").onchange = () => {
+  const f = $("fileInput").files && $("fileInput").files[0];
+  if (!f) return; // picker dismissed: keep what was chosen before
+  const m = fileMeta(f);
+  let err = "";
+  if (!m.ok) err = STRINGS.fileNotVideo;
+  else if (!(f.size > 0)) err = STRINGS.fileEmpty;
+  else if (f.size > MAX_FILE_BYTES) err = STRINGS.fileTooLarge(mb(f.size));
+  picked = { file: f, meta: m.meta, err };
+  renderFile();
+  setMsg("fileMsg", err, "err");
+};
+$("btnSend").onclick = () => { startFileSend().catch((e) => { dlog("file send failed to start", e && e.name); if (fileSession()) endSession(STRINGS.errGeneric, { failed: true, reason: "error" }); }); };
+$("btnXferCancel").onclick = () => { if (fileSession()) endSession(STRINGS.fileCancelled, { notify: true, reason: "user", neutral: true }); };
+
+// The "Loop a video" card: picker, or the transfer in progress, plus the loop controls.
+function renderFile() {
+  const s = fileSession();
+  show("filePick", !s); show("fileXfer", !!s);
+  $("btnStart").disabled = !!s; // one session at a time
+  show("fileInfo", !!picked);
+  $("fileName").textContent = picked ? picked.meta.name : "";
+  $("fileSize").textContent = picked ? STRINGS.fileSize(mb(picked.file.size)) : "";
+  show("btnSend", !!picked && !picked.err);
+  $("btnPick").textContent = picked ? STRINGS.chooseOther : STRINGS.chooseVideo;
+  $("btnPick").className = "block " + (picked && !picked.err ? "link" : "secondary");
+  if (s) renderXfer(s);
+  renderLoop();
+}
+
+function renderXfer(s) {
+  if (session !== s) return;
+  const size = s.meta.size, confirmed = Math.min(s.confirmed, size), sent = Math.min(s.sent, size);
+  $("xferName").textContent = s.meta.name;
+  $("xferSize").textContent = STRINGS.fileSize(mb(size));
+  const text = own({ stopping: STRINGS.fileStoppingLive, requesting: STRINGS.stWaitAccept, connecting: STRINGS.stConnecting, sending: STRINGS.fileSending, preparing: STRINGS.filePreparing, looping: STRINGS.fileLooping }, s.stage) || "";
+  setMsg("xferMsg", text, s.stage === "looping" ? "ok" : "");
+  show("xferProg", s.stage === "sending" || s.stage === "preparing");
+  // The percentage is what the computer has confirmed, not what left this phone.
+  const pct = confirmed >= size ? 100 : Math.min(99, Math.floor((confirmed / size) * 100));
+  $("xferPct").textContent = `${pct} %`;
+  $("xferBar").setAttribute("aria-valuenow", String(pct));
+  $("xferBarSent").style.width = `${(sent / size) * 100}%`;
+  $("xferBarDone").style.width = `${(confirmed / size) * 100}%`;
+  $("xferNums").textContent = STRINGS.fileNums(mb(sent), mb(confirmed), mb(size));
+  show("xferKeep", s.stage !== "looping" && s.stage !== "preparing");
+  show("btnXferCancel", s.stage !== "looping");
+}
+
+async function startFileSend() {
+  if (!picked || picked.err || fileSession()) return;
+  const fail = (text) => setMsg("fileMsg", text, "err");
+  setMsg("fileMsg", "");
+  if (!window.RTCPeerConnection) { fail(STRINGS.fileNoRtc); return; }
+  if (!ws || ws.readyState !== 1) { fail(wsReplaced ? STRINGS.errReplaced : STRINGS.errNotConnected); if (!ws && !wsReplaced) connectWs(); return; }
+  if (desk.known && !desk.online) { fail(STRINGS.errDeskOffline); return; }
+  if (desk.protocol && desk.protocol < 2) { fail(STRINGS.errDeskOld); return; }
+  // One session at a time: a running camera stream is stopped first (the normal stop path).
+  if (session && !session.ended) { endSession(null, { notify: true, reason: "user" }); showHome(); }
+
+  const s = session = {
+    kind: "file", id: randomId(), file: picked.file, meta: picked.meta, pc: null, dc: null, live: false, ended: false,
+    timers: {}, pendingRemote: [], localQueue: [], offerSent: false, iceOk: false,
+    phase: "waiting", stage: "requesting", sent: 0, confirmed: 0, sentAll: false, done: false,
+    // The computer answers "busy" until it has let go of a camera stream that just ended.
+    busyUntil: lastLiveEndAt ? lastLiveEndAt + BUSY_RETRY_WINDOW_MS : 0,
+  };
+  outbox = [];
+  renderFile();
+  intoView("fileXfer");
+  keepAwake();
+  const settle = lastLiveEndAt + LIVE_SETTLE_MS - Date.now();
+  if (settle > 0) {
+    s.stage = "stopping"; renderXfer(s);
+    await sleep(settle);
+    if (session !== s || s.ended) return;
+  }
+  requestFile(s);
+}
+
+function requestFile(s) {
+  s.phase = "requesting"; s.stage = "requesting"; renderXfer(s);
+  sendSignal({ kind: "stream_request", sessionId: s.id, deviceLabel: (pair && pair.deviceName) || defaultDeviceName(), mode: "file", file: s.meta });
+  clearTimeout(s.timers.accept);
+  s.timers.accept = setTimeout(() => {
+    if (session === s && s.phase === "requesting") endSession(STRINGS.acceptTimeout, { failed: true, reason: "timeout" });
+  }, ACCEPT_TIMEOUT_MS);
+}
+
+function onFileReject(s, reason) {
+  if (reason === "busy" && Date.now() < s.busyUntil) {
+    // Still tearing down the camera stream this phone just stopped: ask again, as a new request.
+    dlog("file request: computer busy, retrying");
+    s.phase = "waiting"; s.stage = "stopping"; renderXfer(s);
+    s.timers.retry = setTimeout(() => { if (session !== s || s.ended) return; s.id = randomId(); outbox = []; requestFile(s); }, BUSY_RETRY_MS);
+    return;
+  }
+  endSession(own(STRINGS.fileReject, reason) || STRINGS.fileReject.other, { failed: true, notify: false });
+}
+
+async function connectFilePeer(s) {
+  s.stage = "connecting"; renderXfer(s);
+  const iceServers = await getIceServers();
+  if (!iceServers || session !== s || s.ended) return;
+  const pc = new RTCPeerConnection({ iceServers, bundlePolicy: "max-bundle" });
+  s.pc = pc;
+  const dc = pc.createDataChannel("camlooper-file", { ordered: true });
+  dc.binaryType = "arraybuffer";
+  dc.bufferedAmountLowThreshold = BUF_LOW;
+  s.dc = dc;
+  const failed = (e) => {
+    dlog("file send failed", e && e.name);
+    if (session === s && !s.ended) endSession(e && e.name === "FileReadError" ? STRINGS.fileRead : STRINGS.fileLost, { failed: true, reason: "error" });
+  };
+  dc.onopen = () => { if (session === s && !s.ended && !s.live) pumpFile(s).catch(failed); };
+  dc.onmessage = (ev) => { if (typeof ev.data === "string") onFileMessage(s, ev.data); };
+  // A channel that closes by itself: the computer's own stop or error message says why and
+  // normally arrives first; give it a moment before calling it a lost connection.
+  dc.onclose = () => {
+    if (session !== s || s.ended) return;
+    clearTimeout(s.timers.closed);
+    s.timers.closed = setTimeout(() => {
+      if (session !== s || s.ended) return;
+      if (s.done) finishFile(s, false); else endSession(STRINGS.fileLost, { failed: true, reason: "error" });
+    }, 1500);
+  };
+  wirePeer(s, pc);
+  await sendOffer(s, pc);
+}
+
+function onFilePcState(s, cs) {
+  if (cs === "connected") { clearTimeout(s.timers.disc); return; }
+  const lost = () => {
+    if (s.done) finishFile(s, false); // the video already loops: losing the connection now is fine
+    else if (s.live) endSession(STRINGS.fileLost, { failed: true, reason: "error" });
+    else if (s.iceOk) endSession(STRINGS.errDtls, { failed: true, reason: "error" });
+    else endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
+  };
+  if (cs === "failed") lost();
+  else if (cs === "disconnected" && s.live) {
+    clearTimeout(s.timers.disc);
+    s.timers.disc = setTimeout(() => { if (session === s && !s.ended && s.pc && s.pc.connectionState !== "connected") lost(); }, 20000);
+  }
+}
+
+// Resolves once the channel has drained to the low mark (or can no longer send).
+function drained(s, dc) {
+  return new Promise((resolve) => {
+    const done = () => { dc.removeEventListener("bufferedamountlow", done); clearInterval(poll); resolve(); };
+    // The event is the normal path; the poll covers a missed event and a closed channel.
+    const poll = setInterval(() => { if (session !== s || s.ended || dc.readyState !== "open" || dc.bufferedAmount <= BUF_LOW) done(); }, 250);
+    dc.addEventListener("bufferedamountlow", done);
+  });
+}
+
+// meta, the file in pieces of at most 64 KiB (never more than 4 MiB waiting in the channel), end.
+async function pumpFile(s) {
+  const dc = s.dc, file = s.file, size = s.meta.size;
+  s.live = true; s.phase = "sending"; s.stage = "sending";
+  clearTimeout(s.timers.ice);
+  renderXfer(s);
+  const max = s.pc && s.pc.sctp && s.pc.sctp.maxMessageSize > 0 ? s.pc.sctp.maxMessageSize : FILE_CHUNK;
+  const chunk = Math.max(1024, Math.min(FILE_CHUNK, max));
+  const alive = () => session === s && !s.ended;
+  dc.send(JSON.stringify({ t: "meta", name: s.meta.name, size, mime: s.meta.mime }));
+  let offset = 0, shown = 0;
+  while (offset < size) {
+    if (!alive()) return;
+    if (dc.readyState !== "open") throw new Error("channel closed");
+    if (dc.bufferedAmount > BUF_HIGH) { await drained(s, dc); continue; }
+    let buf;
+    try { buf = await file.slice(offset, Math.min(size, offset + chunk)).arrayBuffer(); }
+    catch (e) { dlog("file read failed", e && e.name); const err = new Error("read"); err.name = "FileReadError"; throw err; }
+    if (!alive()) return;
+    if (!buf.byteLength) { const err = new Error("short read"); err.name = "FileReadError"; throw err; } // the file changed under us
+    if (dc.readyState !== "open") throw new Error("channel closed");
+    dc.send(buf);
+    offset += buf.byteLength; s.sent = offset;
+    const now = Date.now();
+    if (now - shown > 100) { shown = now; renderXfer(s); }
+  }
+  dc.send('{"t":"end"}');
+  s.sentAll = true;
+  renderXfer(s);
+}
+
+// Text messages from the computer on the channel.
+function onFileMessage(s, text) {
+  if (session !== s || s.ended) return;
+  let m; try { m = JSON.parse(text); } catch { return; }
+  if (!m || typeof m !== "object") return;
+  dlog("<- file", m.t);
+  switch (m.t) {
+    case "progress": {
+      const n = Number(m.received);
+      if (n >= 0) s.confirmed = Math.max(s.confirmed, Math.min(s.meta.size, n));
+      break;
+    }
+    case "saved":
+      s.confirmed = s.meta.size; s.stage = "preparing";
+      break;
+    case "processing":
+      s.stage = "preparing";
+      break;
+    case "looping":
+      // Success. The computer ends the session itself (stream_stop "done"); wait for that
+      // rather than closing under it, but not forever.
+      s.done = true; s.stage = "looping"; s.confirmed = s.meta.size;
+      s.loopName = cleanText(m.name, 120) || s.meta.name;
+      clearTimeout(s.timers.finish);
+      s.timers.finish = setTimeout(() => { if (session === s && !s.ended) finishFile(s, true); }, FINISH_WAIT_MS);
+      break;
+    case "error":
+      endSession(STRINGS.fileDeskError(cleanText(m.message, 160)), { failed: true, notify: false });
+      return;
+    default: return;
+  }
+  renderXfer(s);
+}
+
+function onFileRemoteStop(s, reason) {
+  const finished = reason === "done" || reason === "finished";
+  if (s.done || (finished && s.sentAll)) { finishFile(s, false); return; }
+  const msg = reason === "ice_failed" ? STRINGS.iceFailed : own(STRINGS.fileStopped, reason) || STRINGS.fileStopped.other;
+  endSession(msg, { failed: true, notify: false });
+}
+
+// The video loops on the computer: close up, show the loop controls.
+function finishFile(s, notify) {
+  loop.known = true; loop.playing = true; loop.fromPhone = true; loop.name = s.loopName || s.meta.name;
+  loop.pending = null; clearTimeout(loopTimer); setMsg("loopMsg", "");
+  if (picked && picked.file === s.file) picked = null;
+  endSession(STRINGS.fileLooping, { ok: true, notify, reason: "done" });
+}
+
+function endFileSession(s, message, opts) {
+  if (!s.ended) {
+    s.ended = true;
+    const notify = opts.notify !== undefined ? opts.notify : opts.reason !== undefined;
+    if (notify) sendStop(s.id, opts.reason || "user");
+    for (const k in s.timers) { clearTimeout(s.timers[k]); clearInterval(s.timers[k]); }
+    if (s.dc) { s.dc.onopen = s.dc.onmessage = s.dc.onclose = null; try { s.dc.close(); } catch {} }
+    if (s.pc) { try { s.pc.close(); } catch {} }
+    releaseWake();
+    outbox = [];
+  }
+  if (session === s) session = null;
+  renderFile();
+  if (opts.silent) return;
+  setMsg("fileMsg", message || (opts.ok ? "" : STRINGS.errGeneric), opts.ok ? "ok" : opts.neutral ? "" : "err");
+  intoView("loopCard"); // the card is below the camera controls: keep the outcome on screen
+  // A transfer that stopped half-way may or may not have touched the loop: ask.
+  if (!opts.ok) setTimeout(askLoopStatus, 1500);
+}
+
+// ---- Loop controls (loop_control → loop_status) ----
+function sendLoopControl(action) {
+  dlog("-> signal loop_control", action);
+  return wsSend({ type: "signal", data: { kind: "loop_control", sessionId: randomId(), action } });
+}
+// Asked whenever the computer is (again) known to be online; never during a session,
+// which the computer answers with an error.
+function askLoopStatus() {
+  if (!pair || !pair.linked || !desk.known || !desk.online || (desk.protocol && desk.protocol < 2)) return;
+  if (session && !session.ended) return;
+  sendLoopControl("status");
+}
+function onLoopStatus(d) {
+  dlog("<- signal loop_status", { playing: d.playing, fromPhone: d.fromPhone, error: !!d.error });
+  const acted = loop.pending;
+  loop.pending = null; clearTimeout(loopTimer);
+  loop.known = true; loop.playing = d.playing === true; loop.fromPhone = d.fromPhone === true;
+  loop.name = typeof d.name === "string" ? cleanText(d.name, 120) : "";
+  renderLoop();
+  setMsg("loopMsg", acted && typeof d.error === "string" && d.error ? STRINGS.loopFailed : "", "err");
+}
+function renderLoop() {
+  const has = loop.known && (loop.playing || !!loop.name);
+  show("loopNow", has && !fileSession());
+  $("loopDot").className = "dot" + (loop.playing ? " on" : "");
+  $("loopNowState").textContent = loop.playing ? STRINGS.loopPlaying : STRINGS.loopStopped;
+  $("loopNowName").textContent = loop.name;
+  const b = $("btnLoopToggle");
+  b.textContent = loop.playing ? STRINGS.stopLoop : STRINGS.playLoop;
+  b.className = "block" + (loop.playing ? " secondary" : "");
+  b.disabled = !!loop.pending;
+}
+$("btnLoopToggle").onclick = () => {
+  if (loop.pending) return;
+  const action = loop.playing ? "stop" : "start";
+  if (!sendLoopControl(action)) { setMsg("loopMsg", wsReplaced ? STRINGS.errReplaced : STRINGS.errNotConnected, "err"); if (!ws && !wsReplaced) connectWs(); return; }
+  setMsg("loopMsg", "");
+  loop.pending = action; renderLoop();
+  clearTimeout(loopTimer);
+  loopTimer = setTimeout(() => { loop.pending = null; renderLoop(); setMsg("loopMsg", STRINGS.loopNoReply, "err"); }, LOOP_REPLY_MS);
+};
 
 // ---------------------------------------------------------------------------------
 // Wake lock + visibility
