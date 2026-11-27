@@ -9,7 +9,7 @@
      on *.trycloudflare.com ('self' does not cover wss: in every browser, hence the explicit host).
      script-src hash = the inline script element; dev/update-csp.mjs recomputes it, dev/selftest.mjs checks it.
      frame-ancestors is ignored in <meta>: production must send it (or X-Frame-Options) as a header. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rx68Xpg8VNlVMCBeWBQgy8DPALtEG5lOhccd7Qbctqg='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rx4J+sLtzVWN5D7m4pEH+6F/aFIfs2t2RlJfkb4o9ZI='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex">
 <title>CamLooper Remote</title>
 <style>
@@ -398,6 +398,12 @@ const STRINGS = {
   playLoop: "Play loop",
   loopNoReply: "The computer didn't respond. Try again.",
   loopFailed: "The computer couldn't do that right now.",
+  loopErrors: {
+    camera_off: "The virtual camera is off on your computer. Turn it on in CamLooper, then try again.",
+    rate_limited: "That was too fast. Wait a second and try again.",
+    busy: "The computer is busy with a phone session. Try again in a moment.",
+  },
+  fileUnconfirmed: "The computer ended the transfer. Checking what it is playing…",
   defaultAndroid: "Android phone",
   defaultIphone: "iPhone",
   defaultPhone: "Phone",
@@ -1514,6 +1520,7 @@ async function startFileSend() {
 
 function requestFile(s) {
   s.phase = "requesting"; s.stage = "requesting"; renderXfer(s);
+  expectLoopStatus(s.id); // the computer reports its loop under this id when the session ends
   sendSignal({ kind: "stream_request", sessionId: s.id, deviceLabel: (pair && pair.deviceName) || defaultDeviceName(), mode: "file", file: s.meta });
   clearTimeout(s.timers.accept);
   s.timers.accept = setTimeout(() => {
@@ -1593,8 +1600,10 @@ async function pumpFile(s) {
   s.live = true; s.phase = "sending"; s.stage = "sending";
   clearTimeout(s.timers.ice);
   renderXfer(s);
+  // Never larger than the computer says it takes (it answers 64 KiB) — also when that is
+  // less than a "sensible" minimum: a piece over the limit makes send() throw.
   const max = s.pc && s.pc.sctp && s.pc.sctp.maxMessageSize > 0 ? s.pc.sctp.maxMessageSize : FILE_CHUNK;
-  const chunk = Math.max(1024, Math.min(FILE_CHUNK, max));
+  const chunk = Math.max(1, Math.floor(Math.min(FILE_CHUNK, max)));
   const alive = () => session === s && !s.ended;
   dc.send(JSON.stringify({ t: "meta", name: s.meta.name, size, mime: s.meta.mime }));
   let offset = 0, shown = 0;
@@ -1653,8 +1662,16 @@ function onFileMessage(s, text) {
 }
 
 function onFileRemoteStop(s, reason) {
-  const finished = reason === "done" || reason === "finished";
-  if (s.done || (finished && s.sentAll)) { finishFile(s, false); return; }
+  // Success is what the computer said on the data channel ("looping"), which only the
+  // computer can write to. A stream_stop "done" arrives through the relay: on its own it
+  // ends the session, but it is not taken as proof that the video loops.
+  if (s.done) { finishFile(s, false); return; }
+  if ((reason === "done" || reason === "finished") && s.sentAll) {
+    // Probably fine, but unconfirmed: say so, and let the loop_status that follows (or the
+    // one asked for in a moment) show what the computer is really playing.
+    endSession(STRINGS.fileUnconfirmed, { neutral: true, notify: false });
+    return;
+  }
   const msg = reason === "ice_failed" ? STRINGS.iceFailed : own(STRINGS.fileStopped, reason) || STRINGS.fileStopped.other;
   endSession(msg, { failed: true, notify: false });
 }
@@ -1688,9 +1705,15 @@ function endFileSession(s, message, opts) {
 }
 
 // ---- Loop controls (loop_control → loop_status) ----
+// Ids of the loop_control requests (and file sessions) whose loop_status is still wanted.
+const loopAsked = [];
+function expectLoopStatus(id) { loopAsked.push(id); if (loopAsked.length > 16) loopAsked.shift(); }
 function sendLoopControl(action) {
   dlog("-> signal loop_control", action);
-  return wsSend({ type: "signal", data: { kind: "loop_control", sessionId: randomId(), action } });
+  const id = randomId();
+  if (!wsSend({ type: "signal", data: { kind: "loop_control", sessionId: id, action } })) return false;
+  expectLoopStatus(id);
+  return true;
 }
 // Asked whenever the computer is (again) known to be online; never during a session,
 // which the computer answers with an error.
@@ -1700,13 +1723,16 @@ function askLoopStatus() {
   sendLoopControl("status");
 }
 function onLoopStatus(d) {
+  // Only an answer to something this page asked: an unsolicited loop_status is not applied.
+  if (typeof d.sessionId !== "string" || !loopAsked.includes(d.sessionId)) { dlog("ignoring unsolicited loop_status"); return; }
   dlog("<- signal loop_status", { playing: d.playing, fromPhone: d.fromPhone, error: !!d.error });
   const acted = loop.pending;
   loop.pending = null; clearTimeout(loopTimer);
   loop.known = true; loop.playing = d.playing === true; loop.fromPhone = d.fromPhone === true;
   loop.name = typeof d.name === "string" ? cleanText(d.name, 120) : "";
   renderLoop();
-  setMsg("loopMsg", acted && typeof d.error === "string" && d.error ? STRINGS.loopFailed : "", "err");
+  const failed = acted && typeof d.error === "string" && d.error;
+  setMsg("loopMsg", failed ? (own(STRINGS.loopErrors, d.error) || STRINGS.loopFailed) : "", "err");
 }
 function renderLoop() {
   const has = loop.known && (loop.playing || !!loop.name);

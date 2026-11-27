@@ -90,7 +90,7 @@ enable raises a single UAC prompt to register the driver; that is by design.
 <!-- Newest entries first. -->
 
 ### Loop a video sent from the phone (remote v2, phase 3)
-_Added 2026-11-27, Video info / instant Stop-Play follow-up the same day · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, `src-tauri/src/remote/stream/`_
+_Added 2026-11-27, Video info / instant Stop-Play follow-up and the security-review fixes (steps 12–15) the same day · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, `src-tauri/src/remote/stream/`_
 
 On the phone page the "Loop a video" card sends one video file straight to the computer
 (WebRTC DataChannel, no upload to a server). The computer asks before taking it, shows the
@@ -108,7 +108,15 @@ file refused on the phone, a dismissed picker changing nothing, a file whose typ
 reason, an error from the computer mid-transfer, Cancel, a video sent right after a camera
 stream (the `busy` answer is retried), and no CSP violation.
 `node remote-web/dev/update-csp.mjs --check` fails if the page's CSP hash is stale. The
-receiving side (storage, size limit, partial-file cleanup) is covered by `cargo test --lib`.
+receiving side is covered by `cargo test --lib`: storage (a private real directory, free
+space, partial-file cleanup, the sweep), the size limit, the minimum transfer rate, the
+content check (a playlist, noise or a WebM sent as MP4 is refused at its first bytes),
+ffmpeg held to one demuxer and the `file` protocol for phone videos, the 4096×4096 / 10 min
+limits, Cancel while the video is loading, a load that hangs, a video that cannot be read
+leaving the earlier loop playing, and the phone's Stop / Play loop (once a second, never
+turning the camera on, refused during a session). The smoke script also covers the phone
+page ignoring a `loop_status` it did not ask for and not showing success on a bare
+`stream_stop done`.
 The two real halves together, without the app's window, are covered on Linux by the headless
 CLI (see "Headless CLI: loop a video from the phone" under Linux). What is left for the steps
 below is the app's own window and dialogs.
@@ -134,6 +142,17 @@ camera preview showing "CamLooper Virtual Camera".
 10. On the phone tap **Start streaming**, accept on the computer, wait for "Live", tap
     **Stop**, and immediately send the video again (accept on the computer).
 11. Reload the phone page.
+12. Send the video once more and, as soon as the computer's banner says "Preparing loop…",
+    click **Cancel** in the banner. (Use a long video with natural motion on, or a computer
+    whose virtual camera is off so that a system prompt holds "Preparing loop…" open.)
+13. On the computer, turn the virtual camera **off**. On the phone tap **Stop loop** if it
+    is playing, then **Play loop**.
+14. On the phone, send a file that is not a video but is named like one: copy any PDF or
+    photo to `not-a-video.mp4` and pick it. Accept on the computer.
+15. While a video picked **on the computer** is looping, send a truncated video from the
+    phone (the first 200 KB of a real MP4 recorded by a phone camera:
+    `head -c 200000 clip.mp4 > cut.mp4`; a "web optimised" MP4 keeps its index at the
+    front and may still play — use a camera recording). Accept.
 
 **Expected:**
 1. The card shows the file's name and size and, in red, "This video is NNN MB. The largest
@@ -172,6 +191,26 @@ camera preview showing "CamLooper Virtual Camera".
 11. After the reload the card again shows "Looping on your computer now" with the file name
     and **Stop loop**, without sending anything.
 
+12. The banner disappears within a second or two. One of two things, and the computer's
+    window, the virtual camera and the phone always agree on which: either the earlier video
+    is still the one loaded and playing and the phone says "The transfer was cancelled on
+    the computer." (the cancel came in time), or the phone's video plays, the main window
+    shows it as loaded and playing, and the phone's card says "Looping on your computer
+    now" with its name (the cancel came too late to prevent the load). Never the phone's
+    video on the camera with the old one shown in the window.
+13. **Stop loop** works as before. **Play loop** shows, in red on the phone, "The virtual
+    camera is off on your computer. Turn it on in CamLooper, then try again." The button
+    stays **Play loop**, the computer shows no system prompt (no polkit / UAC dialog) and
+    its virtual camera stays off. After turning the camera on in CamLooper, **Play loop**
+    works. Tapping Stop / Play faster than once a second shows "That was too fast. Wait a
+    second and try again."
+14. The computer's banner appears and goes away at once; the phone shows "The computer
+    couldn't use this video: This file is not a video the computer can loop." The video
+    that was looping keeps looping, and `phone-videos` holds no new file.
+15. The phone shows "The computer couldn't use this video: The video could not be played on
+    the computer." The computer's own video **keeps playing without a gap** — it is not
+    stopped first — and the main window still shows it.
+
 **Known gotchas:**
 - On Windows the resolution of a video the loader cannot parse (`.webm`, `.mkv`) is an
   estimate from the file size, exactly as it is for the same file picked on the computer.
@@ -183,18 +222,27 @@ camera preview showing "CamLooper Virtual Camera".
 - A computer running an older CamLooper treats the request as a camera stream: its dialog
   says "Use your phone as the camera?" and the phone ends with "Update CamLooper on your
   computer…". Update the computer.
-- If the virtual camera was off when the video arrives (or when the phone taps **Play
-  loop**), the computer turns it on by itself, as pressing Play does. On Linux without the
-  v4l2loopback module loaded that is one polkit prompt; on the Windows **Store** build
-  before the driver was ever registered it is one UAC prompt (the direct-download build
-  registered it at install time and asks nothing). "Preparing loop…" stays up until the
-  prompt is answered; declining it ends in "The video could not be played on the computer."
+- If the virtual camera was off when a video arrives that you accepted, the computer turns
+  it on by itself, as pressing Play does. On Linux without the v4l2loopback module loaded
+  that is one polkit prompt; on the Windows **Store** build before the driver was ever
+  registered it is one UAC prompt (the direct-download build registered it at install time
+  and asks nothing). "Preparing loop…" stays up until the prompt is answered (at most two
+  minutes); declining it ends in "The video could not be played on the computer.", with the
+  earlier video still loaded and playing. The phone's **Play loop** never does this: it
+  only starts the loop on a camera that is already on (step 13).
+- A video is refused, after the transfer, if it is larger than 4096 pixels in either
+  direction or longer than 10 minutes ("The video could not be played on the computer.").
+- A transfer slower than 64 KB in 20 seconds ends with "The transfer was too slow."
+- With less free disk space than the video's size plus 64 MB, the phone shows "There is not
+  enough free disk space on the computer for this video." right after Accept.
 - During the transfer the tray tooltip says the phone is connecting, never "live", and its
   **Stop phone camera** item cancels the transfer.
 - The received file is kept only while it is the loaded video. To check: during a transfer
-  the folder holds one `phone-<16 hex>.<ext>.part`; while it loops, exactly one
-  `phone-<16 hex>.<ext>` (never the phone's file name); after a cancel or a failure, and
-  after quitting CamLooper, it is empty. Linux: `ls ~/.local/share/com.camlooper.app/phone-videos/`;
+  the folder holds one `phone-<16 hex>.part`; while it loops, exactly one
+  `phone-<16 hex>.<ext>` (never the phone's file name; the extension is the kind of video
+  the content is); after a cancel or a failure, after loading a video on the computer, and
+  after quitting CamLooper, it is empty. On Linux and macOS the folder is `drwx------`
+  (`ls -ld`). Linux: `ls ~/.local/share/com.camlooper.app/phone-videos/`;
   Windows: `dir "%APPDATA%\com.camlooper.app\phone-videos"`. On Windows a file that was
   still playing at quit can survive until the next start, which removes it.
 
@@ -762,7 +810,7 @@ behind the Linux end-to-end check; nothing here ships.
   then `file_progress` lines from `"received":0` up to `"received"` = `"size"`, then
   `{"event":"file_saved","path":"/tmp/camlooper-cli-…/phone-videos/phone-<16 hex>.mp4","sha256":"…","size":…}`
   — the `sha256` equals `sha256sum` of the original — then
-  `{"event":"video_loaded","video":{"width":…,"height":…,"fps":…,"duration":…,"filename":"<your file>",…}}`,
+  `{"event":"video_loaded","video":{"width":…,"height":…,"fps":…,"duration":…,"filename":"<your file>",…},"playing":true}`,
   `{"event":"looping","name":"<your file>"}`, a `send` of `stream_stop(done)` and
   `{"event":"loop_status","playing":true,"fromPhone":true,"name":"<your file>",…}`. From then
   on one `{"event":"loop","playing":true,…}` line per second. The phone ends on

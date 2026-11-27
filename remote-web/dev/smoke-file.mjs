@@ -69,6 +69,7 @@ async function scenario(name, plan, check) {
         R.loopControls.push(d.action);
         if (d.action === "stop") R.loop.playing = false;
         if (d.action === "start" && R.loop.name) R.loop.playing = true;
+        if (R.plan.loopError && d.action !== "status") { window.toPhone({ kind: "loop_status", sessionId: d.sessionId, ...R.loop, playing: false, error: R.plan.loopError }); R.loop.playing = false; return; }
         if (!R.plan.muteLoop) window.toPhone({ kind: "loop_status", sessionId: d.sessionId, ...R.loop });
         return;
       }
@@ -116,6 +117,8 @@ async function scenario(name, plan, check) {
             say(ch, { t: "processing" });
             await new Promise((r) => setTimeout(r, R.plan.processMs || 600));
             R.loop = { playing: true, name: R.meta.name, fromPhone: true };
+            // A relay that says "done" by itself: no `looping` on the channel, no loop_status.
+            if (R.plan.doneWithoutLooping) { window.rawToPhone({ type: "stream_stop", data: { sessionId: R.sid, reason: "done" } }); return; }
             say(ch, { t: "looping", name: R.meta.name });
             window.toPhone({ kind: "loop_status", sessionId: R.sid, ...R.loop });
             setTimeout(() => window.rawToPhone({ type: "stream_stop", data: { sessionId: R.sid, reason: "done" } }), 200);
@@ -337,6 +340,33 @@ results.push(await scenario("camera stream, Stop, then a video straight away: bu
   const reqs = await ctl.desk.evaluate(() => window.R.requests.map((r) => [r.mode || "live", r.sessionId]));
   must(reqs.length === 4 && reqs.slice(1).every((r) => r[0] === "file") && new Set(reqs.map((r) => r[1])).size === 4, "expected live + 3 file requests with fresh ids: " + JSON.stringify(reqs));
   must(ctl.frames.indexOf("stream_stop:user") < ctl.frames.lastIndexOf("stream_request"), "live not stopped before the file request");
+}));
+
+results.push(await scenario("success is only what the computer says on the data channel; unsolicited loop_status is ignored", { doneWithoutLooping: true, processMs: 100 }, async (page, ctl) => {
+  // A loop_status nobody asked for (a forged or stray relay frame) changes nothing.
+  await page.waitForFunction(() => true);
+  await new Promise((r) => setTimeout(r, 300)); // the page's own status request is answered first
+  ctl.toPhone({ kind: "loop_status", sessionId: "forged-id-0001", playing: true, name: "evil.mp4", fromPhone: true });
+  await new Promise((r) => setTimeout(r, 300));
+  must(!(await visible(page, "loopNow")), "an unsolicited loop_status was applied");
+  must((await text(page, "loopNowName")) !== "evil.mp4", "an unsolicited loop_status was applied");
+  // stream_stop "done" over the relay, without `looping` on the channel: not shown as success.
+  await pick(page, SMALL);
+  await page.click("#btnSend");
+  await settled(page, /The computer ended the transfer/);
+  must(!/Looping on your computer ✓/.test(await text(page, "fileMsg")), "relay-only done shown as success");
+  // The page then asks, and shows what the computer answers to *its* request.
+  await page.waitForFunction(() => document.getElementById("loopNowName").textContent === "small.webm", null, { timeout: 10000 });
+  must(ctl.frames.filter((f) => f === "loop_control:status").length === 2, "loop status not asked after the unconfirmed end: " + ctl.frames);
+}));
+
+results.push(await scenario("Play loop while the computer's camera is off says so", { loopError: "camera_off", processMs: 100 }, async (page, ctl) => {
+  await pick(page, SMALL);
+  await page.click("#btnSend");
+  await settled(page, /Looping on your computer ✓/);
+  await page.click("#btnLoopToggle");
+  await page.waitForFunction(() => /virtual camera is off on your computer/.test(document.getElementById("loopMsg").textContent), null, { timeout: 10000 });
+  must((await text(page, "btnLoopToggle")) === "Play loop", "button does not reflect the reported state");
 }));
 
 await browser.close();

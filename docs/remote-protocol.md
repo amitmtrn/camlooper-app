@@ -151,6 +151,40 @@ Mitigations in place: every stream needs an explicit Accept in the app; the dial
 the phone's name; the live banner and tray make a running stream visible; one click stops
 it. Device names are sanitized so a request cannot disguise itself.
 
+### Known limitation: this also covers a video sent for looping (phase 3)
+
+**Status: not implemented (review finding M7). It applies to live streams and to video
+files alike.**
+
+A file session (`stream_request` with `mode: "file"`) is set up over the same relay
+signaling as a live stream, so the same gap is there: the file's name and size in the
+confirm dialog, the SDP and the DTLS fingerprint all arrive through the relay. A malicious
+relay can answer the phone itself and deliver *its own* file to a user who accepted
+"holiday.mp4 (12 MB)". Compared with a live stream, two things are new: the bytes are
+written to disk and read by the media parsers, and the result keeps looping on the camera
+after the session has ended.
+
+What limits the damage today, without closing the gap:
+
+- Nothing is taken without the user's Accept, and `meta` on the data channel must equal the
+  file that was accepted (name, size, type).
+- The content must *be* a video: the first bytes are checked (`ftyp` for mp4 / m4v / mov /
+  3gp, the EBML magic for mkv / webm) before anything is kept, the stored extension comes
+  from that check, and a file of another kind than announced is refused.
+- ffmpeg and libavformat open a phone video with that one demuxer and the `file` protocol
+  only (`-protocol_whitelist file -f mov|matroska`; `format_whitelist` for the probe), so a
+  playlist or script in disguise cannot make them read other files or URLs. Files picked on
+  the computer are opened as before.
+- After the probe: at most 4096×4096 and 10 minutes, at most 300 MiB, stored under a random
+  name in `<app data>/phone-videos/` (a real directory, mode 0700, owned by the user).
+- `loop_control` can only stop the loop, or start it on a virtual camera that is already
+  running; it never makes the computer raise a system prompt, and it is rate limited
+  (`loop_status.error`: `busy`, `camera_off`, `rate_limited`).
+
+The fix is the design below, extended to file sessions: an HMAC with the pairing secret `K`
+over the session id, the file's metadata (name, size, type) and **both** DTLS fingerprints,
+sent on the data channel and checked before `meta` is accepted.
+
 ### Proposed design
 
 Bind the DTLS fingerprints to the pairing with a secret the relay never sees.
