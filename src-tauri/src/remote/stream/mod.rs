@@ -17,14 +17,18 @@
 //! * [`media`] — Annex-B / IVF writers, SPS/VP8 size parsing, PLI limiter.
 //! * [`file_receive`] — phase 3: a video file from the phone over a data channel (protocol,
 //!   storage, the loop engine's interface); the desktop loops it like a locally picked one.
+//! * [`loop_engine`] — the app's video loop (`video_processor`) as a [`LoopPlayer`]; the
+//!   same code plays a phone video in the app and in the headless CLI.
 //! * [`handoff`] — the app's camera handoff (pause the video loop, start the camera).
 //! * [`commands`] — Tauri glue: the global manager, events and commands for the UI.
 //!
-//! Everything except `handoff` and `commands` is Tauri-independent and runs headless
-//! (`examples/phone_stream_cli.rs`, `tests/phone_stream_loopback.rs`).
+//! Everything except `commands` runs headless (`examples/phone_stream_cli.rs`,
+//! `tests/phone_stream_loopback.rs`); `handoff` and `loop_engine` drive the app's global
+//! camera and loop engine, which need no window either.
 pub mod commands;
 pub mod file_receive;
 pub mod handoff;
+pub mod loop_engine;
 pub mod machine;
 pub mod manager;
 pub mod media;

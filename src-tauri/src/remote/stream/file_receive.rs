@@ -8,7 +8,7 @@
 //! * [`PhoneVideoStore`] / [`PartFile`] — where the bytes go: `<app data>/phone-videos/`,
 //!   a random name the phone has no say in, written as `.part` and renamed once complete.
 //! * [`LoopPlayer`] — the desktop's video loop, as far as the phone can act on it. The app's
-//!   implementation is `commands::AppLoop`; tests use a fake so they need no ffmpeg.
+//!   implementation is [`super::loop_engine::EngineLoop`]; tests use a fake so they need no ffmpeg.
 //!
 //! [`super::runner`] wires them to the data channel.
 use std::path::{Path, PathBuf};
@@ -345,9 +345,17 @@ pub struct PartFile {
 }
 
 impl PartFile {
+    /// Append `data`. Returns once the bytes have reached the file, not merely tokio's
+    /// buffer: `tokio::fs::File::write_all` hands the write to a blocking task and returns
+    /// at once, so without the flush the progress reported for this chunk could run ahead
+    /// of the file, and a failed write (disk full) would only show at the next chunk.
+    /// (The next write would wait for this one anyway, so the flush costs nothing extra.)
     pub async fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
         match self.file.as_mut() {
-            Some(f) => f.write_all(data).await,
+            Some(f) => {
+                f.write_all(data).await?;
+                f.flush().await
+            }
             None => Err(std::io::Error::other("file already closed")),
         }
     }
@@ -706,6 +714,8 @@ mod tests {
 
         part.write(b"abc").await.unwrap();
         part.write(b"def").await.unwrap();
+        // Written means on disk: what is reported as received can be read back at once.
+        assert_eq!(std::fs::read(store.dir().join(n)).unwrap(), b"abcdef");
         let path = part.commit().await.unwrap();
         assert_eq!(names(store.dir()), vec![format!("phone-{hex}.mov")]);
         assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");

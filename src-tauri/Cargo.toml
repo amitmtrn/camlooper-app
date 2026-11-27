@@ -74,6 +74,14 @@ log = "0.4"
 # Test only: parses the DTLS certificates the vendored crypto provider generates
 # (src/remote/stream/rtc.rs). Pure Rust; already in Cargo.lock as an optional dependency of rcgen.
 x509-parser = "0.18"
+# examples/phone_stream_cli.rs prints the SHA-256 of a received phone video so the Linux E2E
+# can compare it with what the phone sent. Already in Cargo.lock (str0m-purecrypto uses it).
+sha2 = "0.11"
+
+# examples/phone_stream_cli.rs keeps its stdout to JSON lines by pointing fd 1 at stderr for
+# everything else (the loop engine's own `println!`s). Already in Cargo.lock.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 # FFmpeg - conditional compilation for different platforms
 # On Windows, use a different implementation to avoid cross-compilation issues

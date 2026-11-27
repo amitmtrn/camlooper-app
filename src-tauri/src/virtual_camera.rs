@@ -83,6 +83,9 @@ pub struct VirtualCamera {
     frame_count: Arc<AtomicU64>,
     /// Where the video pipeline must deliver frames while this camera runs.
     sink: CameraSink,
+    /// A sink given by the caller instead of the platform camera (headless dev tools only,
+    /// see [`start_virtual_camera_on_sink`]). Nothing is acquired or released for it.
+    fixed_sink: Option<CameraSink>,
     /// Windows: the softcam instance raw frames are pushed into. Held here rather than moved
     /// into a pump task, because the pump now lives with the pipeline producing the frames.
     #[cfg(target_os = "windows")]
@@ -106,6 +109,7 @@ impl VirtualCamera {
             app_handle: None,
             frame_count: Arc::new(AtomicU64::new(0)),
             sink: CameraSink::None,
+            fixed_sink: None,
             #[cfg(target_os = "windows")]
             softcam: None,
         }
@@ -132,7 +136,10 @@ impl VirtualCamera {
         }
 
         self.frame_count.store(0, Ordering::Relaxed);
-        self.sink = self.acquire_sink().await?;
+        self.sink = match self.fixed_sink.clone() {
+            Some(sink) => sink,
+            None => self.acquire_sink().await?,
+        };
 
         {
             let mut status = self.status.lock().await;
@@ -156,7 +163,9 @@ impl VirtualCamera {
             }
         }
 
-        self.release_sink().await;
+        if self.fixed_sink.is_none() {
+            self.release_sink().await;
+        }
         self.sink = CameraSink::None;
 
         {
@@ -660,6 +669,23 @@ pub async fn start_virtual_camera_with(
     config: Option<VirtualCameraConfig>,
     app: Option<AppHandle>,
 ) -> Result<VirtualCameraStatus> {
+    start_virtual_camera_inner(config, app, None).await
+}
+
+/// Start the camera on a sink the caller names instead of the platform's own (which on
+/// Linux is the v4l2loopback device carrying the CamLooper card label). Never used by the
+/// app: the headless dev CLI (`examples/phone_stream_cli.rs --device /dev/videoN | --null`)
+/// uses it so the real loop engine writes to the device under test. Everything downstream
+/// ([`active_sink`], the pipelines) is unchanged.
+pub async fn start_virtual_camera_on_sink(config: Option<VirtualCameraConfig>, sink: CameraSink) -> Result<VirtualCameraStatus> {
+    start_virtual_camera_inner(config, None, Some(sink)).await
+}
+
+async fn start_virtual_camera_inner(
+    config: Option<VirtualCameraConfig>,
+    app: Option<AppHandle>,
+    fixed_sink: Option<CameraSink>,
+) -> Result<VirtualCameraStatus> {
     let config = config.unwrap_or_default();
 
     // Keep the MJPEG stage in step with what the camera will emit.
@@ -676,6 +702,7 @@ pub async fn start_virtual_camera_with(
     *global_camera = None;
 
     let mut camera = VirtualCamera::new(config);
+    camera.fixed_sink = fixed_sink;
     if let Some(app) = app {
         camera.set_app_handle(app);
     }

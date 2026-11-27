@@ -21,7 +21,6 @@
 //! [`StreamStatus`] also carries `mode` (`"live"` | `"file"`) and, for a file session,
 //! `file: {name, size, received, phase, error?}` — see `machine.rs`.
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,8 +29,9 @@ use once_cell::sync::OnceCell;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
-use super::file_receive::{FileDeps, LoopPlayer, LoopState, PhoneVideoStore};
+use super::file_receive::{FileDeps, LoopPlayer, PhoneVideoStore};
 use super::handoff::AppCamera;
+use super::loop_engine::{EngineLoop, LoopHost, VideoInfo};
 use super::machine::{Phase, StreamRequest, StreamStatus};
 use super::manager::{DecisionSink, LoopDeps, StreamManager};
 use super::runner::{IceSource, SessionDeps};
@@ -41,77 +41,21 @@ static MANAGER: OnceCell<StreamManager> = OnceCell::new();
 /// `<app data dir>/phone-videos/`, for the sweep on exit.
 static PHONE_VIDEOS: OnceCell<PhoneVideoStore> = OnceCell::new();
 
-/// The app's loop engine (`video_processor`), driven the way the UI drives it.
-struct AppLoop(AppHandle);
+/// The app's side of the loop engine ([`EngineLoop`]): the platform virtual camera, and
+/// the events that keep the main window in step with what the phone did.
+struct AppLoopHost(AppHandle);
 
-impl AppLoop {
+impl LoopHost for AppLoopHost {
+    fn ensure_camera(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { super::handoff::ensure_virtual_camera().await.map(|_| ()) })
+    }
+
     fn loop_changed(&self, playing: bool) {
         let _ = self.0.emit("remote://loop-changed", serde_json::json!({ "playing": playing }));
     }
 
-    /// What the UI does before it starts playback: the in-app camera off the virtual camera
-    /// (never under a recording), the virtual camera on.
-    async fn prepare_camera(&self) -> anyhow::Result<()> {
-        let (capture_running, recording) = crate::camera_capture::capture_activity().await;
-        if recording {
-            return Err(anyhow::anyhow!("A camera recording is in progress."));
-        }
-        if capture_running {
-            let _ = crate::camera_capture::stop_camera_preview().await;
-        }
-        super::handoff::ensure_virtual_camera().await?;
-        Ok(())
-    }
-}
-
-impl LoopPlayer for AppLoop {
-    fn state(&self) -> BoxFuture<'_, LoopState> {
-        Box::pin(async {
-            let playing = crate::video_processor::get_video_stream_status().await.is_playing;
-            match crate::video_processor::loaded_video().await {
-                Some((path, name)) => LoopState { playing, name: Some(name), path: Some(path) },
-                None => LoopState { playing, name: None, path: None },
-            }
-        })
-    }
-
-    fn stop(&self) -> BoxFuture<'_, anyhow::Result<()>> {
-        Box::pin(async {
-            crate::video_processor::stop_video_stream().await?;
-            self.loop_changed(false);
-            Ok(())
-        })
-    }
-
-    fn start(&self) -> BoxFuture<'_, anyhow::Result<()>> {
-        Box::pin(async {
-            if !crate::video_processor::has_video_loaded().await {
-                return Err(anyhow::anyhow!("No video is loaded."));
-            }
-            self.prepare_camera().await?;
-            crate::video_processor::start_video_stream().await?;
-            self.loop_changed(true);
-            Ok(())
-        })
-    }
-
-    fn play_file<'a>(&'a self, path: &'a Path, display_name: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move {
-            // The loop that is playing, if any, and its ffmpeg: gone before the next starts.
-            crate::video_processor::stop_video_stream().await?;
-            if !crate::video_processor::wait_for_playback_exit(Duration::from_secs(5)).await {
-                return Err(anyhow::anyhow!("video playback did not stop"));
-            }
-            let video = crate::video_processor::load_video_file_with_original_name(
-                path.to_string_lossy().into_owned(),
-                display_name.to_string(),
-            )
-            .await?;
-            self.prepare_camera().await?;
-            crate::video_processor::start_video_stream().await?;
-            let _ = self.0.emit("remote://phone-video-loaded", serde_json::json!({ "video": video, "playing": true }));
-            Ok(())
-        })
+    fn video_loaded(&self, video: &VideoInfo) {
+        let _ = self.0.emit("remote://phone-video-loaded", serde_json::json!({ "video": video, "playing": true }));
     }
 }
 
@@ -198,7 +142,7 @@ pub(crate) fn install(app: AppHandle) -> (StreamManager, mpsc::UnboundedReceiver
         eprintln!("phone stream: removed {swept} leftover phone video file(s)");
     }
     let _ = PHONE_VIDEOS.set(store.clone());
-    let player: Arc<dyn LoopPlayer> = Arc::new(AppLoop(app.clone()));
+    let player: Arc<dyn LoopPlayer> = Arc::new(EngineLoop::new(Arc::new(AppLoopHost(app.clone()))));
     let mut deps = SessionDeps::new(ffmpeg, Arc::new(AppCamera::default()), Arc::new(RelayIce));
     deps.files = Some(FileDeps::new(store.clone(), player.clone()));
     let (manager, outbound) = StreamManager::spawn_with_loop(

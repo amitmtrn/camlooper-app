@@ -204,7 +204,7 @@ impl CameraControl for AppCamera {
 /// kernel module first — at most one system prompt). For a loop that is started from the
 /// phone: the window may be hidden in the tray, so nothing else would turn the camera on.
 /// Returns whether it had to be started.
-pub(super) async fn ensure_virtual_camera() -> Result<bool> {
+pub async fn ensure_virtual_camera() -> Result<bool> {
     if virtual_camera::get_virtual_camera_status().await.is_active {
         return Ok(false);
     }

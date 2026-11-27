@@ -396,8 +396,13 @@ async fn run_session(
 // File session
 // ---------------------------------------------------------------------------------------
 
-/// After the last message for the phone (`looping`, `error`) the connection is kept this
-/// long so the message is on the wire before the close; a phone that closes first ends it.
+/// After the last message for the phone (`looping`, `error`) the connection is kept until
+/// the phone has acknowledged it — a fixed wait would close on a message that was lost and
+/// is still to be retransmitted (SCTP waits a second or more for that) — but no longer than
+/// this, for a phone that is gone.
+const FILE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Once the last message has arrived, the phone gets this long to close the connection
+/// itself (it does, on `looping` and on `error`) before the desktop does.
 const FILE_LINGER: Duration = Duration::from_millis(500);
 const SAVE_FAILED: &str = "The video could not be saved on the computer.";
 const PLAY_FAILED: &str = "The video could not be played on the computer.";
@@ -482,14 +487,14 @@ async fn run_file_session(
         Received::Ended(outcome) => outcome,
         Received::Failed(message) => {
             say(reply::error(&message));
-            linger(&mut rtc_rx).await;
+            linger(&rtc_tx, &mut rtc_rx).await;
             (StopReason::Error, Some(message))
         }
         Received::Complete(part) => match part.commit().await {
             Err(e) => {
                 eprintln!("phone video: could not finish the file: {e}");
                 say(reply::error(SAVE_FAILED));
-                linger(&mut rtc_rx).await;
+                linger(&rtc_tx, &mut rtc_rx).await;
                 (StopReason::Error, Some(SAVE_FAILED.into()))
             }
             Ok(path) => {
@@ -507,7 +512,7 @@ async fn run_file_session(
                     Ok(()) => {
                         let _ = events.send(SessionEvent::FileStage(FileStage::Looping));
                         say(reply::looping(&offer.name));
-                        linger(&mut rtc_rx).await;
+                        linger(&rtc_tx, &mut rtc_rx).await;
                         // A stop that came while the video was loading could no longer
                         // prevent it; the session still ends as that stop.
                         (stopped.unwrap_or(StopReason::Done), None)
@@ -515,7 +520,7 @@ async fn run_file_session(
                     Err(e) => {
                         eprintln!("phone video: could not play the received video: {e:#}");
                         say(reply::error(PLAY_FAILED));
-                        linger(&mut rtc_rx).await;
+                        linger(&rtc_tx, &mut rtc_rx).await;
                         (StopReason::Error, Some(PLAY_FAILED.into()))
                     }
                 }
@@ -663,13 +668,29 @@ async fn play_received(
     (result, stopped)
 }
 
-/// Keep the connection up for [`FILE_LINGER`], or until the phone closes it.
-async fn linger(rtc_rx: &mut mpsc::Receiver<RtcEvent>) {
-    let deadline = tokio::time::Instant::now() + FILE_LINGER;
+/// Keep the connection up until the phone has everything that was said on the channel
+/// ([`FILE_DELIVERY_TIMEOUT`]) and then closes it ([`FILE_LINGER`]), or is gone.
+async fn linger(rtc_tx: &mpsc::UnboundedSender<RtcCommand>, rtc_rx: &mut mpsc::Receiver<RtcEvent>) {
+    let (tx, delivered) = tokio::sync::oneshot::channel();
+    let _ = rtc_tx.send(RtcCommand::Delivered(tx));
+    tokio::pin!(delivered);
+    let mut waiting_for_ack = true;
+    let mut deadline = tokio::time::Instant::now() + FILE_DELIVERY_TIMEOUT;
     loop {
-        match tokio::time::timeout_at(deadline, rtc_rx.recv()).await {
-            Ok(Some(RtcEvent::Closed(_))) | Ok(None) | Err(_) => return,
-            Ok(Some(_)) => {}
+        tokio::select! {
+            r = &mut delivered, if waiting_for_ack => {
+                if r.is_err() {
+                    return; // the receiver task is gone
+                }
+                waiting_for_ack = false;
+                deadline = tokio::time::Instant::now() + FILE_LINGER;
+            }
+            ev = rtc_rx.recv() => {
+                if matches!(ev, None | Some(RtcEvent::Closed(_))) {
+                    return;
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => return,
         }
     }
 }
@@ -1456,8 +1477,13 @@ mod tests {
                     wrote = true;
                 }
             }
-            if wrote {
-                continue;
+            // The network is read on every pass, also while there is more to write (then
+            // without waiting): a browser's network thread does not wait for the page
+            // either. Reading only when there was nothing left to write let the desktop's
+            // SACKs and replies pile up in the socket buffer until the kernel dropped them,
+            // and a dropped `looping` then had to wait for an SCTP retransmission.
+            if sock.set_nonblocking(wrote).is_err() {
+                break;
             }
             let input = match sock.recv_from(&mut buf) {
                 Ok((n, source)) => match buf[..n].try_into() {
@@ -1716,7 +1742,11 @@ mod tests {
         let data = video_bytes(2 * 1024 * 1024);
         let (file, mut script) = script("clip.mp4", data.len(), data);
         script.pause_at = Some(1024 * 1024);
-        let idle = if how == "stall" { Duration::from_millis(1500) } else { file_receive::IDLE_TIMEOUT };
+        // The stall timeout has to outlast the transport's own recovery, as the real 20 s
+        // does: a datagram dropped on the way to the first megabyte is retransmitted after
+        // SCTP's RTO (1 s at best, 3 s before the first round-trip measurement). Anything
+        // shorter mistakes that for the stall, before the stall this test stages.
+        let idle = if how == "stall" { Duration::from_secs(5) } else { file_receive::IDLE_TIMEOUT };
         let mut desk = Desk::new(FakeLoop::default(), idle);
         let phone = FilePhone::start(script);
         desk.connect("abort-1", file, &phone).await;

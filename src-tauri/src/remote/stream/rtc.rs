@@ -119,6 +119,10 @@ pub enum RtcCommand {
     FramesDropped,
     /// Send a text message on the file data channel (queued until the channel can take it).
     ChannelText(String),
+    /// Answered once every [`Self::ChannelText`] sent before it has been acknowledged by the
+    /// phone (SCTP), or at once when there is no channel to deliver on. Dropped unanswered
+    /// when the task ends first.
+    Delivered(tokio::sync::oneshot::Sender<()>),
     Stop,
 }
 
@@ -417,6 +421,7 @@ async fn run(
         file_channel: None,
         outbox: std::collections::VecDeque::new(),
         pending_text: std::collections::VecDeque::new(),
+        delivery_waiters: Vec::new(),
         ignored: 0,
         frames: 0,
         dropped: 0,
@@ -448,6 +453,7 @@ async fn run(
             Ok(t) => t,
             Err(close) => break close,
         };
+        notify_delivered(&mut rtc, &mut st);
         if !st.outbox.is_empty() && !st.peer_closed {
             continue;
         }
@@ -569,6 +575,8 @@ struct LoopState {
     outbox: std::collections::VecDeque<RtcEvent>,
     /// Text for the phone that the channel could not take yet.
     pending_text: std::collections::VecDeque<String>,
+    /// [`RtcCommand::Delivered`] requests waiting for the phone's acknowledgement.
+    delivery_waiters: Vec<tokio::sync::oneshot::Sender<()>>,
     /// Datagrams that were not for this session or that str0m rejected.
     ignored: u64,
     frames: u64,
@@ -592,7 +600,26 @@ fn handle_command(rtc: &mut Rtc, cmd: RtcCommand, st: &mut LoopState, limits: &m
             }
             flush_channel_text(rtc, st);
         }
+        RtcCommand::Delivered(done) => st.delivery_waiters.push(done),
         RtcCommand::Stop => {}
+    }
+}
+
+/// Answer [`RtcCommand::Delivered`] once nothing is queued here and the phone has
+/// acknowledged everything written to the channel (SCTP counts a message as buffered until
+/// its SACK arrives). Without a channel nothing can be delivered any more: answered at once.
+fn notify_delivered(rtc: &mut Rtc, st: &mut LoopState) {
+    if st.delivery_waiters.is_empty() {
+        return;
+    }
+    let outstanding = match st.file_channel {
+        Some(id) => !st.pending_text.is_empty() || rtc.channel(id).is_some_and(|mut c| c.buffered_amount() > 0),
+        None => false,
+    };
+    if !outstanding {
+        for done in st.delivery_waiters.drain(..) {
+            let _ = done.send(());
+        }
     }
 }
 
