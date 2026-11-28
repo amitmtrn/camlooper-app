@@ -58,9 +58,19 @@ pub trait SessionBackend: Send + Sync {
         kind: SessionKind,
         events: mpsc::UnboundedSender<SessionEvent>,
     ) -> mpsc::UnboundedSender<SessionCommand>;
+
+    /// Whether `mode: "meeting"` sessions can be started: this desktop has something that
+    /// captures its sound (see [`super::meeting::MeetingSource`]).
+    fn takes_meeting(&self) -> bool {
+        false
+    }
 }
 
 impl SessionBackend for Arc<super::runner::SessionDeps> {
+    fn takes_meeting(&self) -> bool {
+        self.meeting.is_some()
+    }
+
     fn start(
         &self,
         _session_id: &str,
@@ -103,9 +113,12 @@ pub const MAX_HELLOS: usize = 5;
 pub const HELLO_WINDOW: Duration = Duration::from_secs(10);
 
 /// `hello_ok.features`: the request modes this desktop takes. `record` and `file` need a
-/// place to put the video.
-pub fn features(has_store: bool) -> Vec<String> {
-    let modes: &[&str] = if has_store { &["live", "record", "file"] } else { &["live"] };
+/// place to put the video; `meeting` needs a capture source (Linux only, for now).
+pub fn features(has_store: bool, meeting: bool) -> Vec<String> {
+    let mut modes: Vec<&str> = if has_store { vec!["live", "record", "file"] } else { vec!["live"] };
+    if meeting {
+        modes.push("meeting");
+    }
     modes.iter().map(|m| m.to_string()).collect()
 }
 
@@ -243,8 +256,9 @@ impl StreamManager {
         let session_active = Arc::new(AtomicBool::new(false));
         // Without a place to put them, videos are not accepted at all.
         let file_sessions = loops.store.is_some();
+        let meeting_sessions = backend.takes_meeting();
         tokio::spawn(loop_worker(loop_rx, loops, out_tx.clone(), session_active.clone()));
-        let wiring = Wiring { self_tx: tx.downgrade(), backend, decisions, out: out_tx, status: status_tx, loops: loop_tx, session_active, file_sessions };
+        let wiring = Wiring { self_tx: tx.downgrade(), backend, decisions, out: out_tx, status: status_tx, loops: loop_tx, session_active, file_sessions, meeting_sessions };
         tokio::spawn(run(rx, wiring));
         (StreamManager { tx, status: status_rx }, out_rx)
     }
@@ -315,10 +329,12 @@ struct Wiring {
     session_active: Arc<AtomicBool>,
     /// Whether `mode: "file"` requests are taken (there is a store for the videos).
     file_sessions: bool,
+    /// Whether `mode: "meeting"` requests are taken (the backend can capture).
+    meeting_sessions: bool,
 }
 
 async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
-    let Wiring { self_tx, backend, decisions, out, status, loops, session_active, file_sessions } = wiring;
+    let Wiring { self_tx, backend, decisions, out, status, loops, session_active, file_sessions, meeting_sessions } = wiring;
     let mut m = Machine::new();
     let mut refusals = RateLimit::new(MAX_REFUSALS, REFUSAL_WINDOW);
     let mut hellos = RateLimit::new(MAX_HELLOS, HELLO_WINDOW);
@@ -344,6 +360,11 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
                             eprintln!("phone stream: refusing a video from the phone (no place to store it)");
                             refusal(&mut refusals, now, session_id, RejectReason::Unsupported)
                         }
+                        // This desktop cannot capture a meeting (not Linux, or a headless tool).
+                        Ok(StreamSignal::StreamRequest { session_id, mode: StreamMode::Meeting, .. }) if !meeting_sessions => {
+                            eprintln!("phone stream: refusing a meeting request (this computer cannot share a meeting)");
+                            refusal(&mut refusals, now, session_id, RejectReason::Unsupported)
+                        }
                         // "Which app protocol do you speak?" — answered whatever else is
                         // going on, with what this desktop takes.
                         Ok(StreamSignal::Hello { session_id, app_protocol }) => {
@@ -352,7 +373,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
                                 vec![Action::Send(OutboundFrame::Signal(StreamSignal::HelloOk {
                                     session_id,
                                     app_protocol: APP_PROTOCOL,
-                                    features: features(file_sessions),
+                                    features: features(file_sessions, meeting_sessions),
                                 }))]
                             } else {
                                 log::debug!("phone stream: not answering a hello (too many lately)");
@@ -432,6 +453,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
                         StreamMode::File => "loop a video",
                         StreamMode::Record => "record a loop",
                         StreamMode::Live => "stream its camera",
+                        StreamMode::Meeting => "hear and see the meeting",
                     };
                     eprintln!("phone stream: {} asks to {what}", req.device_name.as_deref().unwrap_or("the phone"));
                     decisions.request(req);
@@ -531,9 +553,15 @@ mod tests {
         hang_on_stop: bool,
         /// …until the test sends it for them: every started session's (epoch, events).
         started: Arc<Mutex<Vec<Started>>>,
+        /// This desktop has a capture source for meeting sessions.
+        meeting: bool,
     }
 
     impl SessionBackend for FakeBackend {
+        fn takes_meeting(&self) -> bool {
+            self.meeting
+        }
+
         fn start(
             &self,
             _id: &str,
@@ -1075,7 +1103,59 @@ mod tests {
         m.on_relay_signal(json!({"kind":"stream_request","sessionId":"r1","mode":"record"}));
         assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"r1","reason":"unsupported"}));
         assert_eq!(m.status().state, Phase::Idle);
-        assert_eq!(features(true), vec!["live", "record", "file"]);
+        assert_eq!(features(true, false), vec!["live", "record", "file"]);
+        assert_eq!(features(true, true), vec!["live", "record", "file", "meeting"]);
+        assert_eq!(features(false, true), vec!["live", "meeting"]);
+    }
+
+    #[tokio::test]
+    async fn meeting_is_offered_and_taken_only_where_the_desktop_can_capture() {
+        // No capture source (Windows, macOS, a headless tool): not in hello_ok, and a
+        // request that comes anyway is refused — never taken for a live camera.
+        let (dtx, mut drx) = mpsc::unbounded_channel();
+        let (m, mut out) = StreamManager::spawn(Arc::new(FakeBackend::default()), Arc::new(ChannelDecisions(dtx)));
+        m.on_relay_signal(json!({"kind":"hello","sessionId":"h1","appProtocol":3}));
+        assert_eq!(next_frame(&mut out).await["data"]["features"], json!(["live"]));
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"m1","mode":"meeting"}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"m1","reason":"unsupported"}));
+        assert_eq!(m.status().state, Phase::Idle);
+        assert!(drx.try_recv().is_err(), "nobody was asked");
+
+        // With one: offered under the same app protocol, asked for, started as a meeting.
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let backend = Arc::new(FakeBackend { meeting: true, ..FakeBackend::default() });
+        let player = FakeLoop::loaded("holiday.mp4", &store.dir().join("phone-00000000000000aa.mp4"), true);
+        let (m, mut out, mut drx) = with_loop(backend.clone(), player.clone(), &store);
+        m.on_relay_signal(json!({"kind":"hello","sessionId":"h2","appProtocol":3}));
+        assert_eq!(
+            next_frame(&mut out).await["data"],
+            json!({"kind":"hello_ok","sessionId":"h2","appProtocol":3,"features":["live","record","file","meeting"]})
+        );
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"m2","deviceLabel":"Pixel","mode":"meeting"}));
+        let DecisionEvent::Request(req) = drx.recv().await.unwrap() else { panic!() };
+        assert_eq!((req.mode, req.file.clone()), (StreamMode::Meeting, None));
+        assert_eq!(serde_json::to_value(&req).unwrap()["mode"], "meeting");
+        m.accept("m2").await.unwrap();
+        assert_eq!(next_frame(&mut out).await["data"]["kind"], "stream_accept");
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"status","sessionId":"m2","state":"connecting","mode":"meeting"}));
+        m.on_relay_signal(json!({"kind":"offer","sessionId":"m2","sdp":"v=0\r\n"}));
+        assert_eq!(next_frame(&mut out).await["data"]["kind"], "answer");
+        assert_eq!(next_frame(&mut out).await["data"]["mode"], "meeting");
+        wait_state(&m, Phase::Live).await;
+        assert_eq!(m.status().mode, StreamMode::Meeting);
+        assert_eq!(serde_json::to_value(m.status()).unwrap()["mode"], "meeting");
+        assert!(backend.commands.lock().unwrap().contains(&"start Meeting".to_string()));
+
+        // The loop is still the phone's to stop while it listens to the meeting.
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"stop"}));
+        let status = next_frame(&mut out).await;
+        assert_eq!(status["data"]["kind"], "loop_status");
+        assert_eq!(status["data"]["playing"], false);
+        assert!(status["data"].get("error").is_none(), "{status}");
+
+        m.stop(StopReason::User).await;
+        assert_eq!(next_frame(&mut out).await, json!({"type":"stream_stop","data":{"sessionId":"m2","reason":"user"}}));
+        wait_state(&m, Phase::Idle).await;
     }
 
     #[tokio::test]

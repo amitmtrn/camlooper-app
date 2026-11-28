@@ -20,12 +20,16 @@
 //!   storage, the loop engine's interface); the desktop loops it like a locally picked one.
 //! * [`loop_engine`] — the app's video loop (`video_processor`) as a [`LoopPlayer`]; the
 //!   same code plays a phone video in the app and in the headless CLI.
+//! * [`meeting`] — phase 5: the other direction. A meeting session sends what this computer
+//!   plays and a picked window to the phone (ffmpeg encodes, str0m sends); [`capture`] is
+//!   where that media comes from, per platform (Linux so far).
 //! * [`handoff`] — the app's camera handoff (pause the video loop, start the camera).
 //! * [`commands`] — Tauri glue: the global manager, events and commands for the UI.
 //!
 //! Everything except `commands` runs headless (`examples/phone_stream_cli.rs`,
 //! `tests/phone_stream_loopback.rs`); `handoff` and `loop_engine` drive the app's global
 //! camera and loop engine, which need no window either.
+pub mod capture;
 pub mod commands;
 pub mod file_receive;
 pub mod handoff;
@@ -33,6 +37,7 @@ pub mod loop_engine;
 pub mod machine;
 pub mod manager;
 pub mod media;
+pub mod meeting;
 pub mod record;
 pub mod rtc;
 pub mod runner;
@@ -41,6 +46,7 @@ pub mod signal;
 pub use handoff::phone_owns_camera;
 pub use file_receive::{FileDeps, LoopPlayer, LoopState, PhoneVideoStore, PlayError, PlayRequest, Played};
 pub use machine::{FilePhase, FileStatus, Phase, StreamRequest, StreamStatus};
+pub use meeting::{FixtureSource, MeetingSource};
 pub use manager::{ChannelDecisions, DecisionEvent, DecisionSink, LoopDeps, SessionBackend, StreamManager};
 pub use runner::{CameraControl, CameraTarget, Cancel, FixedCamera, IceSource, NoStun, SessionDeps, SessionKind};
 pub use signal::{RecordPhase, RecordStatus};

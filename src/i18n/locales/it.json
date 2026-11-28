@@ -223,6 +223,24 @@
       "failed": "Impossibile riprodurre in loop la registrazione dal telefono.",
       "cancelledByPhone": "Il telefono ha annullato la registrazione.",
       "expired": "La richiesta è già scaduta. Tocca di nuovo «Record a loop» sul telefono."
+    },
+    "meeting": {
+      "confirmTitle": "Condividere la riunione con {{phone}}?",
+      "confirmBody": "{{phone}} sentirà ciò che questo computer riproduce (le altre persone nella riunione) e vedrà la finestra che scegli. CamLooper non avvisa gli altri partecipanti.",
+      "confirmPicker": "Dopo aver accettato, il sistema ti chiede quale finestra o schermo condividere. Annulla lì per condividere solo l'audio.",
+      "live": "Riunione condivisa con {{phone}}",
+      "soundOnly": "solo audio",
+      "soundAndWindow": "audio e una finestra",
+      "notice": "CamLooper non avvisa gli altri partecipanti alla riunione.",
+      "stopping": "Interruzione della condivisione…",
+      "stop": "Interrompi condivisione",
+      "stoppedByPhone": "Il telefono ha smesso di seguire la riunione.",
+      "expired": "Questa richiesta è già scaduta. Tocca di nuovo «Segui la riunione» sul telefono.",
+      "errorTitle": "La condivisione della riunione si è interrotta.",
+      "errors": {
+        "timeout": "Il telefono non è più raggiungibile. Controlla che sia ancora sulla pagina CamLooper Remote, poi ricomincia dal telefono.",
+        "generic": "Qualcosa è andato storto durante la condivisione della riunione (ad esempio, non è stato possibile acquisire l'audio di questo computer). Ricomincia dal telefono."
+      }
     }
   },
   "tray": {

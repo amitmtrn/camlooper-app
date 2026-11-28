@@ -37,6 +37,14 @@
 //!   SCTP's flow control slows the phone down. No media timeout applies — the consumer has
 //!   its own idle timeout.
 //!
+//! * **Meeting sessions** ([`RtcMode::Meeting`]). The direction is reversed: the phone offers
+//!   `recvonly` audio + video and the desktop *sends* encoded frames ([`RtcCommand::Media`],
+//!   str0m's frame-level writer packetizes them). Nothing is received, so no PLI, REMB or
+//!   media timeout applies; a phone that vanished is noticed by ICE: its checks go unanswered
+//!   (about 25 s with str0m's timing), then [`VIEWER_GONE_GRACE`] without a recovery ends
+//!   the session as `timeout`. The phone may open one data channel, [`TRANSCRIPT_CHANNEL_LABEL`],
+//!   for captions the desktop will send later; what the phone writes on it is dropped.
+//!
 //! Privacy: SDP and candidate addresses are logged at debug level only.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -47,7 +55,7 @@ use str0m::bwe::Bitrate;
 use str0m::change::SdpOffer;
 use str0m::channel::ChannelId;
 use str0m::format::Codec as SCodec;
-use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
+use str0m::media::{Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
@@ -65,6 +73,11 @@ const STUN_BUDGET: Duration = Duration::from_millis(800);
 const FRAME_QUEUE: usize = 90;
 /// `progress` reports waiting for the data channel beyond this many are not queued.
 const MAX_PENDING_TEXT: usize = 64;
+/// The data channel a meeting viewer may open for captions (desktop → phone text).
+pub const TRANSCRIPT_CHANNEL_LABEL: &str = "camlooper-transcript";
+/// A meeting session whose ICE connection has been `Disconnected` this long is over. ICE
+/// itself takes much longer to say so; this only bridges a state that flaps.
+pub const VIEWER_GONE_GRACE: Duration = Duration::from_secs(3);
 /// While the consumer of a file session is behind, str0m's timers run this often.
 const OUTBOX_TIMER: Duration = Duration::from_millis(100);
 
@@ -112,6 +125,27 @@ pub enum RtcMode {
     Live,
     /// One video file over a data channel: the offer must carry no media at all.
     File,
+    /// The desktop sends this computer's sound and a window: the offer must carry audio and
+    /// video, every one of them `recvonly` (the phone sends nothing).
+    Meeting,
+}
+
+/// Which of a meeting session's two tracks an encoded frame belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutKind {
+    /// One H.264 access unit, Annex B. `time` is in 1/90000 s.
+    Video,
+    /// One Opus packet. `time` is in 1/48000 s.
+    Audio,
+}
+
+/// An encoded frame for the phone (meeting sessions).
+#[derive(Debug)]
+pub struct OutMedia {
+    pub kind: OutKind,
+    /// Media time in the track's clock rate, from any origin; it only has to keep growing.
+    pub time: u64,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -131,6 +165,10 @@ pub enum RtcCommand {
     /// phone (SCTP), or at once when there is no channel to deliver on. Dropped unanswered
     /// when the task ends first.
     Delivered(tokio::sync::oneshot::Sender<()>),
+    /// Meeting sessions: send this frame to the phone. Dropped until the connection can
+    /// carry media (ICE *and* DTLS), and when the answer did not keep that track. The
+    /// picture then starts on the first keyframe: frames before it are dropped too.
+    Media(OutMedia),
     Stop,
 }
 
@@ -307,23 +345,53 @@ pub fn accept_offer(
 
 /// Whether the offer's media sections are what `mode` allows. A file session is a data
 /// channel and nothing else (no camera or microphone rides along with a file transfer); a
-/// live session must bring video, and a data-channel-only offer is not one.
+/// live session must bring video, and a data-channel-only offer is not one. A meeting
+/// session is the phone *receiving*: audio and video, each `recvonly` — an offer that would
+/// send the phone's camera or microphone (`sendonly`, `sendrecv`, or no direction at all,
+/// which means `sendrecv`) is not one, and neither is one without audio.
 fn offer_matches_mode(sdp: &str, mode: RtcMode) -> bool {
-    let (mut media, mut video, mut application) = (0, 0, 0);
+    let (mut media, mut video, mut audio, mut application) = (0, 0, 0, 0);
+    // Per audio/video section: its direction attribute, if it has one.
+    let mut directions: Vec<Option<&str>> = Vec::new();
+    let mut session_direction: Option<&str> = None;
+    let mut in_media = false;
+    let mut seen_section = false;
     for line in sdp.lines() {
-        let Some(m) = line.trim().strip_prefix("m=") else { continue };
-        match m.split_whitespace().next().unwrap_or_default() {
-            "application" => application += 1,
-            "video" => {
-                video += 1;
-                media += 1;
+        let line = line.trim();
+        if let Some(m) = line.strip_prefix("m=") {
+            seen_section = true;
+            let kind = m.split_whitespace().next().unwrap_or_default();
+            in_media = kind != "application";
+            match kind {
+                "application" => application += 1,
+                "video" => video += 1,
+                "audio" => audio += 1,
+                _ => {}
             }
-            _ => media += 1,
+            if in_media {
+                media += 1;
+                directions.push(None);
+            }
+        } else if let Some(d) = line.strip_prefix("a=").filter(|d| matches!(*d, "sendrecv" | "sendonly" | "recvonly" | "inactive")) {
+            if !seen_section {
+                session_direction = Some(d);
+            } else if in_media {
+                if let Some(slot) = directions.last_mut() {
+                    *slot = Some(d);
+                }
+            }
         }
     }
     match mode {
         RtcMode::Live => video >= 1,
         RtcMode::File => application == 1 && media == 0,
+        RtcMode::Meeting => {
+            audio >= 1
+                && video >= 1
+                && media == audio + video
+                && application <= 1
+                && directions.iter().all(|d| d.or(session_direction) == Some("recvonly"))
+        }
     }
 }
 
@@ -337,6 +405,16 @@ fn build_rtc(start: Instant, mode: RtcMode) -> Rtc {
         // sends pieces of at most 64 KiB; say so (`a=max-message-size`) and let SCTP refuse
         // anything larger instead of reassembling it first (str0m's default is 256 KiB).
         return cfg.set_sctp_max_message_size(MAX_CHUNK_BYTES as u32).build(start);
+    }
+    if mode == RtcMode::Meeting {
+        // What the desktop's own encoder produces and nothing else: H.264 constrained
+        // baseline (libx264 `baseline`), packetization-mode=1, and Opus.
+        {
+            let cc = cfg.codec_config();
+            cc.add_h264(102.into(), Some(103.into()), true, 0x42e01f);
+            cc.add_h264(104.into(), Some(105.into()), true, 0x42001f);
+        }
+        return cfg.enable_opus(true, false).build(start);
     }
     // H.264 first: str0m answers with the first local codec the offer also has, and with
     // VP8 configured first it picked VP8 even when Chrome preferred H.264 (spike finding).
@@ -430,6 +508,12 @@ async fn run(
         discontinuity: false,
         peer_closed: false,
         file_channel: None,
+        send_video: None,
+        send_audio: None,
+        media_ready: false,
+        video_started: false,
+        sent: 0,
+        disconnected_since: None,
         outbox: std::collections::VecDeque::new(),
         pending_text: std::collections::VecDeque::new(),
         delivery_waiters: Vec::new(),
@@ -494,6 +578,10 @@ async fn run(
             if now.duration_since(since) >= opts.media_timeout {
                 break RtcClose::Failed { reason: StopReason::Timeout, detail: "no video from the phone".into() };
             }
+        }
+        // A meeting session receives nothing to time out on: ICE says when the phone is gone.
+        if mode == RtcMode::Meeting && st.disconnected_since.is_some_and(|t| now.duration_since(t) >= VIEWER_GONE_GRACE) {
+            break RtcClose::Failed { reason: StopReason::Timeout, detail: "the phone is no longer reachable".into() };
         }
         if st.last_media.is_some_and(|t| now.duration_since(t) > opts.stall) {
             st.pli.want();
@@ -568,7 +656,7 @@ async fn run(
         r.abort();
     }
     eprintln!(
-        "phone stream: receiver closed ({}) after {} frames, {} dropped, {} keyframe requests, {} stray datagrams",
+        "phone stream: receiver closed ({}) after {} frames, {} dropped, {} keyframe requests, {} stray datagrams, {} frames sent",
         match &close {
             RtcClose::Stopped => "stopped".to_string(),
             RtcClose::PeerClosed => "closed by the phone".to_string(),
@@ -577,7 +665,8 @@ async fn run(
         st.frames,
         st.dropped,
         st.plis,
-        st.ignored
+        st.ignored,
+        st.sent
     );
     let _ = ev_tx.send(RtcEvent::Closed(close)).await;
 }
@@ -593,8 +682,21 @@ struct LoopState {
     discontinuity: bool,
     /// The phone closed the connection (str0m's `Event::Closed`).
     peer_closed: bool,
-    /// The phone's file data channel, once open.
+    /// The phone's file data channel, once open (meeting sessions: its transcript channel).
     file_channel: Option<ChannelId>,
+    /// Meeting sessions: the tracks the answer sends on, and the payload type once looked up.
+    send_video: Option<(Mid, Option<Pt>)>,
+    send_audio: Option<(Mid, Option<Pt>)>,
+    /// ICE and DTLS are both up (str0m's `Event::Connected`): what is written now is sent.
+    /// Media written earlier — ICE connects first — is silently dropped by str0m.
+    media_ready: bool,
+    /// A keyframe has been sent since `media_ready`; until then the phone has nothing to
+    /// decode the other frames against.
+    video_started: bool,
+    /// Frames written to str0m for the phone.
+    sent: u64,
+    /// ICE reported `Disconnected` at this time and has not recovered.
+    disconnected_since: Option<Instant>,
     /// Data channel events not yet handed to the consumer (see step 0 of the loop).
     outbox: std::collections::VecDeque<RtcEvent>,
     /// Text for the phone that the channel could not take yet; `true` marks a `progress`
@@ -629,14 +731,56 @@ fn handle_command(rtc: &mut Rtc, cmd: RtcCommand, st: &mut LoopState, limits: &m
             flush_channel_text(rtc, st);
         }
         RtcCommand::Delivered(done) => st.delivery_waiters.push(done),
+        RtcCommand::Media(media) => write_media(rtc, st, media),
         RtcCommand::Stop => {}
     }
 }
 
-/// Whether a data channel the phone opened becomes the session's file channel: only in a
-/// file session, only under the agreed label, and only the first one.
+/// Hand one encoded frame to str0m's packetizer (meeting sessions). Never fatal: a frame
+/// that cannot be written is one the phone does not get.
+fn write_media(rtc: &mut Rtc, st: &mut LoopState, media: OutMedia) {
+    if st.mode != RtcMode::Meeting || !st.media_ready {
+        return;
+    }
+    if media.kind == OutKind::Video && !st.video_started && !h264_is_keyframe(&media.data) {
+        return;
+    }
+    let (slot, freq) = match media.kind {
+        OutKind::Video => (&mut st.send_video, Frequency::NINETY_KHZ),
+        OutKind::Audio => (&mut st.send_audio, Frequency::FORTY_EIGHT_KHZ),
+    };
+    let Some((mid, pt)) = slot.as_mut() else { return };
+    let Some(writer) = rtc.writer(*mid) else { return };
+    if pt.is_none() {
+        *pt = writer
+            .payload_params()
+            .find(|p| match media.kind {
+                OutKind::Video => matches!(p.spec().codec, SCodec::H264),
+                OutKind::Audio => matches!(p.spec().codec, SCodec::Opus),
+            })
+            .map(|p| p.pt());
+    }
+    let Some(pt) = *pt else { return };
+    let video = media.kind == OutKind::Video;
+    match writer.write(pt, Instant::now(), MediaTime::new(media.time, freq), media.data) {
+        Ok(()) => {
+            st.sent += 1;
+            st.video_started |= video;
+        }
+        Err(e) => log::debug!("phone stream: could not send a {:?} frame: {e}", media.kind),
+    }
+}
+
+/// Whether a data channel the phone opened becomes the session's channel: in a file session
+/// the file channel, in a meeting session the transcript channel — only under the agreed
+/// label, and only the first one. A live session adopts none.
 fn adopts_channel(mode: RtcMode, label: &str, have_one: bool) -> bool {
-    mode == RtcMode::File && label == DATA_CHANNEL_LABEL && !have_one
+    let wanted = match mode {
+        RtcMode::File => DATA_CHANNEL_LABEL,
+        RtcMode::Meeting => TRANSCRIPT_CHANNEL_LABEL,
+        RtcMode::Live => return false,
+    };
+    label == wanted && !have_one
 }
 
 /// Queue a `progress` report: it replaces one that is still waiting at the back (only the
@@ -716,6 +860,7 @@ fn drain(
                     log::debug!("phone stream: the phone closed the connection");
                     st.peer_closed = true;
                 }
+                Event::Connected => st.media_ready = true,
                 Event::IceConnectionStateChange(state) => {
                     log::debug!("phone stream: ICE {state:?}");
                     if matches!(state, IceConnectionState::Connected | IceConnectionState::Completed)
@@ -723,6 +868,13 @@ fn drain(
                     {
                         st.connected_at = Some(Instant::now());
                         let _ = ev_tx.try_send(RtcEvent::IceConnected);
+                    }
+                    match state {
+                        IceConnectionState::Disconnected => {
+                            st.disconnected_since.get_or_insert_with(Instant::now);
+                        }
+                        IceConnectionState::Connected | IceConnectionState::Completed => st.disconnected_since = None,
+                        _ => {}
                     }
                 }
                 Event::ChannelOpen(id, label) => {
@@ -737,6 +889,9 @@ fn drain(
                     }
                 }
                 Event::ChannelData(d) if Some(d.id) == st.file_channel => {
+                    if st.mode == RtcMode::Meeting {
+                        continue; // the transcript channel is desktop → phone only
+                    }
                     st.outbox.push_back(if d.binary {
                         RtcEvent::ChannelBinary(d.data)
                     } else {
@@ -748,6 +903,13 @@ fn drain(
                     st.pending_text.clear();
                     st.outbox.push_back(RtcEvent::ChannelClosed);
                 }
+                // Meeting: the tracks to send on. `video_mid` stays unset, so none of the
+                // receive-side machinery (PLI, REMB, the media timeout) ever runs.
+                Event::MediaAdded(m) if st.mode == RtcMode::Meeting => match m.kind {
+                    MediaKind::Video if st.send_video.is_none() => st.send_video = Some((m.mid, None)),
+                    MediaKind::Audio if st.send_audio.is_none() => st.send_audio = Some((m.mid, None)),
+                    _ => {}
+                },
                 Event::MediaAdded(m) if m.kind == MediaKind::Video && st.video_mid.is_none() => {
                     st.video_mid = Some(m.mid);
                     st.pli.want(); // keyframe as soon as the track starts
@@ -1224,6 +1386,71 @@ mod tests {
         assert!(!adopts_channel(RtcMode::Live, DATA_CHANNEL_LABEL, false));
         assert!(!adopts_channel(RtcMode::File, "something-else", false));
         assert!(!adopts_channel(RtcMode::File, DATA_CHANNEL_LABEL, true), "one channel per session");
+    }
+
+    /// An offer as a meeting viewer makes it (`direction` for both tracks), with or without
+    /// the transcript data channel.
+    fn viewer_offer(direction: str0m::media::Direction, video: bool, channel: bool) -> String {
+        let mut rtc = build_rtc(Instant::now(), RtcMode::Meeting);
+        let mut change = rtc.sdp_api();
+        change.add_media(MediaKind::Audio, direction, None, None, None);
+        if video {
+            change.add_media(MediaKind::Video, direction, None, None, None);
+        }
+        if channel {
+            change.add_channel(TRANSCRIPT_CHANNEL_LABEL.to_string());
+        }
+        change.apply().expect("offer").0.to_sdp_string()
+    }
+
+    #[test]
+    fn a_meeting_offer_only_receives_and_a_camera_offer_is_not_one() {
+        use str0m::media::Direction;
+        let viewer = viewer_offer(Direction::RecvOnly, true, true);
+        assert!(offer_matches_mode(&viewer, RtcMode::Meeting), "{viewer}");
+        assert!(offer_matches_mode(&viewer_offer(Direction::RecvOnly, true, false), RtcMode::Meeting), "the channel is optional");
+        // The phone's camera and microphone never ride along with a meeting session.
+        assert!(!offer_matches_mode(&viewer_offer(Direction::SendOnly, true, true), RtcMode::Meeting));
+        assert!(!offer_matches_mode(&viewer_offer(Direction::SendRecv, true, true), RtcMode::Meeting));
+        assert!(!offer_matches_mode(&chrome_like_offer(), RtcMode::Meeting), "a live camera offer");
+        // One sending section among receiving ones is enough to refuse it.
+        let mixed = viewer.replacen("a=recvonly", "a=sendrecv", 1);
+        assert!(!offer_matches_mode(&mixed, RtcMode::Meeting));
+        // No direction at all means sendrecv.
+        assert!(!offer_matches_mode(&viewer.replace("a=recvonly\r\n", ""), RtcMode::Meeting));
+        // Sound is the point of the session; a data channel alone is a file session's offer.
+        assert!(!offer_matches_mode(&viewer_offer(Direction::RecvOnly, true, true).replace("m=audio", "m=video"), RtcMode::Meeting));
+        assert!(!offer_matches_mode(&viewer_offer(Direction::RecvOnly, false, true), RtcMode::Meeting), "video is part of the offer");
+        assert!(!offer_matches_mode(&datachannel_offer(), RtcMode::Meeting));
+        // A viewer's offer is not a camera either way round.
+        assert!(!offer_matches_mode(&viewer, RtcMode::File));
+
+        let t = LocalTransport { sockets: vec![], candidates: vec![] };
+        let err = accept_offer(t, &chrome_like_offer(), RtcOptions::default(), RtcMode::Meeting).expect_err("mismatch");
+        assert_eq!(format!("{err:#}"), "the phone's offer does not match the request");
+    }
+
+    #[test]
+    fn a_meeting_session_answers_sendonly_h264_and_opus() {
+        use str0m::media::Direction;
+        let mut rtc = build_rtc(Instant::now(), RtcMode::Meeting);
+        rtc.add_local_candidate(Candidate::host("192.0.2.10:50000".parse().unwrap(), "udp").unwrap());
+        let offer = viewer_offer(Direction::RecvOnly, true, true);
+        let answer = rtc.sdp_api().accept_offer(SdpOffer::from_sdp_string(&offer).unwrap()).unwrap().to_sdp_string();
+        assert_eq!(answer.matches("a=sendonly").count(), 2, "{answer}");
+        assert!(!answer.contains("a=recvonly") && !answer.contains("a=sendrecv"), "{answer}");
+        assert!(answer.contains("H264/90000") && answer.contains("opus/48000"), "{answer}");
+        assert!(!answer.contains("VP8"), "only what the desktop encodes: {answer}");
+        assert!(answer.contains("m=application"), "the transcript channel is kept: {answer}");
+    }
+
+    #[test]
+    fn a_meeting_session_adopts_only_the_transcript_channel() {
+        assert!(adopts_channel(RtcMode::Meeting, TRANSCRIPT_CHANNEL_LABEL, false));
+        assert!(!adopts_channel(RtcMode::Meeting, DATA_CHANNEL_LABEL, false), "no file rides along with a meeting");
+        assert!(!adopts_channel(RtcMode::Meeting, TRANSCRIPT_CHANNEL_LABEL, true));
+        assert!(!adopts_channel(RtcMode::File, TRANSCRIPT_CHANNEL_LABEL, false));
+        assert!(!adopts_channel(RtcMode::Live, TRANSCRIPT_CHANNEL_LABEL, false));
     }
 
     #[test]

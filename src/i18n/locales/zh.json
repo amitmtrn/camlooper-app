@@ -223,6 +223,24 @@
       "failed": "无法循环播放来自手机的录像。",
       "cancelledByPhone": "手机已取消录制。",
       "expired": "该请求已过期。请在手机上再次点按“Record a loop”。"
+    },
+    "meeting": {
+      "confirmTitle": "要与 {{phone}} 共享会议吗？",
+      "confirmBody": "{{phone}} 将听到这台电脑播放的声音（会议中的其他人），并看到你选择的窗口。CamLooper 不会通知会议中的其他人。",
+      "confirmPicker": "接受后，系统会询问要共享哪个窗口或屏幕。在那里取消则只共享声音。",
+      "live": "正在与 {{phone}} 共享会议",
+      "soundOnly": "仅声音",
+      "soundAndWindow": "声音和一个窗口",
+      "notice": "CamLooper 不会通知会议中的其他人。",
+      "stopping": "正在停止共享会议…",
+      "stop": "停止共享",
+      "stoppedByPhone": "手机已停止观看会议。",
+      "expired": "该请求已过期。请在手机上再次点按“观看会议”。",
+      "errorTitle": "会议共享已停止。",
+      "errors": {
+        "timeout": "无法再连接到手机。请确认它仍在 CamLooper Remote 页面，然后从手机重新开始。",
+        "generic": "共享会议时出了点问题（例如无法采集这台电脑的声音）。请从手机重新开始。"
+      }
     }
   },
   "tray": {

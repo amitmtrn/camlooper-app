@@ -21,7 +21,11 @@
 //!   not by the window: the phone's `loop_control`, or a phone video that could not be
 //!   started after the earlier one had been stopped for it.
 //!
-//! [`StreamStatus`] also carries `mode` (`"live"` | `"file"` | `"record"`) and, for a file
+//! A meeting session (`mode: "meeting"`) has no extra field: `frames` counts what was sent,
+//! and `width`/`height`/`codec` are set exactly while a window is being sent (absent: sound
+//! only).
+//!
+//! [`StreamStatus`] also carries `mode` (`"live"` | `"file"` | `"record"` | `"meeting"`) and, for a file
 //! session, `file: {name, size, received, phase, error?}`; for a record session,
 //! `record: {elapsedMs, capMs, phase, error?}` (`phase`: `recording` | `processing` |
 //! `looping` | `failed`) — see `machine.rs`. A recorded take that loops is announced with
@@ -172,6 +176,9 @@ pub(crate) fn install(app: AppHandle) -> (StreamManager, mpsc::UnboundedReceiver
     let player: Arc<dyn LoopPlayer> = Arc::new(EngineLoop::new(Arc::new(AppLoopHost(app.clone()))));
     let mut deps = SessionDeps::new(ffmpeg, Arc::new(AppCamera::default()), Arc::new(RelayIce));
     deps.files = store.clone().map(|store| FileDeps::new(store, player.clone()));
+    // Meeting sessions: this computer's sound and a picked window, where the platform has
+    // a capture source (Linux). Elsewhere `meeting` is not offered to the phone.
+    deps.meeting = super::meeting::default_source();
     let (manager, outbound) = StreamManager::spawn_with_loop(
         Arc::new(Arc::new(deps)),
         Arc::new(UiDecisions(app.clone())),
@@ -195,7 +202,8 @@ fn tray_state(phase: Phase, mode: StreamMode) -> crate::tray::PhoneTray {
         Phase::Connecting => PhoneTray::Connecting,
         // A video being received is a session that Stop can cancel, but no camera is
         // "live": the tray must not say so.
-        Phase::Live if mode == StreamMode::File => PhoneTray::Connecting,
+        // Nor is a meeting being shared with the phone the phone's camera.
+        Phase::Live if matches!(mode, StreamMode::File | StreamMode::Meeting) => PhoneTray::Connecting,
         Phase::Live => PhoneTray::Live,
         Phase::Stopping => PhoneTray::Stopping,
         Phase::Idle | Phase::Requested | Phase::Error => PhoneTray::Idle,
@@ -318,5 +326,8 @@ mod tests {
         assert_eq!(tray_state(Phase::Live, StreamMode::File), PhoneTray::Connecting);
         assert_eq!(tray_state(Phase::Stopping, StreamMode::File), PhoneTray::Stopping);
         assert_eq!(tray_state(Phase::Idle, StreamMode::File), PhoneTray::Idle);
+        // A meeting shared with the phone can be stopped from the tray; no camera is live.
+        assert_eq!(tray_state(Phase::Live, StreamMode::Meeting), PhoneTray::Connecting);
+        assert_eq!(tray_state(Phase::Stopping, StreamMode::Meeting), PhoneTray::Stopping);
     }
 }

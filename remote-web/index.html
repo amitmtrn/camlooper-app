@@ -9,7 +9,7 @@
      on *.trycloudflare.com ('self' does not cover wss: in every browser, hence the explicit host).
      script-src hash = the inline script element; dev/update-csp.mjs recomputes it, dev/selftest.mjs checks it.
      frame-ancestors is ignored in <meta>: production must send it (or X-Frame-Options) as a header. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-bvGCXhjPe+QhzmUkezhcX3nRWQWXE42YZG2ug+/3VnM='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-BopECj54Bidkea6u66zHyUvGO6C8Cj8iqG14OO6RYXM='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex">
 <title>CamLooper Remote</title>
 <style>
@@ -100,6 +100,10 @@
   .bar > i { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: 999px; transition: width .2s linear; }
   .bar > .sent { background: #7c5cff55; }
   .bar > .done { background: var(--accent); }
+  .video-wrap.meeting { aspect-ratio: 16 / 9; }
+  .video-wrap.meeting video { object-fit: contain; }
+  .sound-only { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-weight: 600; pointer-events: none; }
+  .consent p { margin: 0 0 10px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -175,6 +179,21 @@
     <p id="camMsg" class="msg"></p>
   </div>
 
+  <div class="card" id="meetingCard">
+    <h2 data-s="mtgTitle"></h2>
+    <p class="muted small" data-s="mtgHint"></p>
+    <button id="btnMeeting" type="button" class="block big secondary" data-s="mtgStart" disabled></button>
+    <div id="mtgConsent" class="banner warn consent hidden" role="group" aria-labelledby="mtgConsentText">
+      <p id="mtgConsentText" data-s="mtgConsent"></p>
+      <div class="row">
+        <button id="btnMtgCancel" type="button" class="secondary" data-s="cancel"></button>
+        <button id="btnMtgGo" type="button" data-s="mtgContinue"></button>
+      </div>
+    </div>
+    <p id="mtgNote" class="msg warn" aria-live="polite"></p>
+    <p id="mtgMsg" class="msg"></p>
+  </div>
+
   <div class="card hidden" id="loopCard">
     <h2 data-s="loopTitle"></h2>
     <p id="takeBusy" class="msg hidden" aria-live="polite"><span class="spinner"></span><span data-s="recPreparing"></span></p>
@@ -233,8 +252,9 @@
 
 <!-- 3. Streaming -->
 <section id="scrStream" class="hidden">
-  <div class="video-wrap">
+  <div class="video-wrap" id="videoWrap">
     <video id="preview" autoplay playsinline muted></video>
+    <div id="soundOnly" class="sound-only hidden" data-s="mtgSoundOnly"></div>
     <div id="chip" class="chip"></div>
   </div>
   <p id="streamMsg" class="msg" aria-live="polite"></p>
@@ -257,6 +277,11 @@
       <button id="btnStop" class="danger big" data-s="stop"></button>
     </div>
     <button id="btnMic" type="button" class="block secondary" aria-pressed="false"></button>
+    <button id="btnMtgMute" type="button" class="block secondary big hidden" aria-pressed="false"></button>
+  </div>
+  <div id="captions" class="card hidden">
+    <h2 data-s="capTitle"></h2>
+    <p id="captionsText" class="muted small" aria-live="polite"></p>
   </div>
   <div id="failActions" class="row hidden">
     <button id="btnBack" class="secondary big" data-s="back2"></button>
@@ -343,6 +368,39 @@ const STRINGS = {
     other: "The recording stopped.",
   },
   loopAway: "You can lock this phone or close the app. The loop keeps playing.",
+  mtgTitle: "Watch the meeting on this phone",
+  mtgHint: "Hear what your computer plays (the other people in the meeting) and see a window you pick on the computer. Use headphones, or keep this phone away from the computer's microphone.",
+  mtgStart: "Watch the meeting",
+  mtgConsent: "Your phone will hear what this computer plays, and will see the window you pick. CamLooper does not tell the others in the meeting.",
+  mtgContinue: "Continue",
+  mtgOld: "Update CamLooper on your computer to watch a meeting here. (Linux computers only, for now.)",
+  mtgNoRtc: "This browser can't play the meeting.",
+  mtgWaitAccept: "Accept on your computer, then pick the window to share there.",
+  mtgLiveSound: "You hear the meeting. No window is shared: sound only.",
+  mtgLiveWindow: "You hear the meeting and see the shared window.",
+  mtgSoundOnly: "Sound only",
+  mtgKeepOpen: "Keep this page open and the screen on. You hear what the computer plays: the other people, not your own microphone.",
+  mtgMute: "Mute the meeting",
+  mtgUnmute: "Unmute the meeting",
+  mtgMuted: "Muted on this phone. The meeting goes on, and nobody there notices.",
+  mtgTapUnmute: "Tap Unmute the meeting to hear it.",
+  mtgReject: {
+    declined: "The computer declined to share the meeting.",
+    busy: "The computer is busy with another phone session. Try again in a moment.",
+    timeout: "The computer didn't answer in time.",
+    unsupported: "This computer's CamLooper can't share a meeting. Update it (Linux computers only, for now).",
+    other: "The computer couldn't share the meeting.",
+  },
+  mtgStopped: {
+    user: "Sharing the meeting was stopped on the computer.",
+    ice_failed: null, // uses iceFailed
+    error: "The computer hit an error and stopped sharing the meeting.",
+    peer_offline: "Your computer went offline.",
+    timeout: "The connection timed out.",
+    other: "The meeting is no longer shared.",
+  },
+  capTitle: "Live captions",
+  capLater: "Captions come in a later update.",
   thisPhone: "This phone:",
   unpair: "Unpair this phone",
   unpairConfirm: "Unpair this phone from your computer?",
@@ -509,10 +567,12 @@ const desk = { online: false, protocol: 0, known: false };
 let ws = null, wsAttempt = 0, wsTimer = null, pingTimer = null, wsLastRx = 0, wsStopped = false, wsReplaced = false;
 let pollTimer = null, countdownTimer = null, ackTimer = null;
 let facing = "user", quality = "720", micMuted = false;
-let session = null;              // current session: live camera or a take (startStreaming), or kind "file" (startFileSend)
+let meetingMuted = false;        // Watch the meeting: the sound is muted on this phone (nothing is sent anywhere)
+let session = null;              // current session: live camera or a take (startStreaming), a meeting being watched (startMeeting), or kind "file" (startFileSend)
 // What the computer's CamLooper answered to hello. state: idle | pending | ok | old.
 // ok (appProtocol >= 3 with "record") stays true while a repeat hello is on its way.
-const hello = { state: "idle", ok: false, id: "", timer: null, waiters: [] };
+// meeting: the computer also lists "meeting" (it can share its sound and a window).
+const hello = { state: "idle", ok: false, meeting: false, id: "", timer: null, waiters: [] };
 let take = null;                 // a stopped take the computer is turning into a loop: { id, timer }
 let lastMode = "live";           // what "Try again" starts
 let wakeLock = null;
@@ -962,9 +1022,9 @@ function onFrame(m) {
 // older CamLooper: Record a loop stays off and streaming says "update" instead of failing
 // later in a way that looks like a timeout.
 // ---------------------------------------------------------------------------------
-function settleHello(state) {
+function settleHello(state, meeting = false) {
   clearTimeout(hello.timer); hello.timer = null;
-  hello.state = state; hello.ok = state === "ok";
+  hello.state = state; hello.ok = state === "ok"; hello.meeting = hello.ok && meeting;
   for (const w of hello.waiters.splice(0)) w();
   renderActions();
 }
@@ -984,7 +1044,7 @@ function onHelloOk(d) {
   if (hello.state !== "pending" || d.sessionId !== hello.id) { dlog("ignoring unsolicited hello_ok"); return; }
   const ok = Number(d.appProtocol) >= APP_PROTOCOL && Array.isArray(d.features) && d.features.includes("record");
   dlog("<- signal hello_ok", { appProtocol: d.appProtocol, ok });
-  settleHello(ok ? "ok" : "old");
+  settleHello(ok ? "ok" : "old", ok && d.features.includes("meeting"));
 }
 // Resolves once a hello that is on its way has been answered or has timed out.
 function helloSettled() {
@@ -997,6 +1057,10 @@ function renderActions() {
   $("btnStart").disabled = busy;
   $("btnRecord").disabled = busy || !hello.ok;
   setMsg("helloNote", hello.state === "old" ? STRINGS.helloOld : "", "warn");
+  // Watch the meeting: only with a computer that says it can share one.
+  $("btnMeeting").disabled = busy || !hello.meeting;
+  if ($("btnMeeting").disabled) show("mtgConsent", false);
+  setMsg("mtgNote", hello.state === "old" || (hello.state === "ok" && !hello.meeting) ? STRINGS.mtgOld : "", "warn");
 }
 
 // ---------------------------------------------------------------------------------
@@ -1044,7 +1108,7 @@ async function openVideoTrack(face, q, exact) {
 
 $("btnStart").onclick = () => startStreaming("live");
 $("btnRecord").onclick = () => startStreaming("record");
-$("btnRetry").onclick = () => startStreaming(lastMode);
+$("btnRetry").onclick = () => (lastMode === "meeting" ? startMeeting() : startStreaming(lastMode));
 $("btnBack").onclick = () => { endSession(null, { notify: false, silent: true }); showHome(); };
 $("btnStop").onclick = () => {
   const s = session;
@@ -1054,9 +1118,9 @@ $("btnStop").onclick = () => {
 };
 
 // Precheck failures: show them where the user is looking (Home card, or the Stream failure banner).
-function startError(text) {
+function startError(text, homeMsg = "camMsg") {
   if (!$("scrStream").classList.contains("hidden")) { banner("streamFail", text, "err"); show("failActions"); show("streamActions", false); }
-  else setMsg("camMsg", text, "err");
+  else setMsg(homeMsg, text, "err");
 }
 
 let starting = false;
@@ -1064,7 +1128,7 @@ async function startStreaming(mode = "live") {
   if (starting || take || (session && !session.ended)) return;
   const record = mode === "record";
   lastMode = record ? "record" : "live";
-  setMsg("camMsg", "");
+  setMsg("camMsg", ""); setMsg("mtgMsg", ""); show("mtgConsent", false);
   if (!window.isSecureContext) { startError(STRINGS.errNoSecure); return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.RTCPeerConnection) { startError(STRINGS.errNoCamera); return; }
   if (!ws || ws.readyState !== 1) { startError(wsReplaced ? STRINGS.errReplaced : STRINGS.errNotConnected); if (!ws && !wsReplaced) connectWs(); return; }
@@ -1199,12 +1263,13 @@ async function onSignal(d) {
         else if (s.iceOk) endSession(STRINGS.errDtls, { failed: true, reason: "error" });
         else endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
       }, CONNECT_TIMEOUT_MS);
-      if (s.kind === "file") await connectFilePeer(s); else await connectPeer(s);
+      if (s.kind === "file") await connectFilePeer(s); else if (s.meeting) await connectMeetingPeer(s); else await connectPeer(s);
       break;
     case "stream_reject":
       clearTimeout(s.timers.accept);
       if (s.kind === "file") { if (s.phase === "requesting") onFileReject(s, d.reason); break; }
-      endSession(own(s.record ? STRINGS.recReject : STRINGS.reject, d.reason) || (s.record ? STRINGS.recReject : STRINGS.reject).other, { failed: true, notify: false });
+      { const why = s.meeting ? STRINGS.mtgReject : s.record ? STRINGS.recReject : STRINGS.reject;
+        endSession(own(why, d.reason) || why.other, { failed: true, notify: false }); }
       break;
     case "answer":
       if (!s.pc || s.pc.signalingState !== "have-local-offer" || typeof d.sdp !== "string") return;
@@ -1213,6 +1278,9 @@ async function onSignal(d) {
       if (s.kind === "file") {
         // The answer must keep the data channel (m=application, port != 0).
         if (!/^m=application [1-9]/m.test(d.sdp)) { endSession(STRINGS.errDeskOld, { failed: true, reason: "error" }); return; }
+      } else if (s.meeting) {
+        // The answer must keep the sound (m=audio, port != 0); the picture is optional.
+        if (!/^m=audio [1-9]/m.test(d.sdp)) { endSession(STRINGS.errDeskOld, { failed: true, reason: "error" }); return; }
       } else if (!videoAccepted(s, d.sdp)) { endSession(STRINGS.errCodec(s.offeredCodecs), { failed: true, reason: "error" }); return; }
       for (const c of s.pendingRemote.splice(0)) await addRemoteCandidate(s, c);
       break;
@@ -1222,6 +1290,7 @@ async function onSignal(d) {
       break;
     case "status":
       if (s.kind === "file") break;
+      if (s.meeting) { onMeetingStatus(s, d); break; }
       if (d.width && d.height) $("deskRecv").textContent = STRINGS.deskRecv(Number(d.width) | 0, Number(d.height) | 0, Number(d.fps) | 0, typeof d.codec === "string" ? d.codec.slice(0, 32) : "");
       if (d.state === "live" && s.pc && !s.live && s.pc.connectionState === "connected") goLive(s);
       // The take's clock may be reported a moment before this page sees the connection.
@@ -1387,7 +1456,7 @@ function onPcState(s) {
   if (s.kind === "file") { onFilePcState(s, cs); return; }
   if (cs === "connected") {
     clearTimeout(s.timers.disc);
-    if (!s.live) goLive(s); else if (s.record) { setChip("rec"); setMsg("streamMsg", STRINGS.recLive, "ok"); } else { setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok"); }
+    if (!s.live) goLive(s); else if (s.meeting) { setChip("live"); renderMeeting(s); } else if (s.record) { setChip("rec"); setMsg("streamMsg", STRINGS.recLive, "ok"); } else { setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok"); }
   } else if (cs === "failed") {
     if (!s.live && s.iceOk) endSession(STRINGS.errDtls, { failed: true, reason: "error" });
     else endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
@@ -1406,7 +1475,14 @@ function goLive(s) {
   clearTimeout(s.timers.ice);
   s.startedAt = Date.now();
   if (s.record) { startTake(s); return; }
-  setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok");
+  setChip("live");
+  clearInterval(s.timers.clock);
+  if (s.meeting) {
+    renderMeeting(s);
+    s.timers.clock = setInterval(() => { if (session === s && $("chip").classList.contains("live")) setChip("live"); }, 1000);
+    return;
+  }
+  setMsg("streamMsg", STRINGS.stLive, "ok");
   show("stats");
   clearInterval(s.timers.clock);
   s.timers.clock = setInterval(() => { if (session === s && $("chip").classList.contains("live")) setChip("live"); }, 1000);
@@ -1523,7 +1599,8 @@ function onRemoteStop(data) {
     else { stopTake(s, { notify: false, quiet: true }); onTakeStop(reason); }
     return;
   }
-  const msg = reason === "ice_failed" ? STRINGS.iceFailed : (own(STRINGS.stopped, reason) || STRINGS.stopped.other);
+  const table = s.meeting ? STRINGS.mtgStopped : STRINGS.stopped;
+  const msg = reason === "ice_failed" ? STRINGS.iceFailed : (own(table, reason) || table.other);
   endSession(null, { notify: false, silent: true });
   showHome(msg, reason === "user" ? "" : "warn");
 }
@@ -1545,6 +1622,7 @@ function endSession(message, opts = {}) {
     outbox = [];
   }
   $("preview").srcObject = null;
+  if (s.meeting) meetingUi(false);
   show("hiddenNote", false);
   session = null;
   $("micNote").textContent = "";
@@ -1645,6 +1723,161 @@ async function updateStats(s) {
     $("stPath").textContent = `${relayed ? STRINGS.pathRelay : name(lc && lc.candidateType)} · ${lc ? lc.candidateType : "?"}/${rc ? rc.candidateType : "?"}`;
     $("stRtt").textContent = sel.currentRoundTripTime != null ? `${Math.round(sel.currentRoundTripTime * 1000)} ms` : "–";
   }
+}
+
+// ---------------------------------------------------------------------------------
+// Watch the meeting: the other direction. The computer sends what it plays (the meeting's
+// other participants) and, if a window was picked there, that window; this phone only
+// receives. Same signaling as a live session (stream_request mode "meeting" → accept →
+// offer/answer/candidates), but the offer is recvonly audio + video and no camera or
+// microphone is opened here. Mute is local: it silences this phone and tells nobody.
+// ---------------------------------------------------------------------------------
+$("btnMeeting").onclick = () => {
+  if ($("btnMeeting").disabled) return;
+  setMsg("mtgMsg", "");
+  show("mtgConsent"); intoView("meetingCard");
+};
+$("btnMtgCancel").onclick = () => show("mtgConsent", false);
+$("btnMtgGo").onclick = () => { show("mtgConsent", false); startMeeting(); };
+
+// The stream screen as a viewer (on) or as the camera's (off).
+function meetingUi(on) {
+  $("videoWrap").classList.toggle("meeting", on);
+  show("btnSwitch", !on); show("btnMtgMute", on); show("captions", on);
+  show("soundOnly", on);
+  $("captionsText").textContent = on ? STRINGS.capLater : "";
+  const v = $("preview");
+  if (on) v.classList.remove("mirror"); else v.muted = true; // the camera preview never plays sound
+}
+
+async function startMeeting() {
+  if (starting || take || (session && !session.ended)) return;
+  lastMode = "meeting";
+  setMsg("camMsg", ""); setMsg("mtgMsg", ""); show("mtgConsent", false);
+  const fail = (text) => startError(text, "mtgMsg");
+  if (!window.RTCPeerConnection || !window.MediaStream) { fail(STRINGS.mtgNoRtc); return; }
+  if (!ws || ws.readyState !== 1) { fail(wsReplaced ? STRINGS.errReplaced : STRINGS.errNotConnected); if (!ws && !wsReplaced) connectWs(); return; }
+  if (!desk.known) { fail(STRINGS.errNotConnected); return; }
+  if (!desk.online) { fail(STRINGS.errDeskOffline); return; }
+  starting = true;
+  try { await helloSettled(); } finally { starting = false; }
+  if (take || (session && !session.ended)) return;
+  if (!hello.meeting) { fail(STRINGS.mtgOld); return; }
+
+  const s = session = {
+    meeting: true, record: false, hasVideo: false, blocked: false, remote: new MediaStream(),
+    id: randomId(), stream: null, pc: null, live: false, ended: false,
+    timers: {}, pendingRemote: [], localQueue: [], offerSent: false, iceOk: false,
+    startedAt: 0, prevStats: null, phase: "requesting", switching: false, reacquiring: false,
+  };
+  outbox = [];
+  screen("Stream");
+  show("streamFail", false); show("streamActions"); show("failActions", false); show("stats", false); show("keepOpen");
+  $("keepOpen").textContent = STRINGS.mtgKeepOpen;
+  show("hiddenNote", false);
+  $("deskRecv").textContent = "";
+  meetingUi(true);
+  renderMic(s); // no microphone here: hides its button and note
+  setChip("requesting");
+  renderMeeting(s);
+  const v = $("preview");
+  v.srcObject = s.remote; v.muted = meetingMuted;
+  keepAwake();
+
+  sendSignal({ kind: "stream_request", sessionId: s.id, deviceLabel: (pair && pair.deviceName) || defaultDeviceName(), mode: "meeting" });
+  s.timers.accept = setTimeout(() => {
+    if (session === s && s.phase === "requesting") endSession(STRINGS.acceptTimeout, { failed: true, reason: "timeout" });
+  }, ACCEPT_TIMEOUT_MS);
+}
+
+async function connectMeetingPeer(s) {
+  setChip("connecting"); renderMeeting(s);
+  const iceServers = await getIceServers();
+  if (!iceServers || session !== s || s.ended) return;
+  const pc = new RTCPeerConnection({ iceServers, bundlePolicy: "max-bundle" });
+  s.pc = pc;
+  // Receive only: nothing of this phone is captured or sent.
+  const atx = pc.addTransceiver("audio", { direction: "recvonly" });
+  const vtx = pc.addTransceiver("video", { direction: "recvonly" });
+  // The computer encodes H.264 (constrained baseline) and Opus, nothing else.
+  try {
+    const vc = pickVideoCodecs().filter((c) => !/vp8/i.test(c.mimeType));
+    if (vc.some((c) => /h264/i.test(c.mimeType)) && vtx.setCodecPreferences) vtx.setCodecPreferences(vc);
+  } catch (e) { dlog("setCodecPreferences(video) failed", e && e.name); }
+  try { const ac = pickAudioCodecs(); if (ac.length && atx.setCodecPreferences) atx.setCodecPreferences(ac); }
+  catch (e) { dlog("setCodecPreferences(audio) failed", e && e.name); }
+  // Captions will arrive on this channel in a later update; for now the computer says so.
+  try { const dc = pc.createDataChannel("camlooper-transcript"); dc.onmessage = (ev) => onCaption(s, ev.data); }
+  catch (e) { dlog("transcript channel failed", e && e.name); }
+  pc.ontrack = (ev) => {
+    if (session !== s || s.ended) return;
+    if (ev.track.kind === "audio") ev.track.enabled = !meetingMuted;
+    s.remote.addTrack(ev.track);
+    playMeeting(s);
+  };
+  wirePeer(s, pc);
+  await sendOffer(s, pc);
+}
+
+// Plays what arrives. A browser that refuses to start with sound (no tap counted for it)
+// starts muted instead, and the Unmute button is that tap.
+function playMeeting(s) {
+  const v = $("preview");
+  if (v.srcObject !== s.remote) v.srcObject = s.remote;
+  v.muted = meetingMuted;
+  const p = v.play();
+  if (!p || !p.catch) return;
+  p.catch((e) => {
+    dlog("meeting playback refused", e && e.name);
+    if (session !== s || s.ended || meetingMuted || (e && e.name === "AbortError")) return;
+    meetingMuted = true; s.blocked = true;
+    applyMeetingMute(s);
+    v.play().catch(() => {});
+    renderMeeting(s);
+  });
+}
+
+// Mute / unmute the meeting on this phone only: the element and the received audio tracks.
+// No signaling, no renegotiation; the computer keeps sending and nobody is told.
+function applyMeetingMute(s) {
+  $("preview").muted = meetingMuted;
+  if (s && s.remote) for (const t of s.remote.getAudioTracks()) t.enabled = !meetingMuted;
+}
+$("btnMtgMute").onclick = () => {
+  meetingMuted = !meetingMuted;
+  const s = session;
+  if (s && s.meeting && !s.ended) {
+    s.blocked = false;
+    applyMeetingMute(s);
+    if (!meetingMuted) $("preview").play().catch(() => {});
+  }
+  renderMeeting(s);
+};
+
+function renderMeeting(s) {
+  $("btnMtgMute").textContent = meetingMuted ? STRINGS.mtgUnmute : STRINGS.mtgMute;
+  $("btnMtgMute").setAttribute("aria-pressed", String(meetingMuted));
+  if (!s || !s.meeting || s.ended) return;
+  show("soundOnly", !s.hasVideo);
+  if (!s.live) { setMsg("streamMsg", s.phase === "requesting" ? STRINGS.mtgWaitAccept : STRINGS.stConnecting); return; }
+  if (meetingMuted) setMsg("streamMsg", s.blocked ? STRINGS.mtgTapUnmute : STRINGS.mtgMuted, "warn");
+  else setMsg("streamMsg", s.hasVideo ? STRINGS.mtgLiveWindow : STRINGS.mtgLiveSound, "ok");
+}
+
+// status from the computer: a size is present exactly while a window is being sent.
+function onMeetingStatus(s, d) {
+  s.hasVideo = Number(d.width) > 0 && Number(d.height) > 0;
+  if (d.state === "live" && s.pc && !s.live && s.pc.connectionState === "connected") goLive(s);
+  renderMeeting(s);
+}
+
+// The transcript channel. Today the computer only says that captions are not there yet.
+function onCaption(s, data) {
+  if (session !== s || s.ended || typeof data !== "string" || data.length > 4096) return;
+  let m; try { m = JSON.parse(data); } catch { return; }
+  if (!m || typeof m !== "object") return;
+  if (m.type === "captions" && m.state === "unavailable") $("captionsText").textContent = STRINGS.capLater;
+  else if (m.type === "caption" && typeof m.text === "string") $("captionsText").textContent = cleanText(m.text, 500);
 }
 
 // ---------------------------------------------------------------------------------
@@ -2022,11 +2255,12 @@ document.addEventListener("visibilitychange", () => {
       keepAwake();
       const vt = session.stream && session.stream.getVideoTracks()[0];
       if (vt && vt.readyState === "ended") onVideoEnded(session, vt);
+      if (session.meeting && session.pc) playMeeting(session); // Android may have paused it
     }
     if (pair && !ws && !wsStopped && !wsReplaced) { wsAttempt = 0; connectWs(); }
     else if (hello.state === "old" && desk.known && desk.online) sayHello(); // updated meanwhile?
-  } else if (streaming) {
-    show("hiddenNote");
+  } else if (streaming && !session.meeting) {
+    show("hiddenNote"); // about the camera; a meeting being watched has none
   }
 });
 window.addEventListener("online", () => { if (pair && !ws && !wsReplaced) { wsAttempt = 0; connectWs(); } });

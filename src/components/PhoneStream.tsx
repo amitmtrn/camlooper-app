@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
-import { FileVideo, Loader2, Smartphone, Square, X } from "lucide-react";
+import { FileVideo, Loader2, MonitorUp, Smartphone, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -14,6 +14,8 @@ import {
   formatMegabytes,
   formatTake,
   isolate,
+  meetingBannerView,
+  meetingErrorKey,
   phoneErrorKey,
   recordBannerView,
   sessionFile,
@@ -122,8 +124,9 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabin
 
 /**
  * "Use your phone as the camera?" — or, for a video the phone wants to send, "Loop a video
- * from <phone>?" with its name and size, or, for a take, "Record a loop from <phone>?" —
- * shown while the backend waits for a decision (60 s).
+ * from <phone>?" with its name and size, or, for a take, "Record a loop from <phone>?", or,
+ * for a meeting, "Share the meeting with <phone>?" with the reminder that nobody else in the
+ * meeting is told — shown while the backend waits for a decision (60 s).
  *
  * A real modal: rendered in a portal on `<body>` with the app root made `inert`, so nothing
  * behind it can be reached by Tab or click and no other overlay can cover it. (Dropdowns
@@ -155,6 +158,7 @@ export function PhoneStreamDialog({
   const { sessionId } = request;
   const file = request.mode === "file" ? request.file : null;
   const record = request.mode === "record";
+  const meeting = request.mode === "meeting";
 
   // Modal for real: everything else inert, focus inside, focus given back afterwards.
   useEffect(() => {
@@ -231,13 +235,19 @@ export function PhoneStreamDialog({
     >
       <Card className="max-w-md w-full max-h-[90vh] overflow-y-auto p-6 space-y-4">
         <div className="flex items-center gap-3">
-          <Smartphone className="h-6 w-6 text-primary shrink-0" />
+          {meeting ? (
+            <MonitorUp className="h-6 w-6 text-primary shrink-0" />
+          ) : (
+            <Smartphone className="h-6 w-6 text-primary shrink-0" />
+          )}
           <h2 id="phone-stream-dialog-title" className="text-lg font-semibold">
             {file
               ? t("phoneStream.file.confirmTitle", { phone })
               : record
                 ? t("phoneStream.record.confirmTitle", { phone })
-                : t("phoneStream.confirmTitle")}
+                : meeting
+                  ? t("phoneStream.meeting.confirmTitle", { phone })
+                  : t("phoneStream.confirmTitle")}
           </h2>
         </div>
         {/* Name and size are part of the description: what is being accepted is read out too. */}
@@ -247,8 +257,12 @@ export function PhoneStreamDialog({
               ? t("phoneStream.file.confirmBody", { phone })
               : record
                 ? t("phoneStream.record.confirmBody", { phone })
-                : t("phoneStream.confirmBody", { phone })}
+                : meeting
+                  ? t("phoneStream.meeting.confirmBody", { phone })
+                  : t("phoneStream.confirmBody", { phone })}
           </p>
+          {/* What happens right after Accept: the system's own picker, which can be cancelled. */}
+          {meeting && <p className="text-sm text-muted-foreground">{t("phoneStream.meeting.confirmPicker")}</p>}
           {file && (
             <div className="flex items-center gap-3 rounded-md border bg-muted/40 p-3">
               <FileVideo className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -295,7 +309,9 @@ export function PhoneStreamDialog({
  * Top-of-window banner while the phone owns the camera, plus the last failure. For a video
  * the phone is sending it shows the transfer instead: "Receiving video from <phone> — 45 %"
  * with a progress bar and Cancel, then "Preparing loop…". For a take: "Recording a loop from
- * <phone> — 0:12" with Cancel, then "Preparing loop…".
+ * <phone> — 0:12" with Cancel, then "Preparing loop…". For a meeting shared with the phone:
+ * "Sharing the meeting with <phone> · sound and a window" with Stop sharing, for as long as it
+ * is shared — the reminder that this computer's sound is leaving it.
  */
 export function PhoneStreamBanner({
   status,
@@ -327,6 +343,57 @@ export function PhoneStreamBanner({
 
   const recordView = recordBannerView(status);
   const takeMs = useTakeElapsed(status.record, recordView === "recording");
+
+  const meetingView = meetingBannerView(status);
+  if (meetingView) {
+    // The camera is not involved, so this is not the camera-in-use red: it is the app's own
+    // accent, and it stays up for the whole time something is being sent to the phone.
+    const sharing = meetingView === "sound" || meetingView === "window";
+    return (
+      <div className="sticky top-0 z-40 border-b border-primary/40 bg-primary/15 backdrop-blur-sm">
+        <div className="max-w-6xl mx-auto px-4 py-2 flex items-center gap-3">
+          {sharing ? (
+            <MonitorUp className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
+          ) : (
+            <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" aria-hidden="true" />
+          )}
+          <div className="flex-1 min-w-0">
+            <p className="text-sm [overflow-wrap:anywhere]">
+              <span className="font-semibold" role="status" aria-live="polite">
+                {sharing
+                  ? t("phoneStream.meeting.live", { phone: isolate(phone) })
+                  : meetingView === "stopping"
+                    ? t("phoneStream.meeting.stopping")
+                    : t("phoneStream.connecting", { phone: isolate(phone) })}
+                {sharing && (
+                  <>
+                    {" · "}
+                    {t(meetingView === "window" ? "phoneStream.meeting.soundAndWindow" : "phoneStream.meeting.soundOnly")}
+                  </>
+                )}
+              </span>
+              {sharing && status.since ? (
+                <span className="text-muted-foreground" aria-hidden="true">
+                  {" · "}
+                  <span dir="ltr">{formatElapsed(now - status.since)}</span>
+                </span>
+              ) : null}
+            </p>
+            {sharing && <p className="text-xs text-muted-foreground">{t("phoneStream.meeting.notice")}</p>}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onStop}
+            disabled={status.state === "stopping" && !canForceStop}
+            className="shrink-0"
+          >
+            <Square className="h-3 w-3 fill-current" /> {t("phoneStream.meeting.stop")}
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   const fileView = fileBannerView(status);
   const file = sessionFile(status);
@@ -513,8 +580,10 @@ export function PhoneStreamBanner({
       <div className="border-b border-destructive/40 bg-destructive/15" role="alert">
         <div className="max-w-6xl mx-auto px-4 py-2 flex items-start gap-3">
           <p className="text-sm flex-1 min-w-0" title={error.detail ?? undefined}>
-            <span className="font-semibold">{t("phoneStream.errorTitle")}</span>{" "}
-            {t(phoneErrorKey(error.code))}
+            <span className="font-semibold">
+              {t(error.mode === "meeting" ? "phoneStream.meeting.errorTitle" : "phoneStream.errorTitle")}
+            </span>{" "}
+            {t(error.mode === "meeting" ? meetingErrorKey(error.code) : phoneErrorKey(error.code))}
           </p>
           <Button
             variant="ghost"

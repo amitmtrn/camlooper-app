@@ -223,6 +223,24 @@
       "failed": "Telefonunuzdaki kayıt döngüye alınamadı.",
       "cancelledByPhone": "Telefon kaydı iptal etti.",
       "expired": "Bu isteğin süresi zaten doldu. Telefonunuzda tekrar \"Record a loop\" seçeneğine dokunun."
+    },
+    "meeting": {
+      "confirmTitle": "Toplantı {{phone}} ile paylaşılsın mı?",
+      "confirmBody": "{{phone}} bu bilgisayarın çaldığı sesi (toplantıdaki diğer kişileri) duyacak ve seçtiğiniz pencereyi görecek. CamLooper toplantıdaki diğer kişilere haber vermez.",
+      "confirmPicker": "Kabul ettikten sonra sisteminiz hangi pencerenin veya ekranın paylaşılacağını sorar. Yalnızca sesi paylaşmak için orada iptal edin.",
+      "live": "Toplantı {{phone}} ile paylaşılıyor",
+      "soundOnly": "yalnızca ses",
+      "soundAndWindow": "ses ve bir pencere",
+      "notice": "CamLooper toplantıdaki diğer kişilere haber vermez.",
+      "stopping": "Toplantı paylaşımı durduruluyor…",
+      "stop": "Paylaşımı durdur",
+      "stoppedByPhone": "Telefon toplantıyı izlemeyi bıraktı.",
+      "expired": "Bu isteğin süresi doldu. Telefonunuzda yeniden “Toplantıyı izle”ye dokunun.",
+      "errorTitle": "Toplantı paylaşımı durdu.",
+      "errors": {
+        "timeout": "Telefona artık ulaşılamıyor. Hâlâ CamLooper Remote sayfasında olduğunu kontrol edin, sonra telefondan yeniden başlatın.",
+        "generic": "Toplantı paylaşılırken bir sorun oluştu (örneğin bu bilgisayarın sesi alınamadı). Telefonunuzdan yeniden başlatın."
+      }
     }
   },
   "tray": {

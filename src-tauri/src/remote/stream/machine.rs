@@ -42,6 +42,12 @@
 //! loaded, and ends by itself with `stream_stop{done}` once it loops. A take that is too
 //! short ends with `too_short`, one that cannot be looped with `incomplete`. A second Stop
 //! from the desktop while it is processing is a real stop (a cancel).
+//!
+//! A request with `mode: "meeting"` is the reverse direction: once accepted, the desktop sends
+//! what this computer plays (and a window, if the user picks one) to the phone. It runs
+//! through the same states and ends like a live session, but it never holds the camera: the
+//! video loop keeps playing and `loop_control` keeps working while it is up. `frames` counts
+//! what was sent; `width`/`height`/`codec` are set only while a window is being sent.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -259,6 +265,8 @@ struct Session {
     file: Option<FileOffer>,
     /// A record session: live, with the stream teed into a take.
     record: bool,
+    /// A meeting session: the desktop sends, the camera is not involved.
+    meeting: bool,
     /// Record: the take was asked to finish (not: the session to stop) for this reason, and
     /// whether it was the phone that asked. The session ends by itself.
     finishing: Option<(StopReason, bool)>,
@@ -285,6 +293,19 @@ struct Session {
     peer_offline: Option<PeerOffline>,
     last_status: Option<(Option<String>, Option<u32>, Option<u32>)>,
     last_status_at: Option<Instant>,
+}
+
+impl Session {
+    /// `mode` in the phone's `status` signal: named for record and meeting sessions.
+    fn wire_mode(&self) -> Option<StreamMode> {
+        if self.record {
+            Some(StreamMode::Record)
+        } else if self.meeting {
+            Some(StreamMode::Meeting)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -432,8 +453,11 @@ impl Machine {
     /// Whether a `loop_control` must be refused right now: a session was accepted (it owns
     /// the camera, or is about to load a video), or a given-up one is still shutting down.
     /// Asked when the request arrives and again by the loop worker right before it acts.
+    ///
+    /// A meeting session is the exception: it never touches the camera or the loop, so the
+    /// phone can stop and start the loop while it listens to the meeting.
     pub fn loop_refused(&self) -> bool {
-        self.session.as_ref().is_some_and(|s| s.accepted) || self.releasing.is_some()
+        self.session.as_ref().is_some_and(|s| s.accepted && !s.meeting) || self.releasing.is_some()
     }
 
     fn give_up(&mut self) {
@@ -450,7 +474,7 @@ impl Machine {
                 // `parse_signal` guarantees a file for file mode; one that got here without
                 // (a caller that built the signal by hand) is not a request to act on.
                 let file = match (mode, file) {
-                    (StreamMode::Live | StreamMode::Record, _) => None,
+                    (StreamMode::Live | StreamMode::Record | StreamMode::Meeting, _) => None,
                     (StreamMode::File, Some(file)) => Some(file),
                     (StreamMode::File, None) => {
                         return vec![signal(StreamSignal::StreamReject { session_id, reason: RejectReason::Unsupported })]
@@ -545,6 +569,7 @@ impl Machine {
             id: session_id.clone(),
             file: file.clone(),
             record,
+            meeting: mode == StreamMode::Meeting,
             finishing: None,
             take_started: false,
             take_told: false,
@@ -678,9 +703,10 @@ impl Machine {
         let kind = match &s.file {
             Some(file) => SessionKind::File(file.clone()),
             None if s.record => SessionKind::Record,
+            None if s.meeting => SessionKind::Meeting,
             None => SessionKind::Live,
         };
-        let mode = s.record.then_some(StreamMode::Record);
+        let mode = s.wire_mode();
         let mut actions = vec![
             signal(StreamSignal::StreamAccept { session_id: id.clone() }),
             signal(StreamSignal::Status {
@@ -955,6 +981,7 @@ impl Machine {
                 let from_phone = s.stop_from_phone;
                 let phone_offline = s.peer_offline.is_some_and(|p| p.confirmed);
                 let id = s.id.clone();
+                let is_meeting = s.meeting;
                 // File sessions: what the status keeps saying about the video afterwards.
                 let is_file = s.file.is_some();
                 let shown = self.status.file.clone();
@@ -968,7 +995,7 @@ impl Machine {
                     }
                     actions
                 };
-                match requested {
+                let actions = match requested {
                     // The video made it although a stop was on its way: it loops.
                     Some(_) if reason == StopReason::Done => {
                         self.finish_file(None, file_after(FilePhase::Looping, None));
@@ -1011,7 +1038,13 @@ impl Machine {
                         self.finish_file(Some((reason.clone(), message)), file);
                         report(vec![Action::Send(OutboundFrame::StreamStop { session_id: id.clone(), reason })])
                     }
+                };
+                // A meeting share that failed is not a phone camera that failed: the status
+                // keeps saying which it was, so the UI can word the error.
+                if is_meeting && self.status.state == Phase::Error {
+                    self.status.mode = StreamMode::Meeting;
                 }
+                actions
             }
         }
     }
@@ -1123,7 +1156,7 @@ impl Machine {
             height: st.height,
             fps: st.fps.map(|f| f.round() as u32),
             codec: st.codec.clone(),
-            mode: s.record.then_some(StreamMode::Record),
+            mode: s.wire_mode(),
             // Only once the take has started: its first appearance is the phone's cue
             // that recording began (the stream is live a moment earlier, for the pre-roll).
             record: st.record.clone().filter(|_| s.record && s.take_started),
@@ -2325,5 +2358,128 @@ mod tests {
         let a = m.on_signal(req("s1"), t);
         assert!(matches!(&a[..], [Action::AskUser(r)] if r.mode == StreamMode::Live));
         assert!(m.accept("s1", t).unwrap().contains(&Action::StartSession { session_id: "s1".into(), epoch: 1, kind: SessionKind::Live }));
+    }
+
+    // --- meeting sessions ------------------------------------------------------------------
+
+    fn meeting_req(id: &str) -> StreamSignal {
+        StreamSignal::StreamRequest { session_id: id.into(), device_label: Some("Pixel".into()), mode: StreamMode::Meeting, file: None }
+    }
+    /// What a meeting session reports: frames sent, a size only while a window is sent.
+    fn meeting_stats(video: bool, frames: u64) -> MediaStats {
+        MediaStats {
+            codec: video.then_some(EncodedCodec::H264),
+            width: video.then_some(1280),
+            height: video.then_some(720),
+            fps: if video { 30.0 } else { 0.0 },
+            frames,
+            decoder_restarts: 0,
+        }
+    }
+    fn status_modes(actions: &[Action]) -> Vec<(Option<StreamMode>, Option<u32>)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Send(OutboundFrame::Signal(StreamSignal::Status { mode, width, .. })) => Some((*mode, *width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_meeting_session_is_asked_for_started_as_one_and_named_in_every_status() {
+        let t = Instant::now();
+        let s = Duration::from_secs;
+        let mut m = Machine::new();
+        let a = m.on_signal(meeting_req("m1"), t);
+        assert!(matches!(&a[..], [Action::AskUser(r)] if r.mode == StreamMode::Meeting && r.file.is_none()));
+        assert_eq!((m.status().state, m.status().mode), (Phase::Requested, StreamMode::Meeting));
+
+        let a = m.accept("m1", t).unwrap();
+        assert_eq!(sent(&a), vec!["stream_accept", "status:Connecting"]);
+        assert_eq!(status_modes(&a), vec![(Some(StreamMode::Meeting), None)]);
+        assert!(a.contains(&Action::StartSession { session_id: "m1".into(), epoch: 1, kind: SessionKind::Meeting }));
+        assert_eq!(m.on_signal(offer("m1"), t), vec![Action::ToSession(SessionCommand::Offer("v=0".into()))]);
+        assert_eq!(sent(&m.on_session_event(1, SessionEvent::Answer("v=0 a".into()), t)), vec!["answer"]);
+
+        // Sound first: live, and the phone is told there is no picture (no size).
+        let a = m.on_session_event(1, SessionEvent::Live(meeting_stats(false, 1)), t);
+        assert_eq!(status_modes(&a), vec![(Some(StreamMode::Meeting), None)]);
+        let st = m.status();
+        assert_eq!((st.state, st.mode, st.width, st.codec.as_deref()), (Phase::Live, StreamMode::Meeting, None, None));
+        // The user picked a window: the phone hears of the picture…
+        let a = m.on_session_event(1, SessionEvent::Stats(meeting_stats(true, 200)), t + s(3));
+        assert_eq!(status_modes(&a), vec![(Some(StreamMode::Meeting), Some(1280))]);
+        assert_eq!(m.status().codec.as_deref(), Some("H264"));
+        // …and of its end (the window was closed): sound only again.
+        let a = m.on_session_event(1, SessionEvent::Stats(meeting_stats(false, 900)), t + s(9));
+        assert_eq!(status_modes(&a), vec![(Some(StreamMode::Meeting), None)]);
+
+        // The desktop's Stop is an ordinary stop: the phone is told, nothing is "finished".
+        let a = m.stop(StopReason::User, t + s(10));
+        assert_eq!(sent(&a), vec!["stop:user"]);
+        assert!(a.contains(&Action::ToSession(SessionCommand::Stop(StopReason::User))));
+        assert!(m.on_session_event(1, closed(StopReason::User, None), t + s(10)).is_empty());
+        let st = m.status();
+        assert_eq!((st.state, st.mode, st.record.clone(), st.file.clone()), (Phase::Idle, StreamMode::Live, None, None));
+        assert!(!st.ended_by_phone);
+    }
+
+    #[test]
+    fn the_loop_stays_under_the_phones_control_during_a_meeting_session() {
+        let t = Instant::now();
+        let ask = |m: &mut Machine| m.on_signal(StreamSignal::LoopControl { session_id: "c".into(), action: LoopAction::Stop }, t);
+        let refused = |a: Vec<Action>| matches!(&a[..], [Action::Loop { refused: true, .. }]);
+
+        // A live session owns the camera: the loop is not the phone's to start or stop.
+        let mut m = Machine::new();
+        live(&mut m, "s1", t);
+        assert!(m.loop_refused() && refused(ask(&mut m)));
+
+        // A meeting session never touches the camera.
+        let mut m = Machine::new();
+        m.on_signal(meeting_req("m1"), t);
+        m.accept("m1", t).unwrap();
+        assert!(!m.loop_refused() && !refused(ask(&mut m)), "while connecting");
+        m.on_session_event(1, SessionEvent::Live(meeting_stats(false, 1)), t);
+        assert!(!m.loop_refused() && !refused(ask(&mut m)), "while live");
+        // It is still one session at a time.
+        assert_eq!(sent(&m.on_signal(req("s2"), t)), vec!["reject:Busy"]);
+        assert_eq!(sent(&m.on_signal(meeting_req("m2"), t)), vec!["reject:Busy"]);
+    }
+
+    #[test]
+    fn a_meeting_session_ends_like_a_live_one() {
+        let t = Instant::now();
+        let s = Duration::from_secs;
+        let up = |id: &str| {
+            let mut m = Machine::new();
+            m.on_signal(meeting_req(id), t);
+            m.accept(id, t).unwrap();
+            m.on_session_event(1, SessionEvent::Live(meeting_stats(false, 1)), t);
+            m
+        };
+        // The phone's Stop.
+        let mut m = up("m1");
+        let a = m.on_remote_stop(stop_from_phone("m1"), t);
+        assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::User))]);
+        assert!(m.on_session_event(1, closed(StopReason::User, None), t).is_empty());
+        assert!(m.status().ended_by_phone && m.status().state == Phase::Idle);
+        // The phone closed the connection without a word.
+        let mut m = up("m2");
+        assert!(m.on_session_event(1, closed(StopReason::PeerStopped, None), t).is_empty());
+        assert!(m.status().ended_by_phone && m.status().last_error.is_none());
+        // The sound could not be captured: an error, told to the phone.
+        let mut m = up("m3");
+        let a = m.on_session_event(1, closed(StopReason::Error, Some("This computer's sound could not be captured.")), t);
+        assert_eq!(sent(&a), vec!["stop:error"]);
+        assert_eq!((m.status().state, m.status().mode), (Phase::Error, StreamMode::Meeting), "the error is a meeting's");
+        assert_eq!(m.status().last_error.as_deref(), Some("This computer's sound could not be captured."));
+        // The phone is off the relay but still receiving (frames keep being sent): it stays.
+        let mut m = up("m4");
+        assert!(m.on_peer_offline(t).is_empty());
+        m.on_session_event(1, SessionEvent::Stats(meeting_stats(false, 500)), t + s(5));
+        assert!(m.tick(t + PEER_OFFLINE_GRACE + s(1)).is_empty());
+        assert_eq!(m.status().state, Phase::Live);
     }
 }

@@ -89,6 +89,36 @@ enable raises a single UAC prompt to register the driver; that is by design.
 
 <!-- Newest entries first. -->
 
+### Watch the meeting on the phone: the button, the reminder, and computers that cannot share yet (remote v2, phase 5)
+_Added 2026-11-28 · All (phone page; the sharing computer must be Linux for now) · `remote-web/index.html`, `src-tauri/src/remote/stream/manager.rs` · uncommitted_
+
+The phone page has a new card, **Watch the meeting on this phone**. It only works with a
+computer that says it can share a meeting — today a Linux one. What a sharing session looks
+like is in the Linux entry "Share the meeting with the phone".
+
+**Already automated, don't repeat by hand:** `node remote-web/dev/smoke-meeting.mjs` covers
+the gating, the reminder, the copy for decline / busy / unsupported, and that the camera
+screen is unchanged afterwards. The steps below are the part that needs a real Windows or
+macOS build.
+
+**Setup:** CamLooper from this branch on a Windows or macOS computer, linked to a phone.
+
+**Steps:**
+1. Open the phone page and wait until the computer shows as Online.
+2. Look at the card **Watch the meeting on this phone** and tap its button.
+3. Tap **Start streaming**, then **Stop**. Tap **Record a loop**, film 5 seconds, tap **Stop**.
+
+**Expected:**
+- Step 2: the button is greyed out and does nothing; under it: "Update CamLooper on your
+  computer to watch a meeting here. (Linux computers only, for now.)". Nothing appears on the
+  computer.
+- Step 3: streaming and Record a loop work exactly as before.
+
+**Known gotchas:**
+- The note says "Update" although the Windows / macOS app is up to date: the wording is
+  shared with an out-of-date Linux app. It goes away when those platforms get a capture
+  source.
+
 ### Record a loop on the phone (remote v2, phase 3b): phone page and desktop UI
 _Added 2026-11-28 · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, locales_
 
@@ -942,6 +972,161 @@ builds them).
 ## Linux
 
 <!-- Newest entries first. -->
+
+### Share the meeting with the phone: sound and a picked window (remote v2, phase 5)
+_Added 2026-11-28 · Linux (KDE Plasma / Wayland first) · `src-tauri/src/remote/stream/meeting.rs`, `capture/linux.rs`, `rtc.rs`, `remote-web/index.html`, `src/components/PhoneStream.tsx` · uncommitted_
+
+While you are in a meeting on the computer, the phone hears what the computer plays (the
+other people) and, if you pick one, sees a window. The phone only receives; it can mute at
+any time. Nothing is captured before you accept on the computer.
+
+**Already automated, don't repeat by hand:** `cd src-tauri && cargo test --lib && cargo test
+--test meeting_loopback` (protocol, offer rules, the encoders into a simulated phone that
+decodes the picture, sound-only, a picture that stops arriving, the phone vanishing); `node remote-web/dev/smoke-meeting.mjs`
+(the phone page: button gating, the consent text, no camera or microphone use, mute, copy);
+`node remote-web/dev/e2e-meeting.mjs` (the real desktop code through the live relay, with a
+test pattern instead of a capture). **What none of them can do is answer the system's window
+picker** — steps 3–8 below are the only check of the real capture, and they have not been run
+by a person yet.
+
+**Setup:** a Linux desktop with PipeWire, `xdg-desktop-portal` (+ the KDE or GNOME backend),
+`gst-launch-1.0` with the PipeWire plugin (`gst-inspect-1.0 pipewiresrc` prints a factory),
+and an `ffmpeg` with libx264 and libopus (`ffmpeg -encoders | grep -E "libx264|libopus"`).
+CamLooper running and linked to the phone; phone and computer on the same Wi-Fi. Something
+that plays sound and moves in a window you can pick — a YouTube video in a browser window is
+enough. A video looping on the virtual camera, to see that it is left alone.
+
+**Steps:**
+1. On the phone page, look at the card **Watch the meeting on this phone**.
+2. Tap **Watch the meeting**. Read the reminder, tap **Cancel**. Tap **Watch the meeting**
+   again and tap **Continue**.
+3. On the computer: read the dialog, click **Accept**.
+4. In the system's screen sharing dialog pick the browser window that plays the video, and
+   confirm.
+5. On the phone, watch and listen for 20 seconds. Tap **Mute the meeting**, wait 5 seconds,
+   tap **Unmute the meeting**.
+6. On the computer, look at the top of the CamLooper window and at the looping video.
+7. Close the shared browser window (or stop sharing from the system's screen sharing
+   indicator). Play sound from another program.
+8. Plug in headphones (or switch the output device in the system's sound settings) while
+   sound is playing.
+9. On the phone tap **Stop**. Then start again (steps 2–3) and this time press **Cancel** in
+   the system's screen sharing dialog.
+10. Click **Stop sharing** in the CamLooper banner.
+11. Start once more and, in the CamLooper dialog, click **Decline**.
+
+**Expected:**
+- Step 1: the button is enabled a second or two after the page shows the computer as Online.
+- Step 2: the reminder reads "Your phone will hear what this computer plays, and will see the
+  window you pick. CamLooper does not tell the others in the meeting." Cancel closes it and
+  nothing appears on the computer. After Continue the phone shows a black 16:9 box with
+  "Sound only", the chip "Requesting" and "Accept on your computer, then pick the window to
+  share there." No camera or microphone permission prompt appears on the phone, at any step.
+- Step 3: the dialog is titled "Share the meeting with <phone>?" and says the phone will hear
+  what this computer plays and see the window you pick, that CamLooper does not tell the
+  others, and that the system asks for the window next. Right after Accept the system's own
+  screen sharing dialog opens. The phone already goes **Live** with "You hear the meeting. No
+  window is shared: sound only." and plays the computer's sound.
+- Step 4: within about two seconds the phone shows the picked window, letterboxed, moving,
+  and the text changes to "You hear the meeting and see the shared window." Sound and picture
+  are in step to within about half a second.
+- Step 5: Mute silences the phone at once; the picture keeps moving, the chip stays Live and
+  the text says "Muted on this phone. The meeting goes on, and nobody there notices." Unmute
+  brings the sound back at once. Nothing changes on the computer while you do this.
+- Step 6: a banner in the app's accent colour (not the red camera banner): "Sharing the
+  meeting with <phone> · sound and a window", a running clock, the line "CamLooper does not
+  tell the others in the meeting." and **Stop sharing**. The looping video keeps playing and
+  its controls are not greyed out.
+- Step 7: the phone's picture goes to "Sound only" within about six seconds (the computer
+  waits 4 seconds without a new frame before it calls the picture over), the banner says
+  "sound only", and the sound of the other program is heard on the phone. The session does
+  not end. The log has `meeting share: the picture ended; sound only from here` or
+  `meeting share: the picture stopped arriving; sound only from here`.
+- Step 8: the sound on the phone stops for a few seconds at most and comes back, now
+  following the new output device. The app's log (the terminal that started it) has
+  `meeting share: the default output device changed; following it`.
+- Step 9: Stop returns the phone to the home screen; the computer's banner goes and a note
+  says "The phone stopped watching the meeting." After cancelling the system dialog the
+  session still goes Live on the phone with sound only, and the log has
+  `meeting share: no window was picked; sound only`.
+- Step 10: the phone returns to the home screen with "Sharing the meeting was stopped on the
+  computer."
+- Step 11: the phone shows "The computer declined to share the meeting." and no screen
+  sharing dialog opened.
+- At the end: `pgrep -af "gst-launch|ffmpeg.*(pulse|rawvideo)"` prints nothing that belongs
+  to CamLooper, and the system's screen sharing indicator is gone.
+
+**Known gotchas:**
+- The sound is what the computer *plays*. Your own microphone is not in it; you will not hear
+  yourself, and that is intended.
+- With the phone next to the computer's microphone and its speaker on, the meeting hears
+  itself as an echo. Use headphones on the phone, or mute it.
+- A window that does not change sends no new frames; the picture then simply stands still.
+  The first picture can take up to a second after picking (the encoder's next keyframe).
+- After packet loss the picture can freeze or smear for up to a second; it heals at the next
+  keyframe.
+- If the phone is switched off or loses Wi-Fi without tapping Stop, the computer keeps the
+  banner for about 30 seconds before it ends the session with "The phone is no longer
+  reachable…". Stop sharing ends it at once.
+- Locking the phone or switching apps pauses playback on Android (there is no background
+  service yet); coming back resumes it.
+- Without `gst-launch-1.0` or its PipeWire plugin, or with an `ffmpeg` that lacks libx264,
+  picking a window gives sound only; the log says why (`meeting share: no picture (…)`).
+- Windows and macOS desktops do not offer this yet: the phone's button stays off there (see
+  the entry under "All platforms").
+
+### Headless CLI: share a meeting with the phone, with a test pattern or the real capture (remote v2, phase 5)
+_Added 2026-11-28 · Linux · `src-tauri/examples/phone_stream_cli.rs`, `remote-web/dev/e2e-meeting.mjs` · uncommitted_
+
+`phone_stream_cli` accepts the phone page's "Watch the meeting" by itself — **nobody is asked
+on the computer** — and runs the app's own meeting session. With `--meeting-fixture` it sends
+ffmpeg's test pattern and a 440 Hz tone and captures nothing; without it, it captures the
+default output device and opens the system's window picker, exactly as the app does. Dev
+tool; nothing here ships.
+
+**Setup:** `cargo build --example phone_stream_cli` in `src-tauri/`; an `ffmpeg` with libx264
+and libopus; the phone page showing a 6-digit code. For the scripted run: `playwright-core`
+(see `remote-web/dev/README.md`).
+
+**Steps:**
+1. Scripted, no phone needed: `node remote-web/dev/e2e-meeting.mjs`
+2. By hand: `./target/debug/examples/phone_stream_cli --code <6 digits> --null --meeting-fixture --seconds 120 2>/tmp/cli.err | tee /tmp/cli.jsonl`
+3. On the phone tap **Watch the meeting**, then **Continue**. Watch for 10 seconds, tap
+   **Mute the meeting**, then **Unmute the meeting**, then **Stop**.
+4. Press Ctrl-C in the terminal, then `pgrep -af "ffmpeg.*lavfi"`.
+5. Run step 2 again without `--meeting-fixture`, and step 3 while a video plays in a browser
+   window; pick that window in the system dialog.
+
+**Expected:**
+- Step 1: ends with `meeting e2e OK`, after lines like
+  `arrived at the page: audio 316 packets (energy 0.046), video 3240 packets / 188 frames decoded at 1280x720, 31 fps; codecs video/H264, audio/opus; path host/host`,
+  `Mute: element.muted=true, audio track enabled=false, still arriving (…), playing=true`,
+  `Unmute: element.muted=false, audio track enabled=true`,
+  `camera / microphone calls on the phone: 0` and `the CLI exited: {"status":0,…} | unpaired: {"event":"unpaired","revoked":true}`.
+- Step 2: `{"event":"meeting_source","source":"fixture"}`, then
+  `{"event":"connected","protocol":2,"appProtocol":3}`; the phone's Watch the meeting button
+  becomes tappable.
+- Step 3: `{"event":"stream_request",…,"mode":"meeting","autoAccept":true}`, state lines up to
+  `live` with `"mode":"meeting"`, and per-second
+  `{"event":"status","state":"live","mode":"meeting","codec":"H264","size":"1280x720","fps":30,"frames":…}`
+  lines with `frames` growing by about 80 a second (50 sound packets + 30 pictures). The
+  phone shows the colour-bar test pattern with a running counter and plays a steady tone.
+  Mute and Unmute change nothing in the CLI's output. After Stop: state `idle`, and
+  `meeting share: ended (user)` in `/tmp/cli.err`.
+- Step 4: `signal`, `cleanup`, `unpaired`, exit status 0; `pgrep` prints nothing.
+- Step 5: `{"event":"meeting_source","source":"capture"}`; the system's screen sharing dialog
+  opens on the computer when the phone connects; the phone plays the browser's sound and,
+  once picked, shows its window. `/tmp/cli.err` has `meeting share: capturing this
+  computer's sound` and `meeting share: sending the picked window`.
+
+**Known gotchas:**
+- The scripted run and step 2 use the live relay for pairing and signaling (one pairing,
+  revoked on exit); the media itself goes directly between the two processes.
+- `--null` only says where a phone *camera* would go; a meeting session writes no camera at
+  all, so `/dev/video*` is never opened by this.
+- `--no-meeting` makes the CLI answer `hello` without `meeting`: the phone's button then
+  stays off with the "Update CamLooper…" note — the way to see what a Windows or macOS
+  desktop looks like from the phone today.
 
 ### Headless CLI: record a loop from the phone (remote v2, phase 3b)
 _Added 2026-11-28, exit on SIGINT / SIGTERM and the size check added the same day · Linux · `src-tauri/examples/phone_stream_cli.rs`, `src-tauri/src/remote/stream/record.rs`_

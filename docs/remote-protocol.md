@@ -31,14 +31,14 @@ attempt: 1–64 printable ASCII characters, no spaces (e.g. 16 random base64url 
 | `kind` | Direction | Fields | Meaning |
 |---|---|---|---|
 | `hello` | phone → desktop | `sessionId` (any valid id; no session is needed), `appProtocol` (integer ≥ 1; `3` today) | "Which app protocol do you speak?" Sent once after pairing, when the desktop is online. See [App protocol 3](#app-protocol-3-hello-and-record-mode). |
-| `hello_ok` | desktop → phone | `sessionId` (the same), `appProtocol`: `3`, `features`: e.g. `["live","record","file"]` | The answer. `features` are the `stream_request` modes this desktop takes. |
-| `stream_request` | phone → desktop | `sessionId`, `deviceLabel?` (the desktop strips control and invisible/bidi format characters and keeps the first 40 characters), `mode?`: `live` (default) \| `record` \| `file` (with `file: {name, size, mime}`) | "May I stream my camera?" — with `record`: "…and loop what I film?" The desktop asks its user. |
+| `hello_ok` | desktop → phone | `sessionId` (the same), `appProtocol`: `3`, `features`: e.g. `["live","record","file","meeting"]` | The answer. `features` are the `stream_request` modes this desktop takes. |
+| `stream_request` | phone → desktop | `sessionId`, `deviceLabel?` (the desktop strips control and invisible/bidi format characters and keeps the first 40 characters), `mode?`: `live` (default) \| `record` \| `file` (with `file: {name, size, mime}`) \| `meeting` | "May I stream my camera?" — with `record`: "…and loop what I film?"; with `meeting`: "may I hear and see your meeting?" (see [`mode: "meeting"`](#mode-meeting--the-desktop-sends-the-phone-watches)). The desktop asks its user. |
 | `stream_accept` | desktop → phone | `sessionId` | The user accepted. Send the offer now. |
 | `stream_reject` | desktop → phone | `sessionId`, `reason`: `declined` \| `busy` \| `timeout` \| `unsupported` | No stream. `busy`: another session is active. `timeout`: nobody answered within 60 s. |
 | `offer` | phone → desktop | `sessionId`, `sdp` (≤ 14 KB) | The phone's SDP offer (video sendonly; an audio m-line is accepted and ignored). |
 | `answer` | desktop → phone | `sessionId`, `sdp` | The desktop's answer. **All desktop candidates are embedded in it**; the desktop does not trickle. |
 | `candidate` | phone → desktop (either direction allowed) | `sessionId`, `candidate`, `sdpMid?`, `sdpMLineIndex?` | One trickled ICE candidate (`candidate:…`, an `a=` prefix is tolerated). Empty string or `null` = end of candidates. |
-| `status` | desktop → phone | `sessionId`, `state`: `connecting` \| `live`, `width?`, `height?`, `fps?`, `codec?` (`H264` \| `VP8`); record sessions: `mode`: `record`, and once the take has started `record: {elapsedMs, capMs, phase, error?}` | Progress for the phone's UI. `live` is sent when the first frame reaches the virtual camera, and again (at most every 2 s) when codec or resolution changes. In a record session also when the take starts and when it is being processed. |
+| `status` | desktop → phone | `sessionId`, `state`: `connecting` \| `live`, `width?`, `height?`, `fps?`, `codec?` (`H264` \| `VP8`); record sessions: `mode`: `record`, and once the take has started `record: {elapsedMs, capMs, phase, error?}`; meeting sessions: `mode`: `meeting`, and `width`/`height`/`fps`/`codec` only while a window is being sent | Progress for the phone's UI. `live` is sent when the first frame reaches the virtual camera, and again (at most every 2 s) when codec or resolution changes. In a record session also when the take starts and when it is being processed. |
 | `loop_control` | phone → desktop | `sessionId` (any valid id), `action`: `stop` \| `start` \| `status` | Act on the video that loops on the desktop. No session needs to be open; refused (`busy`) while one is. `start` never turns on a virtual camera that is off (`camera_off`). |
 | `loop_status` | desktop → phone | `sessionId`, `playing`, `name?`, `fromPhone`, `error?` | The answer to `loop_control`, and sent after every file or record session. |
 
@@ -154,6 +154,7 @@ and the attempt ending as a timeout.
   `{"kind":"hello_ok","sessionId":"<same>","appProtocol":3,"features":["live","record","file"]}`.
   `features` are the modes it takes. `record` and `file` are listed only when the desktop
   has a place to store a video (its app data directory); otherwise the list is `["live"]`.
+  `meeting` is added on a desktop that can capture its own sound (Linux, for now).
 - No `hello_ok` within 5 s, `appProtocol < 3`, or no `record` in `features`: the phone shows
   "Update CamLooper on your computer to record a loop." and does not enable Record. (An older
   desktop ignores the unknown kind, so the phone sees the timeout.)
@@ -225,6 +226,57 @@ same `remote://phone-video-loaded` event as a received file.
 The end-to-end authentication gap described below applies to a record session exactly as it
 does to a live stream: a relay that can answer the phone can be the one whose video is
 recorded.
+
+### `mode: "meeting"` — the desktop sends, the phone watches
+
+The other direction (phase 5). While the user is in a meeting on the computer, the phone
+hears what the computer plays — the meeting's other participants — and, if the user picks
+one, sees a window or a screen. The phone is a viewer: it opens no camera and no microphone.
+
+No new protocol number: `appProtocol` stays `3`, and a desktop that can do this lists
+`meeting` in `hello_ok.features`. Today that is a **Linux** desktop only (the capture
+sources for Windows and macOS are not written). A phone page whose desktop does not list it
+keeps "Watch the meeting" disabled and says "Update CamLooper on your computer to watch a
+meeting here. (Linux computers only, for now.)". A `mode: "meeting"` request that reaches a
+desktop without a capture source is answered `stream_reject{unsupported}`.
+
+```
+ phone                                                             desktop
+  │ (the user reads the reminder on the phone and taps Continue)
+  │ signal{stream_request, s1, mode:"meeting"}                       │ "Share the meeting with <device>?"
+  │◀──── signal{stream_accept}, status{connecting, mode:"meeting"} ──│ Accept; the system's window picker opens
+  │ signal{offer}: m=audio recvonly, m=video recvonly,               │
+  │                m=application (channel "camlooper-transcript")    │
+  │◀──── signal{answer}: both tracks sendonly ───────────────────────│
+  │ … candidates, ICE, DTLS …                                        │
+  │◀──── signal{status, live, mode:"meeting"} ───────────────────────│ sound flows (no size: sound only)
+  │◀──── signal{status, live, mode:"meeting", width, height, codec} ─│ a window was picked: the picture flows
+  │◀──── signal{status, live, mode:"meeting"} ───────────────────────│ the window was closed: sound only again
+  │ stream_stop{user} — or the desktop's ────────────────────────────│
+```
+
+| | |
+|---|---|
+| Consent | The phone shows a reminder before it sends the request: "Your phone will hear what this computer plays, and will see the window you pick. CamLooper does not tell the others in the meeting." The desktop's confirm dialog says the same, with the same Accept / Decline / 60 s / busy / cooldown rules as `live`. Nothing is captured before Accept. For the picture the system's own screen sharing dialog (xdg-desktop-portal) is a second, separate consent; cancelling it leaves a sound-only session. While the session is up the desktop shows a banner ("Sharing the meeting with <device> · sound only / sound and a window") with **Stop sharing**. CamLooper has no way to tell the other participants, and says so. |
+| The offer | Must carry audio **and** video, and every media section must be `recvonly`. An offer that would send anything (`sendonly`, `sendrecv`, or no direction attribute) is refused ("the phone's offer does not match the request"): a meeting session never takes the phone's camera or microphone. At most one data channel. |
+| Sound (required) | The **monitor of the default output device** (PulseAudio / PipeWire): what the speakers or headphones play. Never a microphone — the user's own voice is not in it. If the default device changes during the session (headphones plugged in), the capture follows within a few seconds. If the sound cannot be captured the session ends with `stream_stop{error}`. Opus, 48 kHz stereo, 20 ms packets, 64 kbit/s. |
+| Picture (optional) | Whatever window or screen the user picks, letterboxed into 1280x720 at 30 fps, H.264 constrained baseline (`42e01f`, packetization-mode 1) at 2.5 Mbit/s, a keyframe every second. The desktop does not act on PLI (it cannot ask its encoder for a keyframe): after loss that RTX does not repair, the picture heals at the next keyframe, at most a second later. If the user cancels the picker, capture fails, or the window is closed later (the capture ends, or brings no frame for 4 s), the sound goes on and `status` is sent again without a size. |
+| `status` | `mode: "meeting"`. `width`, `height`, `fps`, `codec` are present exactly while a picture is being sent; without them it is a sound-only session. |
+| Mute | Local to the phone: it mutes its `<video>` element and disables the received audio track. Nothing is signalled and nothing is renegotiated; the desktop keeps sending. |
+| The camera and the loop | Not involved. The video loop keeps playing on the virtual camera, the in-app camera stays usable, and `loop_control` is answered as usual during a meeting session (it is refused with `busy` during every other kind). One phone session at a time still holds: a second request is `busy`. |
+| Endings | The phone's or the desktop's Stop: `stream_stop{user}`. The phone closes the connection: a normal ending. The phone vanishes: nothing is received in this direction, so there is no media timeout; ICE notices (its checks go unanswered, about 25 s) and the session ends with `stream_stop{timeout}`. |
+| `camlooper-transcript` | A data channel the phone may open, for captions in a later update (phase 6). Desktop → phone, text, JSON. Today the desktop sends one message when it opens, `{"type":"captions","state":"unavailable"}`, and the phone shows "Captions come in a later update." What the phone writes on it is dropped. No speech recognition exists yet. |
+
+For the UI (`remote://stream-status`): `mode: "meeting"`, `frames` counts what was sent, and
+`width` / `height` / `codec` are set exactly while a picture is sent. `state` is `live` from
+the first sound. A meeting session that failed keeps `mode: "meeting"` in the `error` status,
+so the banner can say that it was the meeting share that stopped, not the phone camera.
+
+The end-to-end authentication gap described below matters here in the other direction too:
+the desktop sends the meeting's sound to whoever completed the WebRTC handshake. A relay that
+can inject a `stream_request` and an offer could be that peer — but only after the user
+accepted "Share the meeting with <device>?" on the computer. The confirm dialog is the only
+protection until the offer is authenticated.
 
 ## Known limitation / later: the offer is not authenticated end to end
 

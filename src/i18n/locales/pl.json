@@ -225,6 +225,24 @@
       "failed": "Nie udało się zapętlić nagrania z telefonu.",
       "cancelledByPhone": "Telefon anulował nagrywanie.",
       "expired": "Ta prośba już wygasła. Stuknij ponownie „Record a loop” na telefonie."
+    },
+    "meeting": {
+      "confirmTitle": "Udostępnić spotkanie telefonowi {{phone}}?",
+      "confirmBody": "{{phone}} będzie słyszeć to, co odtwarza ten komputer (innych uczestników spotkania), i widzieć okno, które wybierzesz. CamLooper nie informuje o tym pozostałych uczestników.",
+      "confirmPicker": "Po zaakceptowaniu system zapyta, które okno lub ekran udostępnić. Anuluj tam, aby udostępnić tylko dźwięk.",
+      "live": "Udostępnianie spotkania telefonowi {{phone}}",
+      "soundOnly": "tylko dźwięk",
+      "soundAndWindow": "dźwięk i okno",
+      "notice": "CamLooper nie informuje pozostałych uczestników spotkania.",
+      "stopping": "Kończenie udostępniania spotkania…",
+      "stop": "Zakończ udostępnianie",
+      "stoppedByPhone": "Telefon przestał oglądać spotkanie.",
+      "expired": "Ta prośba już wygasła. Stuknij ponownie „Oglądaj spotkanie” na telefonie.",
+      "errorTitle": "Udostępnianie spotkania zostało zatrzymane.",
+      "errors": {
+        "timeout": "Telefon nie jest już osiągalny. Sprawdź, czy nadal jest na stronie CamLooper Remote, a potem zacznij ponownie z telefonu.",
+        "generic": "Coś poszło nie tak podczas udostępniania spotkania (na przykład nie udało się przechwycić dźwięku tego komputera). Zacznij ponownie z telefonu."
+      }
     }
   },
   "tray": {

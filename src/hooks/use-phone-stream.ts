@@ -16,10 +16,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type PhoneStreamPhase = "idle" | "requested" | "connecting" | "live" | "stopping" | "error";
 
 /**
- * What a session carries: the phone's live camera, one video file to loop, or a take
- * ("Record a loop": the live camera, saved here and looped once the phone stops).
+ * What a session carries: the phone's live camera, one video file to loop, a take
+ * ("Record a loop": the live camera, saved here and looped once the phone stops), or — the
+ * other way round — a meeting: this computer's sound and a picked window, sent to the phone.
  */
-export type PhoneStreamMode = "live" | "file" | "record";
+export type PhoneStreamMode = "live" | "file" | "record" | "meeting";
 
 export type PhoneRecordPhase = "recording" | "processing" | "looping" | "failed";
 
@@ -94,6 +95,8 @@ export interface PhoneStreamRequest {
 export interface PhoneStreamError {
   code: string | null;
   detail: string | null;
+  /** What failed: the phone's camera (`live`) or the meeting shared with the phone. */
+  mode: "live" | "meeting";
 }
 
 const IDLE: PhoneStreamStatus = {
@@ -118,11 +121,12 @@ const IDLE: PhoneStreamStatus = {
 };
 
 /**
- * `"file"` only when the status says so and names the file, `"record"` when it says so;
- * everything else is a live stream.
+ * `"file"` only when the status says so and names the file, `"record"` and `"meeting"` when
+ * it says so; everything else is a live stream.
  */
 export function sessionMode(status: Pick<PhoneStreamStatus, "mode" | "file">): PhoneStreamMode {
   if (status.mode === "record") return "record";
+  if (status.mode === "meeting") return "meeting";
   return status.mode === "file" && status.file ? "file" : "live";
 }
 
@@ -187,6 +191,17 @@ export function fileBannerView(status: PhoneStreamStatus): FileBannerView {
   return "connecting";
 }
 
+/** What the top banner shows for a `meeting` session, or `null` for nothing. */
+export type MeetingBannerView = "connecting" | "sound" | "window" | "stopping" | null;
+
+export function meetingBannerView(status: PhoneStreamStatus): MeetingBannerView {
+  if (sessionMode(status) !== "meeting" || !phoneOwnsCamera(status.state)) return null;
+  if (status.state === "stopping") return "stopping";
+  if (status.state !== "live") return "connecting";
+  // The backend reports a size exactly while a window is being sent.
+  return status.width && status.height ? "window" : "sound";
+}
+
 /** A banner's Stop turns into a force stop this long into `stopping` (machine.rs: `FORCE_STOP_AFTER`, plus a margin). */
 export const FORCE_STOP_AFTER_MS = 5_250;
 
@@ -205,7 +220,9 @@ export function cameraBusy(
   if (status.releasing === true) return true;
   // A video on its way from the phone does not take the camera: the current loop keeps
   // playing until the new one replaces it. A take does: it is the live camera while it runs.
-  return phoneOwnsCamera(status.state) && sessionMode(status) !== "file";
+  // A meeting shared with the phone never touches the camera at all.
+  const mode = sessionMode(status);
+  return phoneOwnsCamera(status.state) && mode !== "file" && mode !== "meeting";
 }
 
 /** Error codes with their own translated text; anything else uses the generic message. */
@@ -221,6 +238,12 @@ export function phoneErrorKey(
   return code && (KNOWN_ERRORS as readonly string[]).includes(code)
     ? `phoneStream.errors.${code}`
     : "phoneStream.errors.generic";
+}
+
+/** [`phoneErrorKey`] for a meeting session that failed. */
+export function meetingErrorKey(code: string | null): string {
+  if (code === "ice_failed") return phoneErrorKey(code);
+  return code === "timeout" ? "phoneStream.meeting.errors.timeout" : "phoneStream.meeting.errors.generic";
 }
 
 /** `"H264"` → `"H.264"`; other codec names as reported. */
@@ -503,13 +526,12 @@ export function usePhoneStream(options: PhoneStreamCallbacks = {}) {
    * transfer or take is reported through `onFileFailed` / `onRecordFailed` instead (a toast,
    * not the camera banner).
    */
-  const error = useMemo<PhoneStreamError | null>(
-    () =>
-      status.state === "error" && sessionMode(status) === "live" && status.since !== dismissedErrorSince
-        ? { code: status.lastErrorCode, detail: status.lastError }
-        : null,
-    [status, dismissedErrorSince],
-  );
+  const error = useMemo<PhoneStreamError | null>(() => {
+    const mode = sessionMode(status);
+    return status.state === "error" && (mode === "live" || mode === "meeting") && status.since !== dismissedErrorSince
+      ? { code: status.lastErrorCode, detail: status.lastError, mode }
+      : null;
+  }, [status, dismissedErrorSince]);
 
   const accept = useCallback(
     async (sessionId: string): Promise<AcceptResult> => {

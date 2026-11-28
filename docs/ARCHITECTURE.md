@@ -258,6 +258,19 @@ protocol is in [remote-protocol.md](remote-protocol.md).
 - **Consent guards:** a request raises the window without taking keyboard focus; the dialog
   never focuses Accept and keeps it disabled ~1.2 s after it becomes visible/focused;
   `remote_stream_accept` refuses other windows and anything under 800 ms after the request.
+- **Meeting sessions (`meeting.rs`, `capture/`, phase 5):** the same connection used the
+  other way. The phone offers `recvonly` audio + video (`RtcMode::Meeting` refuses any offer
+  that sends) and the desktop sends what the computer plays plus a picked window. str0m does
+  not encode: two ffmpeg processes do (libopus in Ogg, libx264 Annex B with an access unit
+  delimiter per picture), `meeting::OggPackets` / `AccessUnits` cut their stdout into frames,
+  and `RtcCommand::Media` hands them to str0m's frame-level writer once ICE *and* DTLS are up,
+  the picture starting on a keyframe. Where the media comes from is a `MeetingSource`:
+  `capture::linux` (the default sink's monitor through ffmpeg's pulse input; the
+  xdg-desktop-portal ScreenCast picker over zbus, then `gst-launch-1.0 pipewiresrc` piping
+  raw I420 into the encoder, because ffmpeg has no PipeWire input) or `FixtureSource`
+  (ffmpeg's test pattern and a tone, for tests and the CLI). Sound is required, the picture
+  is not. No camera is claimed: the loop keeps playing and `loop_control` stays allowed.
+  A desktop without a source (Windows, macOS today) does not list `meeting` in `hello_ok`.
 - **Dev:** `cargo run --example phone_stream_cli -- --code 123456 --null` runs the whole path
   headless; `cargo test --test phone_stream_loopback` runs it against a simulated phone.
   The CLI also takes a phone's "Loop a video": the file is received by `file_receive` and

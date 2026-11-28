@@ -287,7 +287,9 @@ function CamLooper() {
             ? 'phoneStream.file.cancelledByPhone'
             : mode === 'record'
               ? 'phoneStream.record.cancelledByPhone'
-              : 'phoneStream.stoppedByPhone',
+              : mode === 'meeting'
+                ? 'phoneStream.meeting.stoppedByPhone'
+                : 'phoneStream.stoppedByPhone',
         ),
       ),
     onStopFailed: () => toast.error(t('phoneStream.stopFailed')),
@@ -323,7 +325,9 @@ function CamLooper() {
             ? 'phoneStream.file.expired'
             : mode === 'record'
               ? 'phoneStream.record.expired'
-              : 'phoneStream.expired',
+              : mode === 'meeting'
+                ? 'phoneStream.meeting.expired'
+                : 'phoneStream.expired',
         ),
       );
     } else if (result === 'offline') toast.warning(t('phoneStream.offline'));

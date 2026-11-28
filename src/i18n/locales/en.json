@@ -265,6 +265,24 @@
       "failed": "Couldn't loop the recording from your phone.",
       "cancelledByPhone": "The phone cancelled the recording.",
       "expired": "That request has already expired. Tap Record a loop on your phone again."
+    },
+    "meeting": {
+      "confirmTitle": "Share the meeting with {{phone}}?",
+      "confirmBody": "{{phone}} will hear what this computer plays (the other people in the meeting) and will see the window you pick. CamLooper does not tell the others in the meeting.",
+      "confirmPicker": "After you accept, your system asks which window or screen to share. Cancel there to share sound only.",
+      "live": "Sharing the meeting with {{phone}}",
+      "soundOnly": "sound only",
+      "soundAndWindow": "sound and a window",
+      "notice": "CamLooper does not tell the others in the meeting.",
+      "stopping": "Stopping the meeting share…",
+      "stop": "Stop sharing",
+      "stoppedByPhone": "The phone stopped watching the meeting.",
+      "expired": "That request has already expired. Tap Watch the meeting on your phone again.",
+      "errorTitle": "Sharing the meeting stopped.",
+      "errors": {
+        "timeout": "The phone is no longer reachable. Check that it is still on the CamLooper Remote page, then start again from the phone.",
+        "generic": "Something went wrong while sharing the meeting (for example, this computer's sound could not be captured). Start again from your phone."
+      }
     }
   },
   "tray": {

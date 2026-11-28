@@ -162,6 +162,9 @@ pub struct SessionDeps {
     /// Where a phone's video file goes and what plays it. `None` (headless tools): file
     /// sessions end with an error.
     pub files: Option<FileDeps>,
+    /// What a meeting session sends to the phone: this computer's sound and a window.
+    /// `None` (no capture on this platform yet): meeting requests are refused.
+    pub meeting: Option<Arc<dyn super::meeting::MeetingSource>>,
 }
 
 impl SessionDeps {
@@ -174,6 +177,7 @@ impl SessionDeps {
             offer_timeout: Duration::from_secs(20),
             prepare_timeout: Duration::from_secs(120),
             files: None,
+            meeting: None,
         }
     }
 }
@@ -188,6 +192,9 @@ pub enum SessionKind {
     /// [`SessionKind::Live`], with the stream teed into a take that is looped once it ends
     /// ([`super::record`]).
     Record,
+    /// The desktop sends this computer's sound and a window to the phone
+    /// ([`super::meeting`]). The camera is not involved.
+    Meeting,
 }
 
 /// Where a record session's take is.
@@ -292,6 +299,15 @@ pub fn spawn_session(
             }
             None => spawn_reported(events, async { (StopReason::Error, Some("this build cannot record a loop from the phone".into())) }),
         },
+        // Neither does a meeting session touch the camera: the loop keeps playing.
+        SessionKind::Meeting => match deps.meeting.clone() {
+            Some(source) => {
+                spawn_reported_as("meeting share", events, async move {
+                    super::meeting::run_meeting_session(deps, source, rx, &session_events).await
+                })
+            }
+            None => spawn_reported_as("meeting share", events, async { (StopReason::Error, Some("this computer cannot share a meeting with the phone".into())) }),
+        },
         // A file session never touches the camera: nothing to acquire, nothing to hand back.
         SessionKind::File(offer) => {
             spawn_reported(events, async move { run_file_session(deps, offer, rx, &session_events).await });
@@ -306,12 +322,21 @@ fn spawn_reported(
     events: mpsc::UnboundedSender<SessionEvent>,
     session: impl std::future::Future<Output = Outcome> + Send + 'static,
 ) {
+    spawn_reported_as("phone video", events, session)
+}
+
+/// [`spawn_reported`] with the name the session goes by in the log.
+fn spawn_reported_as(
+    what: &'static str,
+    events: mpsc::UnboundedSender<SessionEvent>,
+    session: impl std::future::Future<Output = Outcome> + Send + 'static,
+) {
     tokio::spawn(async move {
         let run = AssertUnwindSafe(session).catch_unwind().await;
-        let (reason, error) = run.unwrap_or_else(|_| (StopReason::Error, Some("internal error in the phone video transfer".into())));
+        let (reason, error) = run.unwrap_or_else(|_| (StopReason::Error, Some(format!("internal error in the {what} session"))));
         match &error {
-            Some(e) => eprintln!("phone video: ended ({reason}): {e}"),
-            None => eprintln!("phone video: ended ({reason})"),
+            Some(e) => eprintln!("{what}: ended ({reason}): {e}"),
+            None => eprintln!("{what}: ended ({reason})"),
         }
         let _ = events.send(SessionEvent::Closed { reason, error });
     });
@@ -340,7 +365,7 @@ fn spawn_guarded(
     });
 }
 
-type Outcome = (StopReason, Option<String>);
+pub(super) type Outcome = (StopReason, Option<String>);
 type Prepared = (CameraTarget, rtc::LocalTransport);
 
 /// [`run_session`] for a record session. Besides the outcome: the path the loop engine says
@@ -785,44 +810,9 @@ async fn file_session(
     events: &mpsc::UnboundedSender<SessionEvent>,
 ) -> (Outcome, Option<PathBuf>) {
     // --- 1. sockets, while the phone sends its offer ------------------------------------
-    // Nothing here needs undoing, so unlike the camera handoff it is simply dropped on a stop.
-    let (transport, sdp, candidates) = {
-        let prepare = async {
-            let stun = deps.ice.stun_server().await;
-            rtc::gather(&deps.rtc, stun).await
-        };
-        tokio::pin!(prepare);
-        let offer_deadline = tokio::time::Instant::now() + deps.offer_timeout;
-        let mut transport: Option<rtc::LocalTransport> = None;
-        let mut sdp: Option<String> = None;
-        let mut candidates: Vec<String> = Vec::new();
-        loop {
-            if transport.is_some() && sdp.is_some() {
-                break (transport.take().expect("checked"), sdp.take().expect("checked"), candidates);
-            }
-            tokio::select! {
-                r = &mut prepare, if transport.is_none() => match r {
-                    Ok(t) => {
-                        transport = Some(t);
-                        let _ = events.send(SessionEvent::Prepared);
-                    }
-                    Err(e) => return ((StopReason::Error, Some(format!("{e:#}"))), None),
-                },
-                cmd = cmd_rx.recv() => match cmd {
-                    Some(SessionCommand::Offer(o)) => sdp = Some(o),
-                    Some(SessionCommand::RemoteCandidate(c)) => {
-                        if candidates.len() < MAX_REMOTE_CANDIDATES {
-                            candidates.push(c);
-                        }
-                    }
-                    Some(SessionCommand::Stop(r) | SessionCommand::Finish(r)) => return ((r, None), None),
-                    None => return ((StopReason::Error, Some("session dropped".into())), None),
-                },
-                _ = tokio::time::sleep_until(offer_deadline), if sdp.is_none() => {
-                    return ((StopReason::Timeout, Some("no offer from the phone".into())), None);
-                }
-            }
-        }
+    let (transport, sdp, candidates) = match sockets_and_offer(deps, &mut cmd_rx, events).await {
+        Ok(ready) => ready,
+        Err(outcome) => return (outcome, None),
     };
 
     // --- 2. answer: a data channel and nothing else ---------------------------------------
@@ -910,6 +900,52 @@ async fn file_session(
     };
     let _ = rtc_tx.send(RtcCommand::Stop);
     (outcome, loaded)
+}
+
+/// What a session without a camera (file, meeting) waits for first: the sockets are bound
+/// and the phone's offer has arrived. Nothing here needs undoing, so unlike the camera
+/// handoff it is simply dropped on a stop. `Err` is the session's outcome.
+pub(super) async fn sockets_and_offer(
+    deps: &SessionDeps,
+    cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    events: &mpsc::UnboundedSender<SessionEvent>,
+) -> Result<(rtc::LocalTransport, String, Vec<String>), Outcome> {
+    let prepare = async {
+        let stun = deps.ice.stun_server().await;
+        rtc::gather(&deps.rtc, stun).await
+    };
+    tokio::pin!(prepare);
+    let offer_deadline = tokio::time::Instant::now() + deps.offer_timeout;
+    let mut transport: Option<rtc::LocalTransport> = None;
+    let mut sdp: Option<String> = None;
+    let mut candidates: Vec<String> = Vec::new();
+    loop {
+        if transport.is_some() && sdp.is_some() {
+            return Ok((transport.take().expect("checked"), sdp.take().expect("checked"), candidates));
+        }
+        tokio::select! {
+            r = &mut prepare, if transport.is_none() => match r {
+                Ok(t) => {
+                    transport = Some(t);
+                    let _ = events.send(SessionEvent::Prepared);
+                }
+                Err(e) => return Err((StopReason::Error, Some(format!("{e:#}")))),
+            },
+            cmd = cmd_rx.recv() => match cmd {
+                Some(SessionCommand::Offer(o)) => sdp = Some(o),
+                Some(SessionCommand::RemoteCandidate(c)) => {
+                    if candidates.len() < MAX_REMOTE_CANDIDATES {
+                        candidates.push(c);
+                    }
+                }
+                Some(SessionCommand::Stop(r) | SessionCommand::Finish(r)) => return Err((r, None)),
+                None => return Err((StopReason::Error, Some("session dropped".into()))),
+            },
+            _ = tokio::time::sleep_until(offer_deadline), if sdp.is_none() => {
+                return Err((StopReason::Timeout, Some("no offer from the phone".into())));
+            }
+        }
+    }
 }
 
 /// A `Stop` that is already in the queue, if any; candidates on the way are passed on.
@@ -1222,7 +1258,7 @@ async fn next_command(
 
 /// The phone closed the connection. Wait briefly for the `stream_stop` it sent over the relay
 /// (the DTLS close usually wins the race) and use its reason; without one it is `peer_stopped`.
-async fn phone_stop_reason(
+pub(super) async fn phone_stop_reason(
     pending: &mut VecDeque<SessionCommand>,
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
 ) -> StopReason {

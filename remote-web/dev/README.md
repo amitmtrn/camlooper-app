@@ -54,6 +54,10 @@ node smoke-shots.mjs      # headless Chrome 412×915 → shot-pair.png, shot-cod
 node smoke-stream.mjs     # phone page (fake camera) → fake desktop peer through a mocked relay socket
 node smoke-behaviors.mjs  # mic note/mute, stale stream_stop, codec rejection, relay too_large, 4000, retry msg
 node smoke-record.mjs     # Record a loop: app-protocol hello gating, a take (REC clock, Stop, 1:00 auto-stop), outcomes, loop controls; the old file card stays hidden → shot-record-*.png
+node smoke-meeting.mjs    # Watch the meeting: off without the "meeting" feature, consent before any request, recvonly offer + transcript channel,
+                          # no getUserMedia, sound and picture really play, Mute is local (element + track, nothing signalled), sound-only, stop / reject copy → shot-meeting.png
+node e2e-meeting.mjs      # NOT mocked: pairs through the live relay with ../../src-tauri/target/debug/examples/phone_stream_cli --meeting-fixture --null
+                          # (build it first) and checks that the real desktop code's sound and 1280x720 picture arrive and that Mute silences only the element
 ```
 
 The smoke scripts need `playwright-core` (the library only; it downloads no browser) and

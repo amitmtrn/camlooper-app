@@ -125,6 +125,10 @@ mp4 = "0.14.0"  # Pure Rust MP4 library for Windows video processing
 # Platform-specific dependencies for virtual camera
 [target.'cfg(target_os = "linux")'.dependencies]
 v4l = "0.14"
+# src/remote/stream/capture/linux.rs: the xdg-desktop-portal ScreenCast handshake for a
+# meeting session's window picker. Already in Cargo.lock with these (default) features
+# through tauri-plugin-opener and tauri-plugin-single-instance; nothing new is downloaded.
+zbus = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.9"

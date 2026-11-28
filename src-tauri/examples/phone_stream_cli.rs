@@ -5,6 +5,7 @@
 //! ```text
 //! cargo run --example phone_stream_cli -- --code 123456 [--device /dev/video10 | --null]
 //!                                         [--api https://api.camlooper.com] [--seconds 60]
+//!                                         [--meeting-fixture | --no-meeting]
 //! cargo run --example phone_stream_cli -- --pair-file /tmp/pair.json ...
 //! ```
 //!
@@ -30,6 +31,15 @@
 //!   ends (the phone's Stop, 60 s, or this tool's deadline) it is remuxed with ffmpeg and
 //!   loaded by the same loop engine as a file. The loop then keeps playing after the phone
 //!   has disconnected, until `--seconds` or SIGINT.
+//! * A `mode: "meeting"` request (the phone page's "Watch the meeting") is accepted
+//!   automatically as well — **here that means nobody is asked on this computer**, so only
+//!   run it where that is fine. The desktop then *sends*: what this computer plays (the
+//!   default sink's monitor) and the window picked in the system's screen sharing dialog,
+//!   which still comes up (Linux only; elsewhere `meeting` is not offered). No camera is
+//!   touched and a playing loop plays on. `--meeting-fixture` sends ffmpeg's test pattern
+//!   and a 440 Hz tone instead and captures nothing — for end-to-end tests without a
+//!   portal. `--no-meeting` does not offer `meeting` at all. Status lines carry
+//!   `mode: "meeting"`, `frames` (frames sent) and a `size` while a picture is sent.
 //! * stdout: one JSON object per line (events and a status line per second) and nothing
 //!   else. stderr: logs, including what the app itself prints to stdout.
 //!   Tokens are never printed. `--debug` adds debug logs (SDP and candidate addresses).
@@ -56,6 +66,7 @@ use camlooper_lib::remote::protocol::ServerMessage;
 use camlooper_lib::remote::store::{Pairing, Store};
 use camlooper_lib::remote::stream::handoff::{ensure_virtual_camera, AppCamera};
 use camlooper_lib::remote::stream::loop_engine::{self, EngineLoop, LoopHost, VideoInfo};
+use camlooper_lib::remote::stream::meeting::{self, FixtureSource};
 use camlooper_lib::remote::stream::rtc::resolve_stun;
 use camlooper_lib::remote::stream::file_receive::{PlayError, PlayRequest, Played};
 use camlooper_lib::remote::stream::signal::{LoopAction, OutboundFrame, RecordPhase, StopReason, StreamMode, StreamSignal, APP_PROTOCOL};
@@ -79,10 +90,14 @@ struct Args {
     null: bool,
     seconds: u64,
     debug: bool,
+    /// Meeting sessions send ffmpeg's test sources instead of capturing.
+    meeting_fixture: bool,
+    /// Meeting sessions are not offered.
+    no_meeting: bool,
 }
 
 const USAGE: &str = "usage: phone_stream_cli (--code <6 digits> [--keep-pair] | --pair-file <path>) \
-[--device /dev/videoN | --null] [--api URL] [--seconds N] [--debug]";
+[--device /dev/videoN | --null] [--api URL] [--seconds N] [--meeting-fixture | --no-meeting] [--debug]";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -94,6 +109,8 @@ fn parse_args() -> Result<Args, String> {
         null: false,
         seconds: 300,
         debug: false,
+        meeting_fixture: false,
+        no_meeting: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -107,6 +124,8 @@ fn parse_args() -> Result<Args, String> {
             "--null" => a.null = true,
             "--seconds" => a.seconds = value("--seconds")?.parse().map_err(|e| format!("--seconds: {e}"))?,
             "--debug" => a.debug = true,
+            "--meeting-fixture" => a.meeting_fixture = true,
+            "--no-meeting" => a.no_meeting = true,
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
@@ -116,6 +135,9 @@ fn parse_args() -> Result<Args, String> {
     }
     if a.device.is_some() && a.null {
         return Err("--device and --null are exclusive".into());
+    }
+    if a.meeting_fixture && a.no_meeting {
+        return Err("--meeting-fixture and --no-meeting are exclusive".into());
     }
     Ok(a)
 }
@@ -172,6 +194,7 @@ fn status_line(s: &StreamStatus) -> serde_json::Value {
     json!({
         "event": "status",
         "state": s.state,
+        "mode": s.mode,
         "codec": s.codec,
         "size": s.width.zip(s.height).map(|(w, h)| format!("{w}x{h}")),
         "fps": s.fps,
@@ -506,6 +529,18 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
     let ffmpeg = PathBuf::from("ffmpeg");
     let mut deps = SessionDeps::new(ffmpeg, camera, ice);
     deps.files = Some(FileDeps::new(files.store.clone(), files.player.clone()));
+    deps.meeting = if args.no_meeting {
+        None
+    } else if args.meeting_fixture {
+        Some(Arc::new(FixtureSource { video: true }))
+    } else {
+        meeting::default_source()
+    };
+    emit(json!({"event": "meeting_source", "source": match (&deps.meeting, args.meeting_fixture) {
+        (None, _) => "none",
+        (Some(_), true) => "fixture",
+        (Some(_), false) => "capture",
+    }}));
     let (dtx, mut decisions) = tokio::sync::mpsc::unbounded_channel();
     let (manager, mut outbound) = StreamManager::spawn_with_loop(
         Arc::new(Arc::new(deps)),

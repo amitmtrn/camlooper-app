@@ -223,6 +223,24 @@
       "failed": "Impossible de lire en boucle l'enregistrement de votre téléphone.",
       "cancelledByPhone": "Le téléphone a annulé l'enregistrement.",
       "expired": "Cette demande a déjà expiré. Touchez à nouveau « Record a loop » sur votre téléphone."
+    },
+    "meeting": {
+      "confirmTitle": "Partager la réunion avec {{phone}} ?",
+      "confirmBody": "{{phone}} entendra ce que cet ordinateur diffuse (les autres participants de la réunion) et verra la fenêtre que vous choisirez. CamLooper ne prévient pas les autres participants.",
+      "confirmPicker": "Après avoir accepté, votre système vous demandera quelle fenêtre ou quel écran partager. Annulez à ce moment-là pour ne partager que le son.",
+      "live": "Réunion partagée avec {{phone}}",
+      "soundOnly": "son uniquement",
+      "soundAndWindow": "son et une fenêtre",
+      "notice": "CamLooper ne prévient pas les autres participants de la réunion.",
+      "stopping": "Arrêt du partage de la réunion…",
+      "stop": "Arrêter le partage",
+      "stoppedByPhone": "Le téléphone a arrêté de suivre la réunion.",
+      "expired": "Cette demande a déjà expiré. Touchez de nouveau « Suivre la réunion » sur votre téléphone.",
+      "errorTitle": "Le partage de la réunion s'est arrêté.",
+      "errors": {
+        "timeout": "Le téléphone n'est plus joignable. Vérifiez qu'il est toujours sur la page CamLooper Remote, puis recommencez depuis le téléphone.",
+        "generic": "Un problème est survenu pendant le partage de la réunion (par exemple, le son de cet ordinateur n'a pas pu être capté). Recommencez depuis votre téléphone."
+      }
     }
   },
   "tray": {

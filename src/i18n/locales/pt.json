@@ -223,6 +223,24 @@
       "failed": "Não foi possível repetir a gravação do seu telefone.",
       "cancelledByPhone": "O telefone cancelou a gravação.",
       "expired": "Essa solicitação já expirou. Toque em \"Record a loop\" no telefone novamente."
+    },
+    "meeting": {
+      "confirmTitle": "Compartilhar a reunião com {{phone}}?",
+      "confirmBody": "{{phone}} vai ouvir o que este computador reproduz (as outras pessoas da reunião) e ver a janela que você escolher. O CamLooper não avisa os outros participantes.",
+      "confirmPicker": "Depois de aceitar, o sistema pergunta qual janela ou tela compartilhar. Cancele ali para compartilhar apenas o som.",
+      "live": "Compartilhando a reunião com {{phone}}",
+      "soundOnly": "apenas som",
+      "soundAndWindow": "som e uma janela",
+      "notice": "O CamLooper não avisa os outros participantes da reunião.",
+      "stopping": "Encerrando o compartilhamento…",
+      "stop": "Parar de compartilhar",
+      "stoppedByPhone": "O celular parou de acompanhar a reunião.",
+      "expired": "Essa solicitação já expirou. Toque em “Acompanhar a reunião” no celular novamente.",
+      "errorTitle": "O compartilhamento da reunião foi encerrado.",
+      "errors": {
+        "timeout": "O celular não está mais acessível. Verifique se ele ainda está na página do CamLooper Remote e comece de novo pelo celular.",
+        "generic": "Algo deu errado ao compartilhar a reunião (por exemplo, não foi possível capturar o som deste computador). Comece de novo pelo celular."
+      }
     }
   },
   "tray": {

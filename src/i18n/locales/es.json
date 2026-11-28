@@ -223,6 +223,24 @@
       "failed": "No se pudo reproducir en bucle la grabación de tu teléfono.",
       "cancelledByPhone": "El teléfono canceló la grabación.",
       "expired": "Esa solicitud ya ha caducado. Toca «Record a loop» en tu teléfono otra vez."
+    },
+    "meeting": {
+      "confirmTitle": "¿Compartir la reunión con {{phone}}?",
+      "confirmBody": "{{phone}} oirá lo que reproduce este ordenador (las demás personas de la reunión) y verá la ventana que elijas. CamLooper no avisa a los demás participantes.",
+      "confirmPicker": "Después de aceptar, el sistema te preguntará qué ventana o pantalla compartir. Cancela ahí para compartir solo el sonido.",
+      "live": "Compartiendo la reunión con {{phone}}",
+      "soundOnly": "solo sonido",
+      "soundAndWindow": "sonido y una ventana",
+      "notice": "CamLooper no avisa a los demás participantes de la reunión.",
+      "stopping": "Dejando de compartir la reunión…",
+      "stop": "Dejar de compartir",
+      "stoppedByPhone": "El móvil dejó de ver la reunión.",
+      "expired": "Esa solicitud ya ha caducado. Vuelve a tocar «Ver la reunión» en el móvil.",
+      "errorTitle": "Se dejó de compartir la reunión.",
+      "errors": {
+        "timeout": "Ya no se puede conectar con el móvil. Comprueba que sigue en la página de CamLooper Remote y vuelve a empezar desde el móvil.",
+        "generic": "Algo salió mal al compartir la reunión (por ejemplo, no se pudo capturar el sonido de este ordenador). Vuelve a empezar desde el móvil."
+      }
     }
   },
   "tray": {

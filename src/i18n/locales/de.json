@@ -223,6 +223,24 @@
       "failed": "Die Aufnahme von deinem Handy konnte nicht in Schleife abgespielt werden.",
       "cancelledByPhone": "Das Handy hat die Aufnahme abgebrochen.",
       "expired": "Diese Anfrage ist bereits abgelaufen. Tippe auf deinem Handy erneut auf „Record a loop“."
+    },
+    "meeting": {
+      "confirmTitle": "Meeting mit {{phone}} teilen?",
+      "confirmBody": "{{phone}} hört, was dieser Computer abspielt (die anderen Personen im Meeting), und sieht das Fenster, das du auswählst. CamLooper informiert die anderen im Meeting nicht.",
+      "confirmPicker": "Nach dem Annehmen fragt dein System, welches Fenster oder welcher Bildschirm geteilt werden soll. Brich dort ab, um nur den Ton zu teilen.",
+      "live": "Meeting wird mit {{phone}} geteilt",
+      "soundOnly": "nur Ton",
+      "soundAndWindow": "Ton und ein Fenster",
+      "notice": "CamLooper informiert die anderen im Meeting nicht.",
+      "stopping": "Teilen des Meetings wird beendet…",
+      "stop": "Teilen beenden",
+      "stoppedByPhone": "Das Handy hat das Ansehen des Meetings beendet.",
+      "expired": "Diese Anfrage ist bereits abgelaufen. Tippe auf dem Handy erneut auf „Meeting ansehen“.",
+      "errorTitle": "Das Teilen des Meetings wurde beendet.",
+      "errors": {
+        "timeout": "Das Handy ist nicht mehr erreichbar. Prüfe, ob es noch auf der CamLooper-Remote-Seite ist, und starte dann erneut vom Handy aus.",
+        "generic": "Beim Teilen des Meetings ist etwas schiefgelaufen (zum Beispiel konnte der Ton dieses Computers nicht aufgenommen werden). Starte erneut vom Handy aus."
+      }
     }
   },
   "tray": {

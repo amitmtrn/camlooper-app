@@ -223,6 +223,24 @@
       "failed": "Tidak dapat memutar ulang rekaman dari ponsel Anda.",
       "cancelledByPhone": "Ponsel membatalkan rekaman.",
       "expired": "Permintaan itu sudah kedaluwarsa. Ketuk \"Record a loop\" lagi di ponsel Anda."
+    },
+    "meeting": {
+      "confirmTitle": "Bagikan rapat dengan {{phone}}?",
+      "confirmBody": "{{phone}} akan mendengar apa yang diputar komputer ini (peserta rapat lainnya) dan melihat jendela yang Anda pilih. CamLooper tidak memberi tahu peserta lain.",
+      "confirmPicker": "Setelah Anda menerima, sistem akan menanyakan jendela atau layar mana yang dibagikan. Batalkan di sana untuk membagikan suara saja.",
+      "live": "Membagikan rapat dengan {{phone}}",
+      "soundOnly": "suara saja",
+      "soundAndWindow": "suara dan satu jendela",
+      "notice": "CamLooper tidak memberi tahu peserta rapat lainnya.",
+      "stopping": "Menghentikan berbagi rapat…",
+      "stop": "Berhenti berbagi",
+      "stoppedByPhone": "Ponsel berhenti menonton rapat.",
+      "expired": "Permintaan itu sudah kedaluwarsa. Ketuk lagi “Tonton rapat” di ponsel Anda.",
+      "errorTitle": "Berbagi rapat dihentikan.",
+      "errors": {
+        "timeout": "Ponsel tidak lagi dapat dijangkau. Pastikan ponsel masih di halaman CamLooper Remote, lalu mulai lagi dari ponsel.",
+        "generic": "Terjadi masalah saat membagikan rapat (misalnya, suara komputer ini tidak dapat ditangkap). Mulai lagi dari ponsel Anda."
+      }
     }
   },
   "tray": {

@@ -223,6 +223,24 @@
       "failed": "Không thể phát lặp lại bản ghi từ điện thoại của bạn.",
       "cancelledByPhone": "Điện thoại đã hủy bản ghi.",
       "expired": "Yêu cầu đó đã hết hạn. Hãy nhấn lại \"Record a loop\" trên điện thoại."
+    },
+    "meeting": {
+      "confirmTitle": "Chia sẻ cuộc họp với {{phone}}?",
+      "confirmBody": "{{phone}} sẽ nghe những gì máy tính này phát (những người khác trong cuộc họp) và sẽ thấy cửa sổ bạn chọn. CamLooper không thông báo cho những người khác.",
+      "confirmPicker": "Sau khi bạn chấp nhận, hệ thống sẽ hỏi chia sẻ cửa sổ hoặc màn hình nào. Hủy ở đó để chỉ chia sẻ âm thanh.",
+      "live": "Đang chia sẻ cuộc họp với {{phone}}",
+      "soundOnly": "chỉ âm thanh",
+      "soundAndWindow": "âm thanh và một cửa sổ",
+      "notice": "CamLooper không thông báo cho những người khác trong cuộc họp.",
+      "stopping": "Đang dừng chia sẻ cuộc họp…",
+      "stop": "Dừng chia sẻ",
+      "stoppedByPhone": "Điện thoại đã ngừng xem cuộc họp.",
+      "expired": "Yêu cầu đó đã hết hạn. Hãy chạm lại “Xem cuộc họp” trên điện thoại.",
+      "errorTitle": "Đã dừng chia sẻ cuộc họp.",
+      "errors": {
+        "timeout": "Không còn kết nối được với điện thoại. Hãy kiểm tra xem điện thoại còn ở trang CamLooper Remote không, rồi bắt đầu lại từ điện thoại.",
+        "generic": "Đã xảy ra lỗi khi chia sẻ cuộc họp (ví dụ: không thu được âm thanh của máy tính này). Hãy bắt đầu lại từ điện thoại."
+      }
     }
   },
   "tray": {

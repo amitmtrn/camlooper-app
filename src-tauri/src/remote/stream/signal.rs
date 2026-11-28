@@ -32,7 +32,8 @@ pub const MAX_LOOP_ERROR: usize = 120;
 pub const PHONE_VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "3gp"];
 
 /// The app-level protocol this desktop speaks (`hello` / `hello_ok`). Independent of the
-/// relay's `?protocol=2`. 3 added `hello` itself and `mode: "record"`.
+/// relay's `?protocol=2`. 3 added `hello` itself and `mode: "record"`. `mode: "meeting"` came
+/// later without a new number: a desktop that takes it lists `meeting` in `hello_ok.features`.
 pub const APP_PROTOCOL: u32 = 3;
 /// A recorded take is at most this long; the desktop finalizes it then, whatever the phone does.
 pub const RECORD_CAP_MS: u64 = 60_000;
@@ -40,8 +41,9 @@ pub const RECORD_CAP_MS: u64 = 60_000;
 const MAX_FEATURES: usize = 16;
 const MAX_FEATURE_LEN: usize = 24;
 
-/// What a phone session carries: its live camera, one video file to loop, or its live camera
-/// recorded on the desktop and then looped (`record`).
+/// What a phone session carries: its live camera, one video file to loop, its live camera
+/// recorded on the desktop and then looped (`record`), or — the other way round — this
+/// computer's sound and a window to the phone (`meeting`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamMode {
@@ -51,6 +53,10 @@ pub enum StreamMode {
     /// The phone streams as for `live`; the desktop tees the stream to a file and, when the
     /// take ends, loops that file. Never treated as `live`.
     Record,
+    /// The desktop sends: what this computer plays (the meeting's other participants) and,
+    /// when the user picked one, a window or screen. The phone only receives. No camera is
+    /// involved on either side.
+    Meeting,
 }
 
 impl StreamMode {
@@ -141,7 +147,9 @@ pub enum StreamSignal {
         fps: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codec: Option<String>,
-        /// `record` for a record session; absent otherwise.
+        /// `record` for a record session, `meeting` for a meeting session; absent otherwise.
+        /// Meeting: `width`/`height`/`codec` are present exactly while a window is being sent
+        /// (absent: sound only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<StreamMode>,
         /// Record sessions: where the take is.
@@ -152,7 +160,7 @@ pub enum StreamSignal {
     /// is any valid id; no session needs to be open. Answered with `hello_ok`.
     Hello { session_id: String, app_protocol: u32 },
     /// desktop → phone: the answer to `hello`. `features` are the request modes this
-    /// desktop takes (`live`, `record`, `file`).
+    /// desktop takes (`live`, `record`, `file`, `meeting`).
     HelloOk { session_id: String, app_protocol: u32, features: Vec<String> },
     /// phone → desktop: act on the video loaded on the desktop. `sessionId` is any valid id;
     /// no session needs to be open. Always answered with `loop_status`.
@@ -376,10 +384,11 @@ fn parse_request(obj: &serde_json::Map<String, Value>) -> Result<StreamSignal, S
         Some(Value::String(m)) if m == "live" => StreamMode::Live,
         Some(Value::String(m)) if m == "file" => StreamMode::File,
         Some(Value::String(m)) if m == "record" => StreamMode::Record,
+        Some(Value::String(m)) if m == "meeting" => StreamMode::Meeting,
         // A mode from a newer phone page: answered `unsupported`, never taken for live.
         Some(_) => return Err(refuse(RejectReason::Unsupported)),
     };
-    // Live and record carry no file; a stray `file` on them is dropped.
+    // Live, record and meeting carry no file; a stray `file` on them is dropped.
     if mode != StreamMode::File {
         return Ok(StreamSignal::StreamRequest { session_id, device_label, mode, file: None });
     }
@@ -810,6 +819,39 @@ mod tests {
         for (phase, text) in [(RecordPhase::Processing, "processing"), (RecordPhase::Looping, "looping")] {
             assert_eq!(serde_json::to_value(phase).unwrap(), json!(text));
         }
+    }
+
+    #[test]
+    fn a_meeting_request_is_its_own_mode_and_never_live() {
+        let wire = json!({"kind":"stream_request","sessionId":"m1","deviceLabel":"Pixel","mode":"meeting"});
+        let sig = parse_signal(&wire).unwrap();
+        assert_eq!(
+            sig,
+            StreamSignal::StreamRequest { session_id: "m1".into(), device_label: Some("Pixel".into()), mode: StreamMode::Meeting, file: None }
+        );
+        assert_eq!(serde_json::to_value(&sig).unwrap(), wire);
+        // A stray `file` is dropped, as for live and record.
+        let with_file = json!({"kind":"stream_request","sessionId":"m1","deviceLabel":"Pixel","mode":"meeting","file":{"name":"x.mp4","size":1}});
+        assert_eq!(parse_signal(&with_file).unwrap(), sig);
+        for mode in ["Meeting", "MEETING", "meeting ", "meet", "screen"] {
+            assert_eq!(
+                parse_signal(&json!({"kind":"stream_request","sessionId":"f1","mode":mode})),
+                Err(SignalError::Refused { session_id: "f1".into(), reason: RejectReason::Unsupported }),
+                "{mode:?}"
+            );
+        }
+        // The status the phone gets: `mode: "meeting"`, a size only while a window is sent.
+        let sound_only = StreamSignal::Status {
+            session_id: "m1".into(),
+            state: LinkState::Live,
+            width: None,
+            height: None,
+            fps: None,
+            codec: None,
+            mode: Some(StreamMode::Meeting),
+            record: None,
+        };
+        assert_eq!(serde_json::to_value(&sound_only).unwrap(), json!({"kind":"status","sessionId":"m1","state":"live","mode":"meeting"}));
     }
 
     #[test]
