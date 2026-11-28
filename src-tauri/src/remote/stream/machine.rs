@@ -934,7 +934,11 @@ impl Machine {
                 };
                 // The phone hears when the take starts (its timer) and when it is being
                 // processed (it can stop its camera); the seconds in between it counts itself.
-                let tell = !s.take_told || self.status.record.as_ref().map(|r| r.phase) != Some(phase);
+                // A count that went backwards is a take that started over (the picture grew
+                // right after it began): the phone's timer starts over with it.
+                let before = self.status.record.as_ref().map(|r| (r.phase, r.elapsed_ms));
+                let restarted = matches!(before, Some((RecordPhase::Recording, ms)) if phase == RecordPhase::Recording && elapsed_ms < ms);
+                let tell = !s.take_told || before.map(|(p, _)| p) != Some(phase) || restarted;
                 s.take_told = true;
                 self.status.record = Some(RecordStatus::new(phase, elapsed_ms));
                 self.enter(Phase::Live);
@@ -2097,6 +2101,11 @@ mod tests {
         assert!(m.on_session_event(1, take(RecordStage::Recording, 4000), t).is_empty());
         assert_eq!(record_phase(&m), Some((RecordPhase::Recording, 4000)));
         assert!(m.loop_refused(), "the phone cannot steer the loop under a take");
+        // The take started over at a larger picture size: the phone's clock goes back too.
+        let a = m.on_session_event(1, take(RecordStage::Recording, 0), t);
+        let [Action::Send(OutboundFrame::Signal(StreamSignal::Status { record: Some(r), .. }))] = &a[..] else { panic!("{a:?}") };
+        assert_eq!((r.phase, r.elapsed_ms), (RecordPhase::Recording, 0));
+        assert!(m.on_session_event(1, take(RecordStage::Recording, 4000), t).is_empty());
 
         // The phone taps Stop: the take is finished, the session is not stopped.
         let a = m.on_remote_stop(stop_from_phone("r1"), t);

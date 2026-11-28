@@ -183,9 +183,17 @@ results.push(await scenario("no file card; hello once; Record off until hello_ok
   must((await text(page, "helloNote")) === "", "update note shown for a 3b computer");
   const h = ctl.hellos[0];
   must(ctl.hellos.length === 1 && h.appProtocol === 3 && /^[A-Za-z0-9_-]{16,64}$/.test(h.sessionId) && Object.keys(h).sort().join() === "appProtocol,kind,sessionId", "bad hello: " + JSON.stringify(ctl.hellos));
+  // Quality set to 480 for live: a take is the 720 preset all the same, locked against
+  // the encoder scaling the picture down (a size change would cut the take on the computer).
+  await page.click('#segQuality [data-v="480"]');
   if (!(await startTake(page))) return;
   must(/^REC 0:0\d \/ 1:00$/.test(await text(page, "chip")), "bad take clock: " + (await text(page, "chip")));
   must(await disabled(page, "btnSwitch"), "Switch camera enabled during a take");
+  const lock = await page.evaluate(() => {
+    const p = session.videoSender.getParameters(), e = (p.encodings || [])[0] || {};
+    return { quality: session.quality, degradation: p.degradationPreference, scale: e.scaleResolutionDownBy, maxBitrate: e.maxBitrate, hint: session.stream.getVideoTracks()[0].contentHint };
+  });
+  must(lock.quality === "720" && lock.degradation === "maintain-resolution" && lock.scale === 1 && lock.maxBitrate === 2500000 && lock.hint === "detail", "take quality not locked: " + JSON.stringify(lock));
   must(/while recording/.test(await text(page, "keepOpen")), "keep-open copy: " + (await text(page, "keepOpen")));
   must(await page.evaluate(() => !!document.getElementById("preview").srcObject), "no preview");
   const R = await ctl.desk.evaluate(() => window.R);

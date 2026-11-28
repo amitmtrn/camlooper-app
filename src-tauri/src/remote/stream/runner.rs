@@ -575,19 +575,42 @@ impl Recorder {
             eprintln!("phone recording: the take has started");
             let _ = events.send(SessionEvent::Record { stage: RecordStage::Recording, elapsed_ms: 0 });
             for f in &first {
-                if let TeeStep::Full = self.tee(f).await {
+                if let TeeStep::Full = self.tee(f, events).await {
                     return TeeStep::Full;
                 }
             }
             return TeeStep::Continue;
         }
-        self.tee(&frame).await
+        self.tee(&frame, events).await
     }
 
-    async fn tee(&mut self, frame: &TakeFrame) -> TeeStep {
+    async fn tee(&mut self, frame: &TakeFrame, events: &mpsc::UnboundedSender<SessionEvent>) -> TeeStep {
         match self.take.push(frame) {
             TakeStep::Skip => TeeStep::Continue,
             TakeStep::Full => TeeStep::Full,
+            // The picture grew just after the take started (the encoder's ramp outlasted
+            // the pre-roll): the take is the larger picture. The prelude is deleted, not
+            // muxed, and the take's clock — the cap, what the phone is shown — starts again.
+            TakeStep::Restart(bytes) => {
+                self.part = None; // deletes the prelude
+                let (w, h) = self.take.dims().unwrap_or((0, 0));
+                eprintln!("phone recording: the picture grew to {w}x{h}; the take starts again at that size");
+                let created = match record::create_take_file(&self.files.store).await {
+                    Ok(mut part) => part.write(&bytes).await.map(|()| part),
+                    Err(e) => Err(e),
+                };
+                match created {
+                    Ok(part) => self.part = Some(part),
+                    Err(e) => {
+                        eprintln!("phone recording: could not start the take file again: {e}");
+                        self.broken = true;
+                        return TeeStep::Continue;
+                    }
+                }
+                self.started = Some(Instant::now());
+                let _ = events.send(SessionEvent::Record { stage: RecordStage::Recording, elapsed_ms: 0 });
+                TeeStep::Continue
+            }
             TakeStep::Write(bytes) => {
                 let written = match self.part.as_mut() {
                     Some(part) => part.write(&bytes).await,
@@ -2706,7 +2729,7 @@ mod tests {
             return;
         }
         let mut booth = Booth::new(FakeLoop::default());
-        // Five seconds reach the decoder; the first second at most is pre-roll.
+        // Five seconds reach the decoder; the first second of them is the pre-roll.
         assert!(!booth.feed(h264_frames(150, THIRTY_FPS, Instant::now())).await);
         assert!(booth.rec.take.has_minimum());
         assert_eq!(booth.files().len(), 1, "the take is being teed into the store: {:?}", booth.files());
@@ -2746,10 +2769,60 @@ mod tests {
         assert!(((info.duration * 1000.0) as i64 - teed_ms as i64).abs() < 150, "{info:?} vs {teed_ms} ms");
     }
 
+    /// The encoder's ramp outlasts the pre-roll: the take starts at 320x180 and the stream
+    /// becomes 640x360 two and a half seconds in. The 180p prelude is deleted, the take is
+    /// the 360p picture alone, and its clock starts again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_take_that_grows_right_after_it_started_is_teed_again_at_the_larger_size() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let mut booth = Booth::new(FakeLoop::default());
+        let t0 = Instant::now();
+        // The fixture is 640x360 throughout; only what the stream says of itself differs.
+        let mut small = h264_frames(75, THIRTY_FPS, t0);
+        for f in &mut small {
+            f.dims = Some((320, 180));
+        }
+        booth.feed(small).await;
+        assert!(booth.rec.take.started(), "the pre-roll is over, the take runs at the small size");
+        assert_eq!(booth.rec.take.dims(), Some((320, 180)));
+        let prelude = booth.files();
+        assert_eq!(prelude.len(), 1);
+        let first_clock = booth.rec.started.expect("the take's clock runs");
+
+        let later = t0 + THIRTY_FPS * 75;
+        let mut large = h264_frames(120, THIRTY_FPS, later);
+        for f in &mut large {
+            f.rtp_ts = f.rtp_ts.wrapping_add(75 * 3000);
+        }
+        booth.feed(large).await;
+        assert_eq!(booth.rec.take.dims(), Some((640, 360)));
+        assert_eq!(booth.rec.take.frames(), 120, "the larger picture from its first keyframe, and nothing else");
+        let now = booth.files();
+        assert_eq!(now.len(), 1, "one take file: {now:?}");
+        assert_ne!(now, prelude, "the prelude was deleted, not appended to");
+        assert!(booth.rec.started.expect("still running") > first_clock, "the 60 s clock started again");
+        // The phone and the window were told twice that a take began, both times at zero.
+        let begun = booth.stages().iter().filter(|s| **s == (RecordStage::Recording, 0)).count();
+        assert_eq!(begun, 2);
+
+        assert_eq!(booth.finish(StopReason::User).await, (StopReason::Done, None));
+        let teed_ms = booth.rec.take.elapsed_ms();
+        assert!((3900..4000).contains(&teed_ms), "four seconds of the larger picture: {teed_ms}");
+        let loaded = booth.rec.loaded.clone().expect("loaded");
+        let info = crate::video_processor::probe_phone_video(loaded, "x.mp4".into(), PhoneContainer::IsoBmff, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert_eq!((info.width, info.height), (640, 360));
+        assert!(((info.duration * 1000.0) as i64 - teed_ms as i64).abs() < 150, "{info:?} vs {teed_ms} ms");
+    }
+
     #[tokio::test]
     async fn a_take_under_two_seconds_is_deleted_and_nothing_is_loaded() {
         let mut booth = Booth::new(FakeLoop::default());
-        // 2.5 s at the decoder: at least half a second of it is pre-roll.
+        // 2.5 s at the decoder: a second of it is the pre-roll.
         booth.feed(h264_frames(75, THIRTY_FPS, Instant::now())).await;
         assert!(booth.rec.take.started() && !booth.rec.take.has_minimum(), "{} ms", booth.rec.take.elapsed_ms());
         assert_eq!(booth.files().len(), 1);

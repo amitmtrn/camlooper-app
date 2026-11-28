@@ -7,13 +7,17 @@
 //!                                          [`PreRoll`]   [`Take`]               [`finalize`]
 //! ```
 //!
-//! * [`PreRoll`] — skip the encoder's bitrate ramp: the take starts on the second keyframe,
-//!   or on one asked for after [`PRE_ROLL`]; failing both, at [`PRE_ROLL_CAP`] it starts from
-//!   the last keyframe seen (the frames since then are held in memory for that).
+//! * [`PreRoll`] — skip the encoder's ramp. A WebRTC sender starts small (180p is common) and
+//!   steps the picture up over the first seconds, and one file holds one size: the take
+//!   starts once the incoming size has been the same for [`SETTLE`], or [`SETTLE_CAP`] after
+//!   the first keyframe, on a keyframe that is asked for then; failing that keyframe, from
+//!   the last one seen at that size (the frames since then are held in memory for that).
+//!   Nothing of an earlier, smaller size is kept.
 //! * [`Take`] — the tee file's bytes. The file is IVF for both codecs (`VP80`, or `H264`
 //!   with one Annex-B access unit per record — exactly what went to the decoder): IVF gives
 //!   every frame a timestamp, which a bare Annex-B stream cannot. Timestamps are the RTP
-//!   clock ([`TakeClock`]), falling back to arrival time where RTP makes no sense.
+//!   clock ([`TakeClock`]), falling back to arrival time where RTP makes no sense. A take
+//!   whose picture grows within [`RESTART_WINDOW`] starts over at the larger size.
 //! * [`finalize`] — the existing ffmpeg sidecar copies the take (`-c copy`, no re-encode)
 //!   into the container the loader already accepts for that codec: MP4 for H.264, WebM for
 //!   VP8. The result is sniffed like any phone video, fsynced and renamed into place.
@@ -35,11 +39,17 @@ use crate::pipeline::{self, EncodedCodec};
 pub const MIN_TAKE_MS: u64 = 2000;
 /// The take is finalized at this length whatever the phone does.
 pub const RECORD_CAP: Duration = Duration::from_millis(RECORD_CAP_MS);
-/// The take does not start before the stream has been live this long (or a second keyframe
-/// came sooner)…
-pub const PRE_ROLL: Duration = Duration::from_millis(500);
-/// …and starts at this point at the latest.
-pub const PRE_ROLL_CAP: Duration = Duration::from_secs(1);
+/// The take does not start before the incoming picture size has been unchanged this long…
+pub const SETTLE: Duration = Duration::from_secs(1);
+/// …or the stream has been live this long, whichever comes first.
+pub const SETTLE_CAP: Duration = Duration::from_secs(3);
+/// Once the size has settled a keyframe is asked for; without one after this long the take
+/// starts from the last keyframe of that size.
+pub const KEYFRAME_WAIT: Duration = Duration::from_millis(500);
+/// A take whose picture grows while it is younger than this starts over at the larger size
+/// (the ramp outlasted the pre-roll). Later, the take keeps its size and frames of another
+/// are left out: a camera switch must not throw a long take away.
+pub const RESTART_WINDOW: Duration = Duration::from_secs(3);
 /// Frames held in memory during the pre-roll are bounded by time; this bounds them by size
 /// as well.
 const PRE_ROLL_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -97,25 +107,40 @@ pub enum PreRollStep {
 #[derive(Debug)]
 pub struct PreRoll {
     started: Instant,
-    keyframes: u32,
-    /// The frames since the last keyframe, that keyframe first.
+    /// The picture size of the stream now, and when it became that.
+    size: Option<(u32, u32)>,
+    size_since: Instant,
+    /// The frames since the last keyframe, that keyframe first; all of the current size.
     held: Vec<TakeFrame>,
     held_bytes: usize,
-    asked: bool,
+    /// When the keyframe for the settled size was asked for.
+    asked: Option<Instant>,
 }
 
 impl PreRoll {
     /// `now`: when the stream went live.
     pub fn new(now: Instant) -> Self {
-        Self { started: now, keyframes: 0, held: Vec::new(), held_bytes: 0, asked: false }
+        Self { started: now, size: None, size_since: now, held: Vec::new(), held_bytes: 0, asked: None }
     }
 
     /// A frame was written to the decoder (the one that made the stream live included).
     pub fn push(&mut self, frame: TakeFrame) -> PreRollStep {
-        let elapsed = frame.arrived.saturating_duration_since(self.started);
+        let now = frame.arrived;
+        if let Some(dims) = frame.dims {
+            if self.size.is_some_and(|size| size != dims) {
+                // The encoder stepped the picture up (or down): the wait starts again, and
+                // nothing of the old size is kept or asked for.
+                self.size_since = now;
+                self.held.clear();
+                self.held_bytes = 0;
+                self.asked = None;
+            }
+            self.size = Some(dims);
+        }
+        let settled = now.saturating_duration_since(self.size_since) >= SETTLE
+            || now.saturating_duration_since(self.started) >= SETTLE_CAP;
         if frame.keyframe {
-            self.keyframes += 1;
-            if self.keyframes >= 2 || elapsed >= PRE_ROLL {
+            if settled {
                 self.held.clear();
                 return PreRollStep::Start(vec![frame]);
             }
@@ -123,27 +148,34 @@ impl PreRoll {
             self.held = vec![frame];
             return PreRollStep::Wait;
         }
-        // Without a keyframe to start from there is nothing to hold on to (the decoder
-        // only takes a stream that starts with one, so this does not happen).
-        let Some(first) = self.held.first() else { return self.ask(elapsed) };
-        if first.codec != frame.codec {
-            self.held.clear();
-            return self.ask(elapsed);
+        // Without a keyframe to start from there is nothing to hold on to (the decoder only
+        // takes a stream that starts with one; this is the rest of a GOP of another size).
+        match self.held.first() {
+            Some(first) if first.codec == frame.codec => {
+                self.held_bytes += frame.data.len();
+                self.held.push(frame);
+            }
+            _ => {
+                self.held.clear();
+                self.held_bytes = 0;
+            }
         }
-        self.held_bytes += frame.data.len();
-        self.held.push(frame);
-        if elapsed >= PRE_ROLL_CAP || self.held_bytes >= PRE_ROLL_MAX_BYTES {
+        if self.held_bytes >= PRE_ROLL_MAX_BYTES {
             return PreRollStep::Start(std::mem::take(&mut self.held));
         }
-        self.ask(elapsed)
-    }
-
-    fn ask(&mut self, elapsed: Duration) -> PreRollStep {
-        if elapsed >= PRE_ROLL && !self.asked {
-            self.asked = true;
-            return PreRollStep::WantKeyframe;
+        if !settled {
+            return PreRollStep::Wait;
         }
-        PreRollStep::Wait
+        match self.asked {
+            None => {
+                self.asked = Some(now);
+                PreRollStep::WantKeyframe
+            }
+            Some(asked) if now.saturating_duration_since(asked) >= KEYFRAME_WAIT && !self.held.is_empty() => {
+                PreRollStep::Start(std::mem::take(&mut self.held))
+            }
+            Some(_) => PreRollStep::Wait,
+        }
     }
 }
 
@@ -185,6 +217,9 @@ impl TakeClock {
 pub enum TakeStep {
     /// Append these bytes to the tee file.
     Write(Vec<u8>),
+    /// The picture grew while the take was young: what was written so far is the encoder's
+    /// ramp. Delete it and start the file (and the take's clock) again with these bytes.
+    Restart(Vec<u8>),
     /// Not part of the take (it does not start on a keyframe, or the stream changed codec
     /// or size and has not come back).
     Skip,
@@ -239,6 +274,8 @@ pub struct Take {
     bytes: u64,
     last_pts: u64,
     stalled: u64,
+    /// When the take's first frame arrived.
+    began: Option<Instant>,
     /// The stream is not the take's any more (codec or size changed): wait for a keyframe
     /// of the original kind.
     skipping: bool,
@@ -271,21 +308,24 @@ impl Take {
             if !f.keyframe {
                 return TakeStep::Skip;
             }
-            self.codec = Some(f.codec);
-            self.dims = f.dims;
-            let (w, h) = f.dims.unwrap_or((0, 0));
-            let mut out = Vec::with_capacity(32 + 12 + f.data.len());
-            out.extend_from_slice(&take_header(f.codec, w, h));
-            let pts = self.clock.stamp(f.rtp_ts, f.arrived);
-            return self.record(out, pts, &f.data);
+            return TakeStep::Write(self.begin(f));
         };
-        // A camera switch or an encoder that restarted at another size: one file holds one
-        // size, so those frames stay out until the original stream is back.
+        // One file holds one size.
         let same_size = match (self.dims, f.dims) {
             (Some(a), Some(b)) => a == b,
             _ => true,
         };
         if f.codec != codec || !same_size {
+            // Larger, and the take has only just begun: the encoder was still stepping the
+            // picture up. The take is the larger picture, from its first keyframe.
+            let grew = matches!((self.dims, f.dims), (Some(a), Some(b)) if area(b) > area(a));
+            let young = self.began.is_some_and(|t| f.arrived.saturating_duration_since(t) < RESTART_WINDOW);
+            if f.codec == codec && grew && young && f.keyframe {
+                *self = Take::default();
+                return TakeStep::Restart(self.begin(f));
+            }
+            // Otherwise (a camera switch, an encoder that restarted at another size late in
+            // the take) those frames stay out until the original stream is back.
             self.skipping = true;
             return TakeStep::Skip;
         }
@@ -306,17 +346,34 @@ impl Take {
         if step > STALL_TICKS {
             self.stalled += step;
         }
-        self.record(Vec::with_capacity(12 + f.data.len()), pts, &f.data)
+        TakeStep::Write(self.record(Vec::with_capacity(12 + f.data.len()), pts, &f.data))
     }
 
-    fn record(&mut self, mut out: Vec<u8>, pts: u64, data: &[u8]) -> TakeStep {
+    /// The file's header and first record: `f` is the keyframe the take starts on.
+    fn begin(&mut self, f: &TakeFrame) -> Vec<u8> {
+        self.codec = Some(f.codec);
+        self.dims = f.dims;
+        self.began = Some(f.arrived);
+        let (w, h) = f.dims.unwrap_or((0, 0));
+        let mut out = Vec::with_capacity(32 + 12 + f.data.len());
+        out.extend_from_slice(&take_header(f.codec, w, h));
+        let pts = self.clock.stamp(f.rtp_ts, f.arrived);
+        self.record(out, pts, &f.data)
+    }
+
+    /// The size the take was started at.
+    pub fn dims(&self) -> Option<(u32, u32)> {
+        self.dims
+    }
+
+    fn record(&mut self, mut out: Vec<u8>, pts: u64, data: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
         out.extend_from_slice(&pts.to_le_bytes());
         out.extend_from_slice(data);
         self.frames += 1;
         self.bytes += out.len() as u64;
         self.last_pts = pts;
-        TakeStep::Write(out)
+        out
     }
 
     /// Whether what was teed is worth looping. A little loss is fine; a take that never
@@ -333,6 +390,10 @@ impl Take {
         }
         Ok(TakeSummary { codec, frames: self.frames, duration_ms: self.elapsed_ms(), bytes: self.bytes })
     }
+}
+
+fn area((w, h): (u32, u32)) -> u64 {
+    w as u64 * h as u64
 }
 
 /// The take file's IVF header: like [`super::media::ivf_header`] (timebase 1/90000), with
@@ -558,7 +619,9 @@ mod tests {
         (0..n).map(|i| frame(key(i), t0 + FRAME * i, i * 3000)).collect()
     }
 
-    fn started_at(frames: Vec<TakeFrame>, t0: Instant) -> (usize, usize, u32) {
+    /// Where the take started: the index of the frame that started it, the frames it started
+    /// with, and how often a keyframe was asked for.
+    fn started_at(frames: Vec<TakeFrame>, t0: Instant) -> (usize, Vec<TakeFrame>, u32) {
         let mut pre = PreRoll::new(t0);
         let mut asked = 0;
         for (i, f) in frames.into_iter().enumerate() {
@@ -567,45 +630,100 @@ mod tests {
                 PreRollStep::WantKeyframe => asked += 1,
                 PreRollStep::Start(first) => {
                     assert!(first[0].keyframe, "a take starts on a keyframe");
-                    return (i, first.len(), asked);
+                    return (i, first, asked);
                 }
             }
         }
         panic!("the take never started");
     }
 
+    /// A frame of `dims` at `ms` after `t0`.
+    fn sized(key: bool, t0: Instant, ms: u64, dims: (u32, u32)) -> TakeFrame {
+        TakeFrame { dims: Some(dims), ..frame(key, t0 + Duration::from_millis(ms), (ms * 90) as u32) }
+    }
+
+    /// 30 fps from `from_ms` up to `to_ms`, all of `dims`; keyframes at the listed times
+    /// (rounded to a frame).
+    fn stretch(t0: Instant, from_ms: u64, to_ms: u64, dims: (u32, u32), keys: &[u64]) -> Vec<TakeFrame> {
+        (from_ms / 33..to_ms / 33).map(|i| sized(keys.iter().any(|k| k / 33 == i), t0, i * 33, dims)).collect()
+    }
+
+    const P180: (u32, u32) = (320, 180);
+    const P270: (u32, u32) = (480, 270);
+    const P720: (u32, u32) = (1280, 720);
+
     #[test]
     fn the_constants_are_the_specified_ones() {
         assert_eq!(MIN_TAKE_MS, 2000);
         assert_eq!(RECORD_CAP, Duration::from_secs(60));
-        assert_eq!((PRE_ROLL, PRE_ROLL_CAP), (Duration::from_millis(500), Duration::from_secs(1)));
+        assert_eq!((SETTLE, SETTLE_CAP, RESTART_WINDOW), (Duration::from_secs(1), Duration::from_secs(3), Duration::from_secs(3)));
         assert_eq!(INCOMPLETE, "The recording was too incomplete to loop. Try again.");
     }
 
     #[test]
-    fn the_take_starts_on_the_second_keyframe_when_one_comes_early() {
+    fn a_steady_stream_starts_on_the_keyframe_asked_for_after_one_second() {
         let t0 = Instant::now();
-        // Keyframes at 0 and at 200 ms: no need to wait out the 500 ms.
-        let (at, len, asked) = started_at(run(t0, 60, |i| i == 0 || i == 6), t0);
-        assert_eq!((at, len, asked), (6, 1, 0));
+        // A second keyframe at 200 ms is too early to tell that the size will stay. The one
+        // at 1.2 s is the answer to the request made at 1 s.
+        let (at, first, asked) = started_at(run(t0, 90, |i| i == 0 || i == 6 || i == 36), t0);
+        assert_eq!((at, first.len(), asked), (36, 1, 1));
     }
 
     #[test]
-    fn after_the_pre_roll_a_keyframe_is_asked_for_once_and_starts_the_take() {
+    fn without_the_keyframe_the_take_starts_from_the_last_one_of_that_size() {
         let t0 = Instant::now();
-        // The only other keyframe comes at 700 ms (the answer to the request made at 500 ms).
-        let (at, len, asked) = started_at(run(t0, 60, |i| i == 0 || i == 21), t0);
-        assert_eq!((at, len, asked), (21, 1, 1));
-    }
-
-    #[test]
-    fn without_a_second_keyframe_the_take_starts_at_the_cap_from_the_first() {
-        let t0 = Instant::now();
-        let (at, len, asked) = started_at(run(t0, 90, |i| i == 0), t0);
-        // 1 s is frame 30 (30 × 33.333 ms is a hair under; 31 is the first at or past it).
-        assert!((30..=31).contains(&at), "{at}");
-        assert_eq!(len, at + 1, "everything since the keyframe, so the file starts decodable");
+        let (at, first, asked) = started_at(run(t0, 90, |i| i == 0 || i == 6), t0);
+        // Asked at 1 s, given up on half a second later (frame 46 is the first past 1.5 s).
+        assert!((45..=47).contains(&at), "{at}");
+        assert_eq!(first.len(), at + 1 - 6, "everything since the last keyframe, so the file starts decodable");
         assert_eq!(asked, 1);
+    }
+
+    /// The bug this pre-roll is for: a sender that starts at 180p and steps up. The take
+    /// must be the picture the stream settles on, with nothing of the ramp in it.
+    #[test]
+    fn the_take_waits_for_the_resolution_ramp_to_settle() {
+        let t0 = Instant::now();
+        let mut frames = stretch(t0, 0, 600, P180, &[0]);
+        frames.extend(stretch(t0, 600, 1400, P270, &[600]));
+        // 720p from 1.4 s; it has been that for a second at 2.4 s, the keyframe comes at 2.5 s.
+        frames.extend(stretch(t0, 1400, 6000, P720, &[1400, 2500]));
+        let (at, first, asked) = started_at(frames.clone(), t0);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].dims, Some(P720));
+        assert_eq!(first[0].arrived, frames[at].arrived);
+        let started_ms = first[0].arrived.duration_since(t0).as_millis();
+        assert!((2450..2550).contains(&started_ms), "{started_ms}");
+        assert_eq!(asked, 1, "one request, once the size had settled; none for the sizes that came and went");
+    }
+
+    #[test]
+    fn a_ramp_without_the_keyframe_starts_from_the_first_frame_of_the_settled_size() {
+        let t0 = Instant::now();
+        let mut frames = stretch(t0, 0, 700, P180, &[0, 400]);
+        frames.extend(stretch(t0, 700, 6000, P720, &[700]));
+        let (_, first, asked) = started_at(frames, t0);
+        // Settled at 1.7 s, asked, started at 2.2 s from the 720p keyframe at 0.7 s.
+        assert!(first.iter().all(|f| f.dims == Some(P720)), "no frame of the 180p prelude is in the take");
+        assert_eq!(first[0].arrived.duration_since(t0).as_millis() / 33, 700 / 33);
+        let held_ms = first.last().unwrap().arrived.duration_since(t0).as_millis();
+        assert!((2150..2300).contains(&held_ms), "{held_ms}");
+        assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn a_size_that_never_settles_starts_the_take_three_seconds_in() {
+        let t0 = Instant::now();
+        // A new size every 800 ms, each with its keyframe.
+        let sizes = [P180, P270, (640, 360), (848, 480), (960, 540), P720, (1920, 1080)];
+        let frames: Vec<TakeFrame> =
+            sizes.iter().enumerate().flat_map(|(n, d)| stretch(t0, n as u64 * 800, (n as u64 + 1) * 800, *d, &[n as u64 * 800])).collect();
+        let (_, first, _) = started_at(frames, t0);
+        // 3 s falls into the 2.4–3.2 s stretch (848x480): a keyframe is asked for, and the
+        // one that comes is the next size's, at 3.2 s.
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].dims, Some((960, 540)));
+        assert_eq!(first[0].arrived.duration_since(t0).as_millis() / 33, 3200 / 33);
     }
 
     #[test]
@@ -736,6 +854,91 @@ mod tests {
         assert!(matches!(take.push(&next(true, big, EncodedCodec::Vp8)), TakeStep::Write(_)));
         assert!(matches!(take.push(&next(false, big, EncodedCodec::Vp8)), TakeStep::Write(_)));
         assert_eq!(take.frames(), 4);
+    }
+
+    fn header_dims(bytes: &[u8]) -> (u32, u32) {
+        assert_eq!(&bytes[..4], b"DKIF", "a new file starts with a header");
+        (u16::from_le_bytes([bytes[12], bytes[13]]) as u32, u16::from_le_bytes([bytes[14], bytes[15]]) as u32)
+    }
+
+    /// The ramp outlasted the pre-roll: the take had started at 180p when 270p came. What
+    /// was teed is thrown away and the take — file, clock, frame count — starts again.
+    #[test]
+    fn a_take_whose_picture_grows_in_its_first_three_seconds_starts_over() {
+        let t0 = Instant::now();
+        let mut take = Take::new();
+        let small: Vec<TakeFrame> = stretch(t0, 0, 2000, P180, &[0]);
+        for f in &small {
+            assert!(matches!(take.push(f), TakeStep::Write(_)));
+        }
+        assert_eq!((take.frames(), take.dims()), (small.len() as u64, Some(P180)));
+        assert!(take.elapsed_ms() > 1900);
+        // The rest of a larger GOP is of no use; its keyframe is where the take restarts.
+        assert_eq!(take.push(&sized(false, t0, 2000, P270)), TakeStep::Skip);
+        let restarted = match take.push(&sized(true, t0, 2033, P270)) {
+            TakeStep::Restart(bytes) => bytes,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(header_dims(&restarted), P270);
+        assert_eq!(u64::from_le_bytes(restarted[36..44].try_into().unwrap()), 0, "the new take's own zero");
+        assert_eq!((take.frames(), take.elapsed_ms(), take.dims()), (1, 0, Some(P270)));
+        assert_eq!(take.verdict(), Err(TakeFault::TooShort), "the two seconds of prelude do not count");
+        // And once more, to 720p, one second into the second attempt.
+        assert!(matches!(take.push(&sized(false, t0, 2066, P270)), TakeStep::Write(_)));
+        let again = match take.push(&sized(true, t0, 3033, P720)) {
+            TakeStep::Restart(bytes) => bytes,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(header_dims(&again), P720);
+        // From here it is an ordinary take of 61 s: full at 60 s of its own clock.
+        let mut file = again;
+        let mut full_at = None;
+        for i in 1..=610u64 {
+            match take.push(&sized(false, t0, 3033 + i * 100, P720)) {
+                TakeStep::Write(bytes) => file.extend(bytes),
+                TakeStep::Full => {
+                    full_at = Some(i);
+                    break;
+                }
+                other => panic!("frame {i}: {other:?}"),
+            }
+        }
+        assert_eq!(full_at, Some(601), "60 s from the restart, not from the first attempt");
+        assert_eq!(take_payloads(&file).len(), 601);
+        assert_eq!(take.verdict().expect("a full take").duration_ms, 60_000);
+    }
+
+    #[test]
+    fn after_three_seconds_a_larger_picture_does_not_restart_the_take() {
+        let t0 = Instant::now();
+        let mut take = Take::new();
+        for f in &stretch(t0, 0, 3100, P270, &[0]) {
+            assert!(matches!(take.push(f), TakeStep::Write(_)));
+        }
+        let teed = take.frames();
+        // A camera switch to a sharper camera, 3.1 s in: today's behaviour, the take is kept.
+        assert_eq!(take.push(&sized(true, t0, 3100, P720)), TakeStep::Skip);
+        assert_eq!(take.push(&sized(false, t0, 3133, P720)), TakeStep::Skip);
+        assert_eq!((take.frames(), take.dims()), (teed, Some(P270)));
+        // Back at its own size it goes on, from a keyframe.
+        assert_eq!(take.push(&sized(false, t0, 3166, P270)), TakeStep::Skip);
+        assert!(matches!(take.push(&sized(true, t0, 3200, P270)), TakeStep::Write(_)));
+        assert_eq!(take.frames(), teed + 1);
+    }
+
+    #[test]
+    fn a_smaller_picture_or_another_codec_never_restarts_the_take() {
+        let t0 = Instant::now();
+        let mut take = Take::new();
+        assert!(matches!(take.push(&sized(true, t0, 0, P720)), TakeStep::Write(_)));
+        assert!(matches!(take.push(&sized(false, t0, 33, P720)), TakeStep::Write(_)));
+        // The encoder steps down for a moment (congestion): the 720p take is not traded in.
+        assert_eq!(take.push(&sized(true, t0, 500, P270)), TakeStep::Skip);
+        // A larger picture in another codec is another stream altogether.
+        let other = TakeFrame { codec: EncodedCodec::H264, ..sized(true, t0, 600, (1920, 1080)) };
+        assert_eq!(take.push(&other), TakeStep::Skip);
+        assert!(matches!(take.push(&sized(true, t0, 700, P720)), TakeStep::Write(_)));
+        assert_eq!((take.frames(), take.dims()), (3, Some(P720)));
     }
 
     #[test]

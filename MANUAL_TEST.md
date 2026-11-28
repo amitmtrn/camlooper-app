@@ -103,7 +103,9 @@ computer: the file card is never visible; `hello` is sent once with `appProtocol
 a loop is disabled until `hello_ok` (appProtocol ≥ 3 with `record`), and with no answer in
 5 s / an old answer the page shows "Update CamLooper on your computer to record a loop." and
 sends no request; `stream_request` carries `mode: "record"`; `REC 0:0x / 1:00`; Switch camera
-disabled; Stop sends `stream_stop{user}`; the phone stops by itself at 1:00; too-short,
+disabled; with Quality set to 480 a take is still the 720 preset, sent with
+`scaleResolutionDownBy: 1`, `maxBitrate` 2500000 and `degradationPreference:
+"maintain-resolution"`; Stop sends `stream_stop{user}`; the phone stops by itself at 1:00; too-short,
 failed, cancelled-on-the-computer, declined / busy / timeout / unsupported messages; Stop
 loop / Play loop afterwards. What is left for eyes is below.
 
@@ -174,7 +176,7 @@ on Linux).
 - The desktop strings in the 17 non-English locales are machine translated.
 
 ### Record a loop on the phone (remote v2, phase 3b): what the computer does with the take
-_Added 2026-11-28 · All · `src-tauri/src/remote/stream/record.rs`, `runner.rs`, `machine.rs`, `signal.rs`, `handoff.rs`_
+_Added 2026-11-28, resolution ramp (step 3's size check) added the same day · All · `src-tauri/src/remote/stream/record.rs`, `runner.rs`, `machine.rs`, `signal.rs`, `handoff.rs`_
 
 The computer's half of "Record a loop": while the phone's camera is live on the virtual
 camera, the same video is saved to a private file; on Stop it is repackaged (not re-encoded)
@@ -188,7 +190,10 @@ answered `unsupported`; a real WebRTC stream (H.264 and VP8) recorded, remuxed t
 with the take's duration, handed to the loop engine, `stream_stop{done}`, and the loop
 outliving the phone; the 2 s minimum (`too_short`, file deleted); the 60 s cap; cancel while
 processing; a take that is mostly stalls or that the loader refuses (`incomplete`, file
-deleted, the earlier loop restored); and the real loop engine playing a recorded take.
+deleted, the earlier loop restored); the real loop engine playing a recorded take; and the
+encoder's resolution ramp — the take waits until the picture size has been the same for 1 s
+(3 s at most), keeps nothing of a smaller prelude, and starts over if the picture still
+grows in its first 3 s (`record::tests`, `runner::tests::a_take_that_grows_…`).
 
 **Setup:** as in the entry above. A camera viewer on the computer. On Linux, a terminal
 ready with `ls -la ~/.local/share/com.camlooper.app/phone-videos/` (Windows:
@@ -200,7 +205,8 @@ it is `phone-videos` inside the app's data folder.
 2. Wave a hand in front of the phone for about 10 seconds while watching the camera viewer,
    and list the `phone-videos` folder during that time.
 3. Tap **Stop** on the phone. When the phone says "Looping on your computer now", list the
-   folder again and watch the viewer for 30 seconds.
+   folder again and watch the viewer for 30 seconds. Then, on Linux:
+   `ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of csv=p=0 ~/.local/share/com.camlooper.app/phone-videos/phone-*.mp4`
 4. Turn the phone's Wi-Fi off (or close the app). Watch the viewer for another 30 seconds.
 5. In CamLooper, load a video from the computer with the file picker. List the folder.
 6. Record again, and after 5 seconds turn the phone's Wi-Fi off instead of tapping Stop.
@@ -211,11 +217,15 @@ it is `phone-videos` inside the app's data folder.
   stutter from the recording. The folder holds exactly one file, `phone-<16 hex>.part`,
   growing.
 - Step 3: within a few seconds the viewer switches from the live picture to the take. It
-  shows the hand-waving from about half a second after "live" up to the Stop, plays past its
+  shows the hand-waving from about a second after "live" up to the Stop, plays past its
   own length without a freeze or jump back to a black frame (natural motion), and the
   picture is as sharp as the live one was (it is the same video, not a re-encode). The
   folder holds exactly one file, `phone-<16 hex>.mp4` (`.webm` if the phone sent VP8); no
-  `.part`. The video card in CamLooper shows "Phone recording.mp4".
+  `.part`. The video card in CamLooper shows "Phone recording.mp4". The `ffprobe` line
+  prints `1280,720` (or `720,1280` for a phone held upright; the camera's own 16:9 size if
+  it has no 720p) and a duration within about 2 seconds of how long you filmed — not
+  `320,180` and not a 5-second clip of a 10-second take, which is what a take cut short by
+  the encoder's ramp looked like.
 - Step 4: nothing changes in the viewer. No error appears in CamLooper.
 - Step 5: the folder is empty.
 - Step 6: within about 15 seconds the recording banner disappears, as it does for a live
@@ -224,8 +234,15 @@ it is `phone-videos` inside the app's data folder.
   folder is empty.
 
 **Known gotchas:**
-- The loop starts about half a second into what the phone filmed: the first moments, while
-  the phone's encoder is still ramping up its quality, are skipped on purpose.
+- The loop starts about a second into what the phone filmed (up to 3.5 s on a phone or
+  network that keeps changing the picture size): the first moments, while the phone's
+  encoder is still ramping up its quality, are skipped on purpose. The REC clock on the
+  phone starts when the take does, so it is not behind.
+- If the REC clock on the phone jumps back to 0:00 once in the first 3 seconds, the picture
+  grew just after the take had started and the take was started again at the larger size.
+  The terminal the app runs in says "the picture grew to WxH; the take starts again".
+- On a bad network a take may look choppier than a live stream at the same moment: a take
+  keeps its size and gives up frames, a live stream does the opposite.
 - If the phone films at a low frame rate (a dark room), the loop has that frame rate too.
 - A take stopped under 2 seconds leaves no error on the computer at all — the message is on
   the phone.
@@ -927,7 +944,7 @@ builds them).
 <!-- Newest entries first. -->
 
 ### Headless CLI: record a loop from the phone (remote v2, phase 3b)
-_Added 2026-11-28 · Linux · `src-tauri/examples/phone_stream_cli.rs`, `src-tauri/src/remote/stream/record.rs`_
+_Added 2026-11-28, exit on SIGINT / SIGTERM and the size check added the same day · Linux · `src-tauri/examples/phone_stream_cli.rs`, `src-tauri/src/remote/stream/record.rs`_
 
 `phone_stream_cli` accepts the phone page's "Record a loop" by itself and runs the app's own
 path: live to `--device`, the take teed into its private temp folder, remuxed, and looped by
@@ -943,8 +960,10 @@ showing a 6-digit code, `cargo build --example phone_stream_cli` in `src-tauri/`
 3. On the phone tap **Record a loop**, film for about 8 seconds, tap **Stop**.
 4. Close the phone page (or turn its Wi-Fi off). Keep watching ffplay for 20 seconds.
 5. `ls /tmp/camlooper-cli-*/phone-videos/`, then
-   `ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/camlooper-cli-*/phone-videos/phone-*.mp4`
+   `ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of csv=p=0 /tmp/camlooper-cli-*/phone-videos/phone-*.mp4`
 6. Press Ctrl-C in the first terminal, then `ls -d /tmp/camlooper-cli-* 2>/dev/null; grep -vc '^{' /tmp/cli.jsonl`.
+7. Run steps 1 and 3 again, and when the `loop` lines are coming, from another terminal:
+   `pkill -TERM -f examples/phone_stream_cli; sleep 2; pgrep -f examples/phone_stream_cli; tail -3 /tmp/cli.jsonl`
 
 **Expected:**
 - Step 1: `{"event":"connected","protocol":2,"appProtocol":3}`; the phone's Record a loop
@@ -960,12 +979,21 @@ showing a 6-digit code, `cargo build --example phone_stream_cli` in `src-tauri/`
   and from then on one `{"event":"loop","playing":true,…}` line per second. ffplay shows the
   take, moving.
 - Step 4: the `loop` lines and the picture in ffplay go on unchanged; the CLI does not exit.
-- Step 5: exactly one file, `phone-<16 hex>.mp4`; the duration printed is within half a
-  second of the `elapsedMs` of the `processing` line.
-- Step 6: `{"event":"cleanup","deleted":1,"dirRemoved":true,"loopStopped":true,…}`,
+- Step 5: exactly one file, `phone-<16 hex>.mp4`; `ffprobe` prints the size of the last
+  `status` lines of the take (`1280,720` from a phone on a normal network — not `320,180`)
+  and a duration within half a second of the `elapsedMs` of the `processing` line.
+- Step 6: `{"event":"signal","signal":"SIGINT"}`, then within a second
+  `{"event":"cleanup","deleted":1,"dirRemoved":true,"loopStopped":true,…}`,
   `unpaired`, exit status 0; the `ls` prints nothing and the `grep` prints `0`.
+- Step 7: `pgrep` prints nothing; the last lines are `{"event":"signal","signal":"SIGTERM"}`,
+  `cleanup` and `unpaired`.
 
 **Known gotchas:**
+- `recording` comes one to two seconds after `live` (the take waits for the picture size to
+  settle), and `"elapsedMs"` counts from there: an 8-second film gives about 7 s.
+- A harness that stops reading the CLI's stdout stalls the CLI on its next JSON line until
+  it reads again (it is a pipe). A signal sent meanwhile is acted on as soon as the CLI
+  runs again; before this fix it was lost, and the CLI then never exited.
 - Tapping Stop less than 2 seconds into the take prints no `processing`; the phone is sent
   `stream_stop(too_short)`, the temp folder is empty again, and the CLI keeps running until
   `--seconds` (as after a file session), so the phone can try again.

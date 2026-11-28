@@ -129,6 +129,11 @@ declined request costs the phone no camera start.
   sooner: `sender.setParameters()` with `encodings[0].maxBitrate ≈ 2_500_000` and
   `degradationPreference: "maintain-resolution"` (or `"balanced"`), and
   `track.contentHint = "motion"`.
+- `mode: "record"`: lock the picture instead. Capture the 720 preset (1280x720 @ 30) whatever
+  the user's live quality is, and on the sender set `encodings[0].scaleResolutionDownBy = 1`,
+  the preset's `maxBitrate`, and `degradationPreference: "maintain-resolution"`
+  (`track.contentHint = "detail"` where that cannot be set), so that a bad network costs
+  frames and not size. No camera switch during a take.
 - Portrait video is fine: the desktop letterboxes it into the camera's 16:9 frame.
 - Send `stream_stop{sessionId, reason:"user"}` when the user stops, and before the page is
   hidden or closed (`pagehide`). Always include `sessionId`. Closing the `RTCPeerConnection`
@@ -186,7 +191,8 @@ phone                                                             desktop
 | What | Rule |
 |---|---|
 | Confirm dialog | the same Accept / Decline / 60 s / busy / cooldown rules as `live`; the request the UI gets carries `mode: "record"` |
-| Pre-roll | the take starts after the stream has been live 500 ms (the desktop asks for a keyframe then and starts on it), or on a second keyframe if one comes sooner; at 1 s at the latest, from the last keyframe seen. The first `status` that carries `record` marks the start: `elapsedMs` counts from there |
+| Pre-roll | a WebRTC sender starts small and steps the picture up, and a take is one size. The take starts once the incoming picture size has been unchanged for 1 s, or 3 s after the stream went live, whichever is first: the desktop asks for a keyframe then and starts on it (after 500 ms without one, from the last keyframe of that size). Nothing of an earlier, smaller size is kept. The first `status` that carries `record` marks the start: `elapsedMs` counts from there |
+| Size change during the take | larger, less than 3 s into the take: the take starts over at the larger size (the smaller prelude is deleted, `elapsedMs` goes back to 0, the 60 s cap counts from there). Otherwise the take keeps its size and frames of another size are left out until the stream is back at it |
 | Cap | 60 s of take (`capMs`). The desktop finalizes then, whether or not the phone has stopped |
 | Minimum | `MIN_TAKE_MS` = 2000 ms of teed media |
 | The phone's `stream_stop`, the desktop's Stop / Cancel, or the phone closing the connection, **during the take** | ≥ 2 s teed: the take is finalized and looped; the session ends with `stream_stop{done}` from the desktop (also when it was the phone that stopped) followed by `loop_status`. < 2 s: the partial file is deleted and nothing loops; after the phone's stop the desktop answers `stream_stop{too_short}`, after its own it sends `stream_stop{user}`. Neither is an error on the desktop |

@@ -9,7 +9,7 @@
      on *.trycloudflare.com ('self' does not cover wss: in every browser, hence the explicit host).
      script-src hash = the inline script element; dev/update-csp.mjs recomputes it, dev/selftest.mjs checks it.
      frame-ancestors is ignored in <meta>: production must send it (or X-Frame-Options) as a header. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-YVEf53jv9N0wEwvv1ThHsKTj34TNTeqRtcSXGtCD8JI='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-bvGCXhjPe+QhzmUkezhcX3nRWQWXE42YZG2ug+/3VnM='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex">
 <title>CamLooper Remote</title>
 <style>
@@ -1079,7 +1079,8 @@ async function startStreaming(mode = "live") {
 
   const s = session = {
     record, takeAt: 0, takeMs: 0,
-    id: randomId(), facing, quality, stream: null, pc: null, live: false, ended: false,
+    // A take is always the 720 preset (1280x720 @ 30), whatever Quality says for live.
+    id: randomId(), facing, quality: record ? "720" : quality, stream: null, pc: null, live: false, ended: false,
     timers: {}, pendingRemote: [], localQueue: [], offerSent: false, iceOk: false,
     startedAt: 0, prevStats: null, phase: "camera", switching: false, reacquiring: false,
   };
@@ -1105,7 +1106,9 @@ async function startStreaming(mode = "live") {
   if (session !== s || s.ended) { stream.getTracks().forEach((t) => t.stop()); return; }
   s.stream = stream;
   const vt = stream.getVideoTracks()[0];
-  if (vt) { try { vt.contentHint = "motion"; } catch {} watchTrack(s, vt); }
+  // "detail" is the hint for "keep the size, drop frames if you must" where
+  // degradationPreference cannot be set (applySenderParams).
+  if (vt) { try { vt.contentHint = s.record ? "detail" : "motion"; } catch {} watchTrack(s, vt); }
   const at = stream.getAudioTracks()[0];
   if (at) at.enabled = !micMuted;
   renderMic(s);
@@ -1331,6 +1334,8 @@ async function connectPeer(s) {
   const vt = s.stream.getVideoTracks()[0];
   const at = s.stream.getAudioTracks()[0];
   const enc = { maxBitrate: Q.maxBitrate, maxFramerate: 30 };
+  // A take is one picture size from start to end (the computer's file holds one size).
+  if (s.record) enc.scaleResolutionDownBy = 1;
   const vtx = pc.addTransceiver(vt, { direction: "sendonly", streams: [s.stream], sendEncodings: [enc] });
   s.videoSender = vtx.sender; s.videoTransceiver = vtx;
   let atx = null;
@@ -1350,23 +1355,26 @@ async function connectPeer(s) {
   s.timers.stats = setInterval(() => updateStats(s), 2000);
 }
 
+// Live: keep the frame rate and let the encoder shrink the picture when the network is bad.
+// Record: the other way round — the take is locked to the 720 preset, never scaled down;
+// under pressure it loses frames, not size (a size change would cut the take on the computer).
 async function applySenderParams(s) {
   const sender = s.videoSender; if (!sender) return;
   const Q = QUALITY[s.quality] || QUALITY[720];
-  try {
-    const p = sender.getParameters();
+  const fill = (p) => {
     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
     p.encodings[0].maxBitrate = Q.maxBitrate;
     p.encodings[0].maxFramerate = 30;
-    p.degradationPreference = "maintain-framerate";
+    if (s.record) p.encodings[0].scaleResolutionDownBy = 1;
+    return p;
+  };
+  try {
+    const p = fill(sender.getParameters());
+    p.degradationPreference = s.record ? "maintain-resolution" : "maintain-framerate";
     await sender.setParameters(p);
   } catch (e) {
     dlog("setParameters failed, retrying without degradationPreference", e && e.name);
-    try {
-      const p = sender.getParameters();
-      if (p.encodings && p.encodings[0]) { p.encodings[0].maxBitrate = Q.maxBitrate; p.encodings[0].maxFramerate = 30; }
-      await sender.setParameters(p);
-    } catch {}
+    try { await sender.setParameters(fill(sender.getParameters())); } catch {}
   }
 }
 
@@ -1595,7 +1603,7 @@ async function switchCamera(s) {
 // Puts nt on the sender, then (only on success) retires the old track and flips UI state.
 // Stops nt and returns false on failure.
 async function swapTrack(s, nt, face) {
-  try { nt.contentHint = "motion"; } catch {}
+  try { nt.contentHint = s.record ? "detail" : "motion"; } catch {}
   if (s.videoSender) {
     try { await s.videoSender.replaceTrack(nt); }
     catch (e) { dlog("replaceTrack failed", e && e.name); nt.stop(); return false; }

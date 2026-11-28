@@ -39,7 +39,8 @@
 //!   Record mode adds `recording {elapsedMs}` (the take started), `processing {elapsedMs}`,
 //!   then the same `file_saved`, `video_loaded`, `looping`, `loop_status` and `cleanup` as
 //!   file mode — or `record_failed {error}`.
-//! * Exits after `--seconds` (default 300), on Ctrl-C / SIGTERM, or 10 s after a live stream
+//! * Exits after `--seconds` (default 300), on SIGINT (Ctrl-C) / SIGTERM (a `signal` line, then
+//!   `cleanup`, exit status 0), or 10 s after a live stream
 //!   ended (`live_ended`) — unless the phone asks for something else within those seconds
 //!   (the page's "Stop, then Send & loop") or a video is loaded, whose loop then resumes.
 //!   A file session never ends the run: the video keeps looping until one of the above.
@@ -155,12 +156,15 @@ fn keep_stdout_for_json() {}
 
 fn emit(v: serde_json::Value) {
     use std::io::Write;
+    // One write per line: the handle is unbuffered, and a reader that is slow (stdout is
+    // usually a pipe) should cost one small write, not one per JSON token.
+    let line = format!("{v}\n");
     match JSON_OUT.get() {
         Some(out) => {
             let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = writeln!(out, "{v}");
+            let _ = out.write_all(line.as_bytes());
         }
-        None => println!("{v}"),
+        None => print!("{line}"),
     }
 }
 
@@ -376,20 +380,36 @@ impl FileMode {
     }
 }
 
+/// Resolves on the first SIGINT (Ctrl-C) or SIGTERM. The listeners are installed here, once,
+/// and the returned future is polled for the whole run: a listener made anew for every turn
+/// of the main loop only hears a signal that arrives while that turn is waiting, and loses
+/// one that arrives while a handler runs (a status line blocked on a stdout nobody reads,
+/// for one).
 #[cfg(unix)]
-async fn terminated() {
+fn shutdown_signal() -> impl std::future::Future<Output = &'static str> {
     use tokio::signal::unix::{signal, SignalKind};
-    match signal(SignalKind::terminate()) {
-        Ok(mut s) => {
-            s.recv().await;
+    let interrupt = signal(SignalKind::interrupt());
+    let terminate = signal(SignalKind::terminate());
+    async move {
+        let (Ok(mut interrupt), Ok(mut terminate)) = (interrupt, terminate) else {
+            eprintln!("could not install the signal handlers; stop with --seconds");
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            _ = interrupt.recv() => "SIGINT",
+            _ = terminate.recv() => "SIGTERM",
         }
-        Err(_) => std::future::pending().await,
     }
 }
 
 #[cfg(not(unix))]
-async fn terminated() {
-    std::future::pending().await
+fn shutdown_signal() -> impl std::future::Future<Output = &'static str> {
+    async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "Ctrl-C",
+            Err(_) => std::future::pending().await,
+        }
+    }
 }
 
 #[tokio::main]
@@ -468,6 +488,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
 }
 
 async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) -> anyhow::Result<()> {
+    let shutdown = shutdown_signal();
     let fixed = |sink| -> Arc<dyn CameraControl> {
         Arc::new(CliCamera { target: CameraTarget { sink, geometry: GEOMETRY, preview: false }, resume_loop: AtomicBool::new(false) })
     };
@@ -503,6 +524,8 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
 
     let deadline = tokio::time::sleep(Duration::from_secs(args.seconds));
     tokio::pin!(deadline);
+    tokio::pin!(shutdown);
+    let mut signalled = false;
     let mut ping = tokio::time::interval(Duration::from_secs(30));
     ping.tick().await;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -625,14 +648,13 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
                 manager.stop(StopReason::User).await;
                 if manager.status().state.is_free() { break }
             }
-            _ = tokio::signal::ctrl_c(), if !stopping => {
-                stopping = true;
-                manager.stop(StopReason::User).await;
-                if manager.status().state.is_free() { break }
-            }
-            _ = terminated(), if !stopping => {
-                stopping = true;
-                manager.stop(StopReason::User).await;
+            signal = &mut shutdown, if !signalled => {
+                signalled = true;
+                emit(json!({"event": "signal", "signal": signal}));
+                if !stopping {
+                    stopping = true;
+                    manager.stop(StopReason::User).await;
+                }
                 if manager.status().state.is_free() { break }
             }
         }
