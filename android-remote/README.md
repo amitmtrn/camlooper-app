@@ -25,3 +25,23 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 After editing `remote-web/index.html`'s script, run `node remote-web/dev/update-csp.mjs` (CSP hash)
 and rebuild. Not for release: debug-signed, no store listing. Production plan remains
 https://camlooper.com/remote (or a dedicated origin).
+
+## Debug signing
+
+Debug APKs are signed with a **stable project key**, not the machine-local
+`~/.android/debug.keystore` (that key changes between the box and the XPS, and
+`adb install -r` then fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`).
+
+The keystore lives outside the repo, in one of:
+
+1. `$CAMLOOPER_DEBUG_KEYSTORE_DIR`
+2. `~/Projects/camlooper-remote-test/keystore`
+3. `/workspace/camlooper/remote-v2/keystore`
+
+Each of those directories must contain `debug.keystore` and `keystore.properties`
+(`storePassword`, `keyPassword`, `keyAlias`). Do not commit either file.
+`assembleDebug` fails with a short instruction if they are missing, rather than
+silently signing with a new key.
+
+After uninstalling an APK that was signed with an old key, install this one and
+later updates with the same key can use `adb install -r` again.

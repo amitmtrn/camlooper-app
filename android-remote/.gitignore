@@ -5,3 +5,4 @@ local.properties
 *.apk
 *.keystore
 .idea/
+keystore.properties

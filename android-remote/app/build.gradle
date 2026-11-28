@@ -13,6 +13,37 @@ tasks.register('copyRemoteWeb', Copy) {
     into generatedAssets
 }
 
+// Stable debug key, kept outside the repo, so new APKs install over old ones.
+// Look in $CAMLOOPER_DEBUG_KEYSTORE_DIR, then ~/Projects/camlooper-remote-test/keystore,
+// then /workspace/camlooper/remote-v2/keystore. Each dir must contain debug.keystore
+// and keystore.properties (storePassword, keyPassword, keyAlias). Never commit those files.
+def camlooperDebugSigning = {
+    def dirs = []
+    def envDir = System.getenv("CAMLOOPER_DEBUG_KEYSTORE_DIR")
+    if (envDir) dirs << file(envDir)
+    def home = System.getenv("HOME")
+    if (home) dirs << file("${home}/Projects/camlooper-remote-test/keystore")
+    dirs << file("/workspace/camlooper/remote-v2/keystore")
+    for (d in dirs) {
+        def ks = new File(d, "debug.keystore")
+        def propsFile = new File(d, "keystore.properties")
+        if (ks.isFile() && propsFile.isFile()) {
+            def p = new Properties()
+            propsFile.withInputStream { p.load(it) }
+            def storePass = p.getProperty("storePassword")
+            def keyPass = p.getProperty("keyPassword") ?: storePass
+            def alias = p.getProperty("keyAlias") ?: "camlooper-debug"
+            if (!storePass || !keyPass || !alias) {
+                throw new GradleException("CamLooper debug keystore.properties at ${propsFile} is missing storePassword, keyPassword, or keyAlias.")
+            }
+            return [storeFile: ks, storePassword: storePass, keyAlias: alias, keyPassword: keyPass]
+        }
+    }
+    throw new GradleException(
+        "CamLooper debug keystore not found. Copy debug.keystore and keystore.properties to ~/Projects/camlooper-remote-test/keystore (or set CAMLOOPER_DEBUG_KEYSTORE_DIR). Do not use the default Android debug key — it changes between machines and APKs will not install over each other."
+    )
+}()
+
 android {
     namespace 'com.camlooper.remote'
     compileSdk 35
@@ -25,10 +56,20 @@ android {
         versionName '0.1.0-phase1'
     }
 
+    signingConfigs {
+        debug {
+            storeFile camlooperDebugSigning.storeFile
+            storePassword camlooperDebugSigning.storePassword
+            keyAlias camlooperDebugSigning.keyAlias
+            keyPassword camlooperDebugSigning.keyPassword
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix '.debug'
             versionNameSuffix '-debug'
+            signingConfig signingConfigs.debug
         }
         release {
             minifyEnabled false
