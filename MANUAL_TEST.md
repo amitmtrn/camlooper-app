@@ -90,7 +90,7 @@ enable raises a single UAC prompt to register the driver; that is by design.
 <!-- Newest entries first. -->
 
 ### Watch the meeting on the phone: the button, the reminder, and computers that cannot share yet (remote v2, phase 5)
-_Added 2026-11-28 · All (phone page; the sharing computer must be Linux for now) · `remote-web/index.html`, `src-tauri/src/remote/stream/manager.rs` · uncommitted_
+_Added 2026-11-28 · All (phone page; the sharing computer must be Linux for now) · `remote-web/index.html`, `src-tauri/src/remote/stream/manager.rs` · `f3a6631`_
 
 The phone page has a new card, **Watch the meeting on this phone**. It only works with a
 computer that says it can share a meeting — today a Linux one. What a sharing session looks
@@ -974,7 +974,7 @@ builds them).
 <!-- Newest entries first. -->
 
 ### Share the meeting with the phone: sound and a picked window (remote v2, phase 5)
-_Added 2026-11-28 · Linux (KDE Plasma / Wayland first) · `src-tauri/src/remote/stream/meeting.rs`, `capture/linux.rs`, `rtc.rs`, `remote-web/index.html`, `src/components/PhoneStream.tsx` · uncommitted_
+_Added 2026-11-28 · Linux (KDE Plasma / Wayland first) · `src-tauri/src/remote/stream/meeting.rs`, `capture/linux.rs`, `rtc.rs`, `remote-web/index.html`, `src/components/PhoneStream.tsx` · `f3a6631`_
 
 While you are in a meeting on the computer, the phone hears what the computer plays (the
 other people) and, if you pick one, sees a window. The phone only receives; it can mute at
@@ -1076,7 +1076,7 @@ enough. A video looping on the virtual camera, to see that it is left alone.
   the entry under "All platforms").
 
 ### Headless CLI: share a meeting with the phone, with a test pattern or the real capture (remote v2, phase 5)
-_Added 2026-11-28 · Linux · `src-tauri/examples/phone_stream_cli.rs`, `remote-web/dev/e2e-meeting.mjs` · uncommitted_
+_Added 2026-11-28 · Linux · `src-tauri/examples/phone_stream_cli.rs`, `remote-web/dev/e2e-meeting.mjs` · `f3a6631`_
 
 `phone_stream_cli` accepts the phone page's "Watch the meeting" by itself — **nobody is asked
 on the computer** — and runs the app's own meeting session. With `--meeting-fixture` it sends
