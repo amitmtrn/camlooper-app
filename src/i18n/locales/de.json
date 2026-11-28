@@ -211,6 +211,18 @@
       "failed": "Das Video von deinem Handy konnte nicht abgespielt werden.",
       "cancelledByPhone": "Das Handy hat das Video abgebrochen.",
       "expired": "Diese Anfrage ist bereits abgelaufen. Sende das Video noch einmal von deinem Handy."
+    },
+    "record": {
+      "confirmTitle": "Schleife von {{phone}} aufnehmen?",
+      "confirmBody": "{{phone}} nimmt bis zu 60 Sekunden auf. CamLooper spielt die Aufnahme danach in Schleife auf deiner Kamera ab, genau wie ein Video von diesem Computer. Danach kannst du das Handy weglegen.",
+      "recording": "Schleife von {{phone}} wird aufgenommen — {{time}}",
+      "preparing": "Schleife wird vorbereitet…",
+      "cancelling": "Wird abgebrochen…",
+      "cancel": "Abbrechen",
+      "looping": "Die Aufnahme von {{phone}} läuft jetzt in Schleife.",
+      "failed": "Die Aufnahme von deinem Handy konnte nicht in Schleife abgespielt werden.",
+      "cancelledByPhone": "Das Handy hat die Aufnahme abgebrochen.",
+      "expired": "Diese Anfrage ist bereits abgelaufen. Tippe auf deinem Handy erneut auf „Record a loop“."
     }
   },
   "tray": {

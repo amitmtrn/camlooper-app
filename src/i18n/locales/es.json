@@ -211,6 +211,18 @@
       "failed": "No se pudo reproducir en bucle el vídeo de tu teléfono.",
       "cancelledByPhone": "El teléfono canceló el vídeo.",
       "expired": "Esa solicitud ya ha caducado. Vuelve a enviar el vídeo desde tu teléfono."
+    },
+    "record": {
+      "confirmTitle": "¿Grabar un bucle desde {{phone}}?",
+      "confirmBody": "{{phone}} grabará hasta 60 segundos. Después, CamLooper reproducirá la grabación en bucle en tu cámara, igual que con un vídeo de este ordenador. Luego puedes cerrar el teléfono.",
+      "recording": "Grabando un bucle desde {{phone}} — {{time}}",
+      "preparing": "Preparando el bucle…",
+      "cancelling": "Cancelando…",
+      "cancel": "Cancelar",
+      "looping": "Reproduciendo en bucle la grabación de {{phone}}.",
+      "failed": "No se pudo reproducir en bucle la grabación de tu teléfono.",
+      "cancelledByPhone": "El teléfono canceló la grabación.",
+      "expired": "Esa solicitud ya ha caducado. Toca «Record a loop» en tu teléfono otra vez."
     }
   },
   "tray": {

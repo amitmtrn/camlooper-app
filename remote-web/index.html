@@ -9,7 +9,7 @@
      on *.trycloudflare.com ('self' does not cover wss: in every browser, hence the explicit host).
      script-src hash = the inline script element; dev/update-csp.mjs recomputes it, dev/selftest.mjs checks it.
      frame-ancestors is ignored in <meta>: production must send it (or X-Frame-Options) as a header. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rx4J+sLtzVWN5D7m4pEH+6F/aFIfs2t2RlJfkb4o9ZI='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-YVEf53jv9N0wEwvv1ThHsKTj34TNTeqRtcSXGtCD8JI='; style-src 'unsafe-inline'; connect-src 'self' https://api.camlooper.com wss://api.camlooper.com wss://*.trycloudflare.com; media-src mediastream: blob:; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex">
 <title>CamLooper Remote</title>
 <style>
@@ -84,6 +84,10 @@
   .chip::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--warn); }
   .chip.live { background: #14532dd9; } .chip.live::before { background: var(--ok); animation: pulse 1.4s infinite; }
   .chip.failed { background: #7f1d1dd9; } .chip.failed::before { background: var(--bad); }
+  .chip.rec { background: #7f1d1dd9; font-variant-numeric: tabular-nums; } .chip.rec::before { background: var(--bad); animation: pulse 1.4s infinite; }
+  .start-row { align-items: stretch; margin-top: 12px; }
+  .start-row button { padding-inline: 10px; font-size: 1.05rem; line-height: 1.2; }
+  button.rec::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: var(--bad); margin-right: 8px; }
   @keyframes pulse { 50% { opacity: .3; } }
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
   .stat { background: var(--card2); border-radius: 12px; padding: 8px 12px; }
@@ -162,19 +166,31 @@
     </div>
     <p class="muted small" data-s="qualityHint"></p>
     <p class="muted small" data-s="micHint"></p>
-    <button id="btnStart" class="block big" data-s="startStreaming"></button>
+    <div class="row start-row">
+      <button id="btnStart" type="button" class="big" data-s="startStreaming"></button>
+      <button id="btnRecord" type="button" class="big secondary rec" data-s="recordLoop" disabled></button>
+    </div>
+    <p class="muted small" data-s="recordHint"></p>
+    <p id="helloNote" class="msg warn" aria-live="polite"></p>
     <p id="camMsg" class="msg"></p>
   </div>
 
-  <div class="card" id="loopCard">
+  <div class="card hidden" id="loopCard">
     <h2 data-s="loopTitle"></h2>
-    <p class="muted small" data-s="loopIntro"></p>
+    <p id="takeBusy" class="msg hidden" aria-live="polite"><span class="spinner"></span><span data-s="recPreparing"></span></p>
+    <p id="takeMsg" class="msg" aria-live="polite"></p>
     <div id="loopNow" class="banner hidden">
       <div class="small muted"><span id="loopDot" class="dot"></span><span id="loopNowState"></span></div>
       <div id="loopNowName" class="file-name"></div>
+      <p id="loopAway" class="muted small hidden" data-s="loopAway"></p>
       <button id="btnLoopToggle" type="button" class="block secondary"></button>
       <p id="loopMsg" class="msg"></p>
     </div>
+  </div>
+
+  <!-- Phase 3 "send a file" UI: not offered any more (3b records on the phone instead). The
+       markup stays, never shown, because the unused transfer code still refers to it. -->
+  <div id="fileCard" class="hidden" aria-hidden="true">
     <input id="fileInput" type="file" accept="video/*" class="hidden" tabindex="-1" aria-hidden="true">
     <div id="filePick">
       <div id="fileInfo" class="file hidden">
@@ -189,7 +205,7 @@
         <div id="xferName" class="file-name"></div>
         <div id="xferSize" class="muted small"></div>
       </div>
-      <p id="xferMsg" class="msg" aria-live="polite"></p>
+      <p id="xferMsg" class="msg"></p>
       <div id="xferProg" class="hidden">
         <div id="xferPct" class="pct">0 %</div>
         <div id="xferBar" class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="xferBarSent" class="sent"></i><i id="xferBarDone" class="done"></i></div>
@@ -198,7 +214,7 @@
       <p id="xferKeep" class="muted small" data-s="fileKeepOpen"></p>
       <button id="btnXferCancel" type="button" class="block danger" data-s="cancel"></button>
     </div>
-    <p id="fileMsg" class="msg" aria-live="polite"></p>
+    <p id="fileMsg" class="msg"></p>
   </div>
 
   <div class="card">
@@ -233,7 +249,7 @@
     <div class="stat"><b data-s="stRtt"></b><span id="stRtt">–</span></div>
   </div>
   <p id="deskRecv" class="muted small"></p>
-  <p id="keepOpen" class="muted small" data-s="keepOpen"></p>
+  <p id="keepOpen" class="muted small"></p>
   <p id="micNote" class="muted small"></p>
   <div id="streamActions">
     <div class="row">
@@ -298,6 +314,35 @@ const STRINGS = {
   micMuted: "Microphone muted.",
   micNone: "Microphone not in use: only the camera is sent.",
   startStreaming: "Start streaming",
+  recordLoop: "Record a loop",
+  recordHint: "Record a loop: film up to 1 minute. Your computer then plays it on repeat as its camera, and you can put the phone away.",
+  helloOld: "Update CamLooper on your computer to record a loop.",
+  chipRec: (t) => `REC ${t} / 1:00`,
+  recLive: "Recording. Tap Stop when you are done (1 minute at most).",
+  recKeepOpen: "Keep this page open and the screen on while recording.",
+  recPreparing: "Preparing loop…",
+  recLooping: "Recording done ✓",
+  recTooShort: "That recording was too short to loop. Record at least 2 seconds.",
+  recIncomplete: "The recording was too incomplete to loop. Try again.",
+  recCancelled: "Recording cancelled.",
+  recCancelledDesk: "The recording was cancelled on the computer.",
+  recNoReply: "The computer didn't confirm the loop. Check CamLooper on your computer.",
+  recReject: {
+    declined: "The computer declined the recording.",
+    busy: "The computer is busy with another phone session. Try again in a moment.",
+    timeout: "The computer didn't answer in time.",
+    unsupported: "Update CamLooper on your computer to record a loop.",
+    other: "The computer couldn't start the recording.",
+  },
+  recStopped: {
+    error: "The computer hit an error and stopped the recording.",
+    peer_offline: "Your computer went offline.",
+    timeout: "The connection timed out.",
+    too_short: null, // uses recTooShort
+    incomplete: null, // uses recIncomplete
+    other: "The recording stopped.",
+  },
+  loopAway: "You can lock this phone or close the app. The loop keeps playing.",
   thisPhone: "This phone:",
   unpair: "Unpair this phone",
   unpairConfirm: "Unpair this phone from your computer?",
@@ -357,7 +402,7 @@ const STRINGS = {
     other: "Streaming stopped.",
   },
   streamEnded: "Streaming stopped.",
-  loopTitle: "Loop a video",
+  loopTitle: "Loop on your computer",
   loopIntro: "Send a video from this phone. Your computer plays it on repeat as its camera.",
   chooseVideo: "Choose a video",
   chooseOther: "Choose a different video",
@@ -422,6 +467,10 @@ const HTTP_TIMEOUT_MS = 8000, WS_CONNECT_TIMEOUT_MS = 10000;
 const MAX_FILE_BYTES = 314572800, FILE_CHUNK = 65536, BUF_LOW = 1048576, BUF_HIGH = 4194304;
 const FILE_EXT_MIME = { mp4: "video/mp4", m4v: "video/x-m4v", mov: "video/quicktime", webm: "video/webm", mkv: "video/x-matroska", "3gp": "video/3gpp" };
 const LIVE_SETTLE_MS = 800, BUSY_RETRY_MS = 1000, BUSY_RETRY_WINDOW_MS = 8000, FINISH_WAIT_MS = 4000, LOOP_REPLY_MS = 6000;
+// App protocol (independent of the relay's protocol 2): hello → hello_ok tells this page what
+// the computer's CamLooper can do. Record a loop: 60 s at most, 2 s at least.
+const APP_PROTOCOL = 3, HELLO_TIMEOUT_MS = 5000;
+const TAKE_CAP_MS = 60000, MIN_TAKE_MS = 2000, TAKE_FINISH_MS = 45000;
 const QUALITY = {
   720: { width: 1280, height: 720, maxBitrate: 2500000 },
   480: { width: 848, height: 480, maxBitrate: 1200000 },
@@ -460,7 +509,12 @@ const desk = { online: false, protocol: 0, known: false };
 let ws = null, wsAttempt = 0, wsTimer = null, pingTimer = null, wsLastRx = 0, wsStopped = false, wsReplaced = false;
 let pollTimer = null, countdownTimer = null, ackTimer = null;
 let facing = "user", quality = "720", micMuted = false;
-let session = null;              // current session: live camera (startStreaming) or kind "file" (startFileSend)
+let session = null;              // current session: live camera or a take (startStreaming), or kind "file" (startFileSend)
+// What the computer's CamLooper answered to hello. state: idle | pending | ok | old.
+// ok (appProtocol >= 3 with "record") stays true while a repeat hello is on its way.
+const hello = { state: "idle", ok: false, id: "", timer: null, waiters: [] };
+let take = null;                 // a stopped take the computer is turning into a loop: { id, timer }
+let lastMode = "live";           // what "Try again" starts
 let wakeLock = null;
 let picked = null;               // video chosen for "Loop a video": { file, meta: { name, size, mime }, err }
 let lastLiveEndAt = 0;           // when the last live session ended here (the computer needs a moment to let go)
@@ -671,6 +725,7 @@ function resetToPair(message) {
   const name = pair && pair.deviceName;
   savePair(null);
   desk.online = false; desk.known = false; desk.protocol = 0;
+  resetHello(); clearTake(); setMsg("takeMsg", "");
   picked = null; clearTimeout(loopTimer);
   loop.known = false; loop.playing = false; loop.name = ""; loop.fromPhone = false; loop.pending = null;
   setMsg("fileMsg", ""); setMsg("loopMsg", "");
@@ -859,6 +914,7 @@ function onFrame(m) {
       desk.known = true; desk.online = !!m.desktopOnline; desk.protocol = Number(m.desktopProtocol) || 0;
       if (m.linked) onLinked(m.desktopName, desk.online);
       renderDesk();
+      if (desk.online) sayHello(); else resetHello();
       askLoopStatus();
       break;
     case "linked":
@@ -871,7 +927,9 @@ function onFrame(m) {
       desk.known = true; desk.online = !!m.online;
       if (m.online) desk.protocol = Number(m.protocol) || desk.protocol;
       renderDesk();
-      if (m.online) askLoopStatus();
+      // A computer that comes (back) online may be a newer CamLooper: ask again.
+      if (m.online) { sayHello(); askLoopStatus(); } else resetHello();
+      if (!m.online && take) endTake(STRINGS.stopped.peer_offline, "err");
       if (!m.online && session && !session.live && !session.ended) endSession(STRINGS.stopped.peer_offline, { failed: true, notify: false, reason: "peer_offline" });
       break;
     case "signal":
@@ -899,7 +957,51 @@ function onFrame(m) {
 }
 
 // ---------------------------------------------------------------------------------
-// Streaming
+// App protocol hello. Sent once each time the computer is known to be online. Without a
+// hello_ok (5 s), or with one that lacks appProtocol >= 3 / "record", the computer runs an
+// older CamLooper: Record a loop stays off and streaming says "update" instead of failing
+// later in a way that looks like a timeout.
+// ---------------------------------------------------------------------------------
+function settleHello(state) {
+  clearTimeout(hello.timer); hello.timer = null;
+  hello.state = state; hello.ok = state === "ok";
+  for (const w of hello.waiters.splice(0)) w();
+  renderActions();
+}
+function resetHello() { hello.id = ""; settleHello("idle"); }
+function sayHello() {
+  if (!pair || !pair.linked || hello.state === "pending") return;
+  if (session && !session.ended) return; // never in the middle of a session; the answer is known
+  const id = randomId();
+  if (!wsSend({ type: "signal", data: { kind: "hello", sessionId: id, appProtocol: APP_PROTOCOL } })) return;
+  dlog("-> signal hello");
+  hello.id = id; hello.state = "pending";
+  clearTimeout(hello.timer);
+  hello.timer = setTimeout(() => { dlog("hello: no answer"); settleHello("old"); }, HELLO_TIMEOUT_MS);
+  renderActions();
+}
+function onHelloOk(d) {
+  if (hello.state !== "pending" || d.sessionId !== hello.id) { dlog("ignoring unsolicited hello_ok"); return; }
+  const ok = Number(d.appProtocol) >= APP_PROTOCOL && Array.isArray(d.features) && d.features.includes("record");
+  dlog("<- signal hello_ok", { appProtocol: d.appProtocol, ok });
+  settleHello(ok ? "ok" : "old");
+}
+// Resolves once a hello that is on its way has been answered or has timed out.
+function helloSettled() {
+  if (hello.state === "idle" && desk.online) sayHello();
+  return hello.state === "pending" && !hello.ok ? new Promise((r) => hello.waiters.push(r)) : Promise.resolve();
+}
+// Start streaming / Record a loop: one session at a time, Record only with a 3b computer.
+function renderActions() {
+  const busy = !!fileSession() || !!take;
+  $("btnStart").disabled = busy;
+  $("btnRecord").disabled = busy || !hello.ok;
+  setMsg("helloNote", hello.state === "old" ? STRINGS.helloOld : "", "warn");
+}
+
+// ---------------------------------------------------------------------------------
+// Streaming, and Record a loop: the same camera session with mode "record". The computer
+// saves what it receives; after Stop (or 60 s) it loops the take as its camera.
 // ---------------------------------------------------------------------------------
 function randomId() {
   const b = new Uint8Array(16); crypto.getRandomValues(b);
@@ -940,10 +1042,16 @@ async function openVideoTrack(face, q, exact) {
   return st.getVideoTracks()[0];
 }
 
-$("btnStart").onclick = () => startStreaming();
-$("btnRetry").onclick = () => startStreaming();
+$("btnStart").onclick = () => startStreaming("live");
+$("btnRecord").onclick = () => startStreaming("record");
+$("btnRetry").onclick = () => startStreaming(lastMode);
 $("btnBack").onclick = () => { endSession(null, { notify: false, silent: true }); showHome(); };
-$("btnStop").onclick = () => { endSession(null, { notify: true, reason: "user" }); showHome(); };
+$("btnStop").onclick = () => {
+  const s = session;
+  if (s && !s.ended && s.record && s.live) { stopTake(s); return; }
+  endSession(null, { notify: true, reason: "user" }); showHome();
+  if (s && s.record) setTakeMsg(STRINGS.recCancelled);
+};
 
 // Precheck failures: show them where the user is looking (Home card, or the Stream failure banner).
 function startError(text) {
@@ -951,16 +1059,26 @@ function startError(text) {
   else setMsg("camMsg", text, "err");
 }
 
-async function startStreaming() {
-  if (session && !session.ended) return;
+let starting = false;
+async function startStreaming(mode = "live") {
+  if (starting || take || (session && !session.ended)) return;
+  const record = mode === "record";
+  lastMode = record ? "record" : "live";
   setMsg("camMsg", "");
   if (!window.isSecureContext) { startError(STRINGS.errNoSecure); return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.RTCPeerConnection) { startError(STRINGS.errNoCamera); return; }
   if (!ws || ws.readyState !== 1) { startError(wsReplaced ? STRINGS.errReplaced : STRINGS.errNotConnected); if (!ws && !wsReplaced) connectWs(); return; }
-  if (desk.known && !desk.online) { startError(STRINGS.errDeskOffline); return; }
+  if (!desk.known) { startError(STRINGS.errNotConnected); return; }
+  if (!desk.online) { startError(STRINGS.errDeskOffline); return; }
   if (desk.protocol && desk.protocol < 2) { startError(STRINGS.errDeskOld); return; }
+  // A new phone app expects a 3b computer, for streaming too: an older one is told so here.
+  starting = true;
+  try { await helloSettled(); } finally { starting = false; }
+  if (take || (session && !session.ended)) return;
+  if (!hello.ok) { startError(record ? STRINGS.helloOld : STRINGS.errDeskOld); return; }
 
   const s = session = {
+    record, takeAt: 0, takeMs: 0,
     id: randomId(), facing, quality, stream: null, pc: null, live: false, ended: false,
     timers: {}, pendingRemote: [], localQueue: [], offerSent: false, iceOk: false,
     startedAt: 0, prevStats: null, phase: "camera", switching: false, reacquiring: false,
@@ -968,6 +1086,8 @@ async function startStreaming() {
   outbox = [];
   screen("Stream");
   show("streamFail", false); show("streamActions"); show("failActions", false); show("stats", false); show("keepOpen");
+  $("keepOpen").textContent = record ? STRINGS.recKeepOpen : STRINGS.keepOpen;
+  setTakeMsg("");
   show("hiddenNote", document.visibilityState !== "visible");
   $("deskRecv").textContent = "";
   setChip("requesting"); setMsg("streamMsg", STRINGS.stCamera);
@@ -990,12 +1110,14 @@ async function startStreaming() {
   if (at) at.enabled = !micMuted;
   renderMic(s);
   setPreview(stream, s.facing);
-  $("btnSwitch").disabled = false;
+  $("btnSwitch").disabled = s.record; // a take keeps one camera: its size must not change half-way
   keepAwake();
 
   s.phase = "requesting";
   setMsg("streamMsg", STRINGS.stWaitAccept);
-  sendSignal({ kind: "stream_request", sessionId: s.id, deviceLabel: (pair && pair.deviceName) || defaultDeviceName() });
+  const request = { kind: "stream_request", sessionId: s.id, deviceLabel: (pair && pair.deviceName) || defaultDeviceName() };
+  if (s.record) { request.mode = "record"; expectLoopStatus(s.id); } // no mode = live, as before
+  sendSignal(request);
   s.timers.accept = setTimeout(() => {
     if (session === s && s.phase === "requesting") endSession(STRINGS.acceptTimeout, { failed: true, reason: "timeout" });
   }, ACCEPT_TIMEOUT_MS);
@@ -1043,6 +1165,7 @@ function setPreview(stream, face) {
 
 function setChip(state) {
   const chip = $("chip");
+  if (state === "rec") { chip.className = "chip rec"; chip.textContent = STRINGS.chipRec(clock(session ? takeElapsed(session) : 0)); return; }
   chip.className = "chip" + (state === "live" ? " live" : state === "failed" ? " failed" : "");
   const label = own({ requesting: STRINGS.chipRequesting, connecting: STRINGS.chipConnecting, live: STRINGS.chipLive, failed: STRINGS.chipFailed, reconnecting: STRINGS.chipReconnecting }, state) || "";
   chip.textContent = label;
@@ -1052,7 +1175,11 @@ function setChip(state) {
   }
 }
 
+const clock = (ms) => { const sec = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`; };
+
 async function onSignal(d) {
+  if (d.kind === "hello_ok") { onHelloOk(d); return; } // not tied to a session
+  if (take && d.sessionId === take.id) { if (d.kind === "loop_status") onLoopStatus(d); onTakeSignal(d); return; }
   if (d.kind === "loop_status") { onLoopStatus(d); return; } // not tied to a session
   const s = session;
   if (!s || s.ended || d.sessionId !== s.id) { dlog("ignoring signal for other session", d.kind); return; }
@@ -1074,7 +1201,7 @@ async function onSignal(d) {
     case "stream_reject":
       clearTimeout(s.timers.accept);
       if (s.kind === "file") { if (s.phase === "requesting") onFileReject(s, d.reason); break; }
-      endSession(own(STRINGS.reject, d.reason) || STRINGS.reject.other, { failed: true, notify: false });
+      endSession(own(s.record ? STRINGS.recReject : STRINGS.reject, d.reason) || (s.record ? STRINGS.recReject : STRINGS.reject).other, { failed: true, notify: false });
       break;
     case "answer":
       if (!s.pc || s.pc.signalingState !== "have-local-offer" || typeof d.sdp !== "string") return;
@@ -1094,6 +1221,9 @@ async function onSignal(d) {
       if (s.kind === "file") break;
       if (d.width && d.height) $("deskRecv").textContent = STRINGS.deskRecv(Number(d.width) | 0, Number(d.height) | 0, Number(d.fps) | 0, typeof d.codec === "string" ? d.codec.slice(0, 32) : "");
       if (d.state === "live" && s.pc && !s.live && s.pc.connectionState === "connected") goLive(s);
+      // The take's clock may be reported a moment before this page sees the connection.
+      if (s.record && s.live) onTakeStatus(s, d.record);
+      else if (s.record && d.record && typeof d.record === "object") s.earlyTake = { record: d.record, at: Date.now() };
       break;
   }
 }
@@ -1249,7 +1379,7 @@ function onPcState(s) {
   if (s.kind === "file") { onFilePcState(s, cs); return; }
   if (cs === "connected") {
     clearTimeout(s.timers.disc);
-    if (!s.live) goLive(s); else { setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok"); }
+    if (!s.live) goLive(s); else if (s.record) { setChip("rec"); setMsg("streamMsg", STRINGS.recLive, "ok"); } else { setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok"); }
   } else if (cs === "failed") {
     if (!s.live && s.iceOk) endSession(STRINGS.errDtls, { failed: true, reason: "error" });
     else endSession(STRINGS.iceFailed, { failed: true, reason: "ice_failed" });
@@ -1267,6 +1397,7 @@ function goLive(s) {
   s.live = true; s.phase = "live";
   clearTimeout(s.timers.ice);
   s.startedAt = Date.now();
+  if (s.record) { startTake(s); return; }
   setChip("live"); setMsg("streamMsg", STRINGS.stLive, "ok");
   show("stats");
   clearInterval(s.timers.clock);
@@ -1274,8 +1405,102 @@ function goLive(s) {
   updateStats(s);
 }
 
+// ---- Record a loop: the take ----
+const takeElapsed = (s) => (s.takeAt ? Math.min(TAKE_CAP_MS, Date.now() - s.takeAt) : 0);
+
+// The computer receives the camera: the take runs. The clock starts here and follows the
+// computer's own count once it reports one (it starts saving a moment after the first frame).
+function startTake(s) {
+  s.takeAt = Date.now();
+  const early = s.earlyTake, ms = early ? Number(early.record.elapsedMs) : NaN;
+  if (early && early.record.phase === "recording" && ms >= 0 && ms <= TAKE_CAP_MS) s.takeAt = early.at - ms;
+  setChip("rec"); setMsg("streamMsg", STRINGS.recLive, "ok");
+  clearInterval(s.timers.clock);
+  s.timers.clock = setInterval(() => {
+    if (session !== s || s.ended) return;
+    if (Date.now() - s.takeAt >= TAKE_CAP_MS) { stopTake(s); return; } // 1:00: stops on its own
+    if ($("chip").classList.contains("rec")) setChip("rec");
+  }, 250);
+}
+
+// `record` of a status signal during the take: { elapsedMs, capMs, phase, error? }.
+function onTakeStatus(s, r) {
+  if (!r || typeof r !== "object") return;
+  const ms = Number(r.elapsedMs);
+  if (r.phase === "recording" && ms >= 0 && ms <= TAKE_CAP_MS) { s.takeAt = Date.now() - ms; return; }
+  // The computer ended the take itself (its Stop, or its own 60 s limit).
+  if (r.phase === "processing") stopTake(s, { notify: false, force: true });
+  else if (r.phase === "looping") { stopTake(s, { notify: false, quiet: true }); takeLooping(); }
+  else if (r.phase === "failed") { stopTake(s, { notify: false, quiet: true }); endTake(takeError(r.error), "err"); }
+}
+
+// Stop (the button, 60 s, or the computer): the camera is released at once, and the home
+// screen waits for the computer to say that the take loops.
+// opts.notify false: the computer already knows. opts.quiet: the caller reports the outcome.
+// opts.force: the computer said it is preparing the loop, whatever this page's clock says.
+// opts.lapse: what to say, after opts.waitMs, when the computer never reports an outcome.
+function stopTake(s, opts = {}) {
+  if (session !== s || s.ended) return;
+  const ms = takeElapsed(s);
+  const id = s.id;
+  endSession(null, { notify: opts.notify !== false, reason: "user", silent: true });
+  showHome();
+  clearTake();
+  if (opts.quiet) return;
+  // Shorter than the computer accepts: it drops the take, nothing will follow.
+  if (ms < MIN_TAKE_MS && !opts.force) { setTakeMsg(opts.lapse || STRINGS.recTooShort, opts.lapse ? "" : "warn"); setTimeout(askLoopStatus, 1500); return; }
+  take = { id, timer: setTimeout(() => { if (take && take.id === id) endTake(opts.lapse || STRINGS.recNoReply, opts.lapse ? "" : "warn"); }, opts.waitMs || TAKE_FINISH_MS) };
+  setTakeMsg("");
+  renderActions(); renderLoop();
+  intoView("loopCard");
+}
+
+function clearTake() { if (take) clearTimeout(take.timer); take = null; }
+function setTakeMsg(text, cls = "") { setMsg("takeMsg", text, cls); renderLoop(); }
+// Human text from the computer is shown as it is (short, no control characters).
+function takeError(text) { return cleanText(text, 160) || STRINGS.recIncomplete; }
+
+// The take did not become a loop (or nobody said so): say why, then show what really plays.
+function endTake(text, cls) {
+  clearTake();
+  setTakeMsg(text, cls);
+  renderActions();
+  intoView("loopCard");
+  setTimeout(askLoopStatus, 1500);
+}
+
+function takeLooping() {
+  clearTake();
+  loop.known = true; loop.playing = true; loop.fromPhone = true;
+  loop.pending = null; clearTimeout(loopTimer); setMsg("loopMsg", "");
+  setTakeMsg(STRINGS.recLooping, "ok");
+  renderActions();
+  intoView("loopCard");
+  setTimeout(askLoopStatus, 1500); // also brings the name the computer gave the take
+}
+
+// Signals that name a take which has stopped here and is being prepared on the computer.
+function onTakeSignal(d) {
+  dlog("<- signal (take)", d.kind);
+  if (d.kind === "loop_status") { if (d.playing === true && d.fromPhone === true && !d.error) takeLooping(); return; }
+  if (d.kind !== "status" || !d.record || typeof d.record !== "object") return;
+  if (d.record.phase === "looping") takeLooping();
+  else if (d.record.phase === "failed") endTake(takeError(d.record.error), "err");
+}
+
+// stream_stop for a take, from the computer. "done": it loops.
+function onTakeStop(reason) {
+  if (reason === "done" || reason === "finished") { takeLooping(); return; }
+  if (reason === "too_short") { endTake(STRINGS.recTooShort, "warn"); return; }
+  if (reason === "incomplete") { endTake(STRINGS.recIncomplete, "err"); return; }
+  // The echo of this phone's own stop: the result is still to come.
+  if (reason === "user" || reason === "cancelled") return;
+  endTake(reason === "ice_failed" ? STRINGS.iceFailed : own(STRINGS.recStopped, reason) || STRINGS.recStopped.other, "err");
+}
+
 function onRemoteStop(data) {
   const s = session;
+  if (take && data.sessionId === take.id) { dlog("<- stream_stop (take)", data.reason); onTakeStop(typeof data.reason === "string" ? data.reason : "other"); return; }
   if (!s || s.ended) return;
   // Without a sessionId, a stop can only be meant for a request the desktop hasn't answered
   // yet; once accepted it must name this session (a stale stop must not end a new one).
@@ -1283,6 +1508,13 @@ function onRemoteStop(data) {
   dlog("<- stream_stop", data.reason);
   const reason = typeof data.reason === "string" ? data.reason : "other";
   if (s.kind === "file") { onFileRemoteStop(s, reason); return; }
+  if (s.record && s.live) {
+    // The computer's own Cancel / Stop: a take that is long enough still becomes the loop,
+    // so wait a little for that news before calling it cancelled.
+    if (reason === "user" || reason === "cancelled") stopTake(s, { notify: false, waitMs: 15000, lapse: STRINGS.recCancelledDesk });
+    else { stopTake(s, { notify: false, quiet: true }); onTakeStop(reason); }
+    return;
+  }
   const msg = reason === "ice_failed" ? STRINGS.iceFailed : (own(STRINGS.stopped, reason) || STRINGS.stopped.other);
   endSession(null, { notify: false, silent: true });
   showHome(msg, reason === "user" ? "" : "warn");
@@ -1314,11 +1546,13 @@ function endSession(message, opts = {}) {
     banner("streamFail", message || STRINGS.errGeneric, "err");
     show("streamActions", false); show("failActions"); show("keepOpen", false);
   }
+  // A hello that could not be sent during the session, or went unanswered before it.
+  if (!hello.ok && desk.online) sayHello();
 }
 
 // Switch camera mid-stream (replaceTrack, no renegotiation)
 $("btnSwitch").onclick = async () => {
-  const s = session; if (!s || s.ended || !s.stream || s.switching) return;
+  const s = session; if (!s || s.ended || !s.stream || s.switching || s.record) return;
   s.switching = true; $("btnSwitch").disabled = true;
   try { await switchCamera(s); }
   finally {
@@ -1457,7 +1691,7 @@ $("btnXferCancel").onclick = () => { if (fileSession()) endSession(STRINGS.fileC
 function renderFile() {
   const s = fileSession();
   show("filePick", !s); show("fileXfer", !!s);
-  $("btnStart").disabled = !!s; // one session at a time
+  renderActions(); // one session at a time
   show("fileInfo", !!picked);
   $("fileName").textContent = picked ? picked.meta.name : "";
   $("fileSize").textContent = picked ? STRINGS.fileSize(mb(picked.meta.size)) : "";
@@ -1719,7 +1953,7 @@ function sendLoopControl(action) {
 // which the computer answers with an error.
 function askLoopStatus() {
   if (!pair || !pair.linked || !desk.known || !desk.online || (desk.protocol && desk.protocol < 2)) return;
-  if (session && !session.ended) return;
+  if ((session && !session.ended) || take) return;
   sendLoopControl("status");
 }
 function onLoopStatus(d) {
@@ -1735,8 +1969,11 @@ function onLoopStatus(d) {
   setMsg("loopMsg", failed ? (own(STRINGS.loopErrors, d.error) || STRINGS.loopFailed) : "", "err");
 }
 function renderLoop() {
-  const has = loop.known && (loop.playing || !!loop.name);
-  show("loopNow", has && !fileSession());
+  const has = loop.known && (loop.playing || !!loop.name) && !fileSession() && !take;
+  show("loopNow", has);
+  show("takeBusy", !!take);
+  show("loopAway", loop.playing);
+  show("loopCard", has || !!take || !!$("takeMsg").textContent);
   $("loopDot").className = "dot" + (loop.playing ? " on" : "");
   $("loopNowState").textContent = loop.playing ? STRINGS.loopPlaying : STRINGS.loopStopped;
   $("loopNowName").textContent = loop.name;
@@ -1779,6 +2016,7 @@ document.addEventListener("visibilitychange", () => {
       if (vt && vt.readyState === "ended") onVideoEnded(session, vt);
     }
     if (pair && !ws && !wsStopped && !wsReplaced) { wsAttempt = 0; connectWs(); }
+    else if (hello.state === "old" && desk.known && desk.online) sayHello(); // updated meanwhile?
   } else if (streaming) {
     show("hiddenNote");
   }

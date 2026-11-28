@@ -12,9 +12,12 @@ import {
   FORCE_STOP_AFTER_MS,
   formatElapsed,
   formatMegabytes,
+  formatTake,
   isolate,
   phoneErrorKey,
+  recordBannerView,
   sessionFile,
+  type PhoneStreamRecord,
   type PhoneStreamError,
   type PhoneStreamRequest,
   type PhoneStreamStatus,
@@ -38,6 +41,24 @@ function useNow(active: boolean): number {
     return () => window.clearInterval(id);
   }, [active]);
   return now;
+}
+
+/**
+ * How long the take is, counted on between the statuses that report it: the backend says
+ * `elapsedMs` now and then, the banner shows every second. Never past the cap.
+ */
+function useTakeElapsed(record: PhoneStreamRecord | null | undefined, running: boolean): number {
+  const reported = record ? Math.max(0, Number(record.elapsedMs) || 0) : null;
+  const cap = record && Number(record.capMs) > 0 ? Number(record.capMs) : 60_000;
+  const anchor = useRef<{ reported: number; at: number } | null>(null);
+  if (!running) anchor.current = null;
+  else if (!anchor.current || (reported !== null && reported !== anchor.current.reported)) {
+    // No report yet: the take starts counting from the moment it is live here.
+    anchor.current = { reported: reported ?? 0, at: Date.now() };
+  }
+  const now = useNow(running);
+  const a = anchor.current;
+  return a ? Math.min(cap, a.reported + Math.max(0, now - a.at)) : 0;
 }
 
 /** Whole seconds until `deadline`, re-rendered exactly when the number changes. */
@@ -101,7 +122,8 @@ const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), [tabin
 
 /**
  * "Use your phone as the camera?" — or, for a video the phone wants to send, "Loop a video
- * from <phone>?" with its name and size — shown while the backend waits for a decision (60 s).
+ * from <phone>?" with its name and size, or, for a take, "Record a loop from <phone>?" —
+ * shown while the backend waits for a decision (60 s).
  *
  * A real modal: rendered in a portal on `<body>` with the app root made `inert`, so nothing
  * behind it can be reached by Tab or click and no other overlay can cover it. (Dropdowns
@@ -132,6 +154,7 @@ export function PhoneStreamDialog({
   const expired = seconds === 0;
   const { sessionId } = request;
   const file = request.mode === "file" ? request.file : null;
+  const record = request.mode === "record";
 
   // Modal for real: everything else inert, focus inside, focus given back afterwards.
   useEffect(() => {
@@ -210,13 +233,21 @@ export function PhoneStreamDialog({
         <div className="flex items-center gap-3">
           <Smartphone className="h-6 w-6 text-primary shrink-0" />
           <h2 id="phone-stream-dialog-title" className="text-lg font-semibold">
-            {file ? t("phoneStream.file.confirmTitle", { phone }) : t("phoneStream.confirmTitle")}
+            {file
+              ? t("phoneStream.file.confirmTitle", { phone })
+              : record
+                ? t("phoneStream.record.confirmTitle", { phone })
+                : t("phoneStream.confirmTitle")}
           </h2>
         </div>
         {/* Name and size are part of the description: what is being accepted is read out too. */}
         <div id="phone-stream-dialog-desc" className="space-y-3">
           <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">
-            {file ? t("phoneStream.file.confirmBody", { phone }) : t("phoneStream.confirmBody", { phone })}
+            {file
+              ? t("phoneStream.file.confirmBody", { phone })
+              : record
+                ? t("phoneStream.record.confirmBody", { phone })
+                : t("phoneStream.confirmBody", { phone })}
           </p>
           {file && (
             <div className="flex items-center gap-3 rounded-md border bg-muted/40 p-3">
@@ -263,7 +294,8 @@ export function PhoneStreamDialog({
 /**
  * Top-of-window banner while the phone owns the camera, plus the last failure. For a video
  * the phone is sending it shows the transfer instead: "Receiving video from <phone> — 45 %"
- * with a progress bar and Cancel, then "Preparing loop…".
+ * with a progress bar and Cancel, then "Preparing loop…". For a take: "Recording a loop from
+ * <phone> — 0:12" with Cancel, then "Preparing loop…".
  */
 export function PhoneStreamBanner({
   status,
@@ -292,6 +324,9 @@ export function PhoneStreamBanner({
     const id = window.setTimeout(() => setCanForceStop(true), wait);
     return () => window.clearTimeout(id);
   }, [stoppingSince]);
+
+  const recordView = recordBannerView(status);
+  const takeMs = useTakeElapsed(status.record, recordView === "recording");
 
   const fileView = fileBannerView(status);
   const file = sessionFile(status);
@@ -353,6 +388,55 @@ export function PhoneStreamBanner({
       </div>
     );
   }
+
+  if (recordView) {
+    // A take: the phone's camera is live on the virtual camera while it is saved, so the
+    // banner is the camera-in-use red. Once it loops or has failed, a toast says so.
+    const recording = recordView === "recording";
+    return (
+      <div className="sticky top-0 z-40 border-b border-red-500/40 bg-red-500/15 backdrop-blur-sm">
+        <div className="max-w-6xl mx-auto px-4 py-2 flex items-center gap-3">
+          {recording ? (
+            <span className="relative flex h-3 w-3 shrink-0" aria-hidden="true">
+              <span className="absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75 animate-ping" />
+              <span className="relative inline-flex h-3 w-3 rounded-full bg-red-500" />
+            </span>
+          ) : (
+            <Loader2 className="h-4 w-4 animate-spin text-red-400 shrink-0" aria-hidden="true" />
+          )}
+          <p className="text-sm flex-1 min-w-0 [overflow-wrap:anywhere]">
+            {recording ? (
+              // The clock ticks every second: not a live region.
+              <span className="font-semibold">
+                {t("phoneStream.record.recording", { phone: isolate(phone), time: isolate(formatTake(takeMs)) })}
+              </span>
+            ) : (
+              <span className="font-semibold" role="status" aria-live="polite">
+                {recordView === "processing"
+                  ? t("phoneStream.record.preparing")
+                  : recordView === "stopping"
+                    ? t("phoneStream.record.cancelling")
+                    : t("phoneStream.connecting", { phone: isolate(phone) })}
+              </span>
+            )}
+          </p>
+          {active && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onStop}
+              disabled={status.state === "stopping" && !canForceStop}
+              className="shrink-0"
+            >
+              <X className="h-3 w-3" /> {t("phoneStream.record.cancel")}
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
+  // A take that is over (looping, failed): nothing here, whatever the session state says.
+  if (status.mode === "record" && status.record && active && status.record.phase !== "recording") return null;
 
   if (active) {
     const codec = status.state === "live" ? codecLabel(status.codec) : null;

@@ -49,6 +49,7 @@ async function scenario(name, onSignal, check) {
     ws.onMessage(async (msg) => {
       const m = JSON.parse(String(msg));
       if (m.type === "ping") return ws.send('{"type":"pong"}');
+      if (m.type === "signal" && m.data.kind === "hello") { ws.send(JSON.stringify({ type: "signal", from: "desktop", data: { kind: "hello_ok", sessionId: m.data.sessionId, appProtocol: 3, features: ["live", "record"] } })); return; } // a 3b computer
       frames.push(m.type === "signal" ? m.data.kind : `${m.type}:${m.data && m.data.reason}`);
       await onSignal(m, ctl);
     });

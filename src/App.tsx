@@ -281,7 +281,15 @@ function CamLooper() {
   const phoneStream = usePhoneStream({
     // The phone's own Stop: back to idle with a neutral note, never an error.
     onStoppedByPhone: (mode) =>
-      toast(t(mode === 'file' ? 'phoneStream.file.cancelledByPhone' : 'phoneStream.stoppedByPhone')),
+      toast(
+        t(
+          mode === 'file'
+            ? 'phoneStream.file.cancelledByPhone'
+            : mode === 'record'
+              ? 'phoneStream.record.cancelledByPhone'
+              : 'phoneStream.stoppedByPhone',
+        ),
+      ),
     onStopFailed: () => toast.error(t('phoneStream.stopFailed')),
     onPhoneVideoLoaded: (video, playing) => void showPhoneVideo(video, playing),
     onLoopChanged: (playing) => void followPhoneLoop(playing),
@@ -289,6 +297,9 @@ function CamLooper() {
       toast.success(t('phoneStream.file.looping', { phone: isolate(deviceName || t('phoneStream.yourPhone')) })),
     onFileFailed: (file) =>
       toast.error(t('phoneStream.file.failed'), { description: file.error || undefined }),
+    onRecordLooping: (deviceName) =>
+      toast.success(t('phoneStream.record.looping', { phone: isolate(deviceName || t('phoneStream.yourPhone')) })),
+    onRecordFailed: (error) => toast.error(t('phoneStream.record.failed'), { description: error || undefined }),
   });
   // A phone asking to stream raises the window; that must not also open the welcome page in
   // a browser (which would take the focus away from the question) or count as an app open
@@ -303,10 +314,19 @@ function CamLooper() {
   // controls and say why instead of letting the click fail.
   const phoneBusy = cameraBusy(phoneStream.status);
   const handlePhoneAccept = async (sessionId: string) => {
-    const wasFile = phoneStream.request?.mode === 'file';
+    const mode = phoneStream.request?.mode;
     const result = await phoneStream.accept(sessionId);
-    if (result === 'expired') toast.error(t(wasFile ? 'phoneStream.file.expired' : 'phoneStream.expired'));
-    else if (result === 'offline') toast.warning(t('phoneStream.offline'));
+    if (result === 'expired') {
+      toast.error(
+        t(
+          mode === 'file'
+            ? 'phoneStream.file.expired'
+            : mode === 'record'
+              ? 'phoneStream.record.expired'
+              : 'phoneStream.expired',
+        ),
+      );
+    } else if (result === 'offline') toast.warning(t('phoneStream.offline'));
     else if (result === 'failed') toast.error(t('phoneStream.errors.generic'));
     // 'too_soon': the dialog is still there; nothing to say.
   };

@@ -69,6 +69,8 @@ await phone.routeWebSocket(/\/v1\/mobile\/ws/, (ws) => {
   ws.onMessage(async (msg) => {
     const m = JSON.parse(String(msg));
     if (m.type === "ping") { ws.send('{"type":"pong"}'); return; }
+    if (m.type === "signal" && m.data.kind === "hello") { ws.send(JSON.stringify({ type: "signal", from: "desktop", data: { kind: "hello_ok", sessionId: m.data.sessionId, appProtocol: 3, features: ["live", "record"] } })); return; } // a 3b computer
+    if (m.type === "signal" && m.data.kind === "stream_request" && "mode" in m.data) errors.push("a live stream_request must not carry a mode");
     if (m.type === "signal" && m.data.kind === "loop_control") return; // the page asks for the loop state on load; not part of a stream
     frames.push(m.type === "signal" ? `signal:${m.data.kind}${m.data.kind === "candidate" && m.data.candidate === "" ? "(end)" : ""}` : `${m.type}:${m.data && m.data.reason}`);
     if (m.type === "signal") await desk.evaluate((d) => window.onSig(d), m.data);

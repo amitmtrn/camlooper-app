@@ -211,6 +211,18 @@
       "failed": "Não foi possível reproduzir em loop o vídeo do seu telefone.",
       "cancelledByPhone": "O telefone cancelou o vídeo.",
       "expired": "Essa solicitação já expirou. Envie o vídeo do seu telefone novamente."
+    },
+    "record": {
+      "confirmTitle": "Gravar um loop de {{phone}}?",
+      "confirmBody": "{{phone}} vai gravar até 60 segundos. Depois, o CamLooper repete a gravação na sua câmera, do mesmo jeito que faz com um vídeo deste computador. Em seguida você pode fechar o telefone.",
+      "recording": "Gravando um loop de {{phone}} — {{time}}",
+      "preparing": "Preparando o loop…",
+      "cancelling": "Cancelando…",
+      "cancel": "Cancelar",
+      "looping": "Agora repetindo a gravação de {{phone}}.",
+      "failed": "Não foi possível repetir a gravação do seu telefone.",
+      "cancelledByPhone": "O telefone cancelou a gravação.",
+      "expired": "Essa solicitação já expirou. Toque em \"Record a loop\" no telefone novamente."
     }
   },
   "tray": {

@@ -42,7 +42,10 @@ async function newPage() {
     ws.send(JSON.stringify(page.__linked
       ? { type: "hello", protocol: 2, linked: true, desktopOnline: true, desktopName: "Studio PC <b>&</b>", desktopProtocol: 2 }
       : { type: "hello", protocol: 2, linked: false, desktopOnline: false }));
-    ws.onMessage(() => {});
+    ws.onMessage((msg) => {
+      const m = JSON.parse(String(msg));
+      if (m.type === "signal" && m.data.kind === "hello") ws.send(JSON.stringify({ type: "signal", from: "desktop", data: { kind: "hello_ok", sessionId: m.data.sessionId, appProtocol: 3, features: ["live", "record"] } }));
+    });
   });
   return page;
 }
@@ -71,6 +74,7 @@ try {
   const name = await page.textContent("#deskName");
   const hasB = await page.evaluate(() => !!document.querySelector("#deskName b"));
   if (name !== "Studio PC <b>&</b>" || hasB) throw new Error("desktopName not rendered as text");
+  await page.waitForFunction(() => !document.getElementById("btnRecord").disabled); // hello_ok arrived
   await page.screenshot({ path: path.join(HERE, "shot-home.png"), fullPage: true });
   await page.context().close();
   if (errors.length) throw new Error("page errors: " + errors.join(" | "));

@@ -211,6 +211,18 @@
       "failed": "无法循环播放手机发来的视频。",
       "cancelledByPhone": "手机已取消发送视频。",
       "expired": "该请求已过期。请从手机重新发送视频。"
+    },
+    "record": {
+      "confirmTitle": "要从 {{phone}} 录制循环吗？",
+      "confirmBody": "{{phone}} 最多录制 60 秒。之后 CamLooper 会在你的摄像头上循环播放这段录像，与播放这台电脑上的视频一样。此后你可以关闭手机。",
+      "recording": "正在从 {{phone}} 录制循环 — {{time}}",
+      "preparing": "正在准备循环…",
+      "cancelling": "正在取消…",
+      "cancel": "取消",
+      "looping": "正在循环播放来自 {{phone}} 的录像。",
+      "failed": "无法循环播放来自手机的录像。",
+      "cancelledByPhone": "手机已取消录制。",
+      "expired": "该请求已过期。请在手机上再次点按“Record a loop”。"
     }
   },
   "tray": {

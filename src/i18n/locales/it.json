@@ -211,6 +211,18 @@
       "failed": "Impossibile riprodurre in loop il video dal telefono.",
       "cancelledByPhone": "Il telefono ha annullato il video.",
       "expired": "La richiesta è già scaduta. Invia di nuovo il video dal telefono."
+    },
+    "record": {
+      "confirmTitle": "Registrare un loop da {{phone}}?",
+      "confirmBody": "{{phone}} registrerà fino a 60 secondi. Poi CamLooper riprodurrà la registrazione in loop sulla tua fotocamera, come fa con un video di questo computer. Dopo potrai chiudere il telefono.",
+      "recording": "Registrazione di un loop da {{phone}} — {{time}}",
+      "preparing": "Preparazione del loop…",
+      "cancelling": "Annullamento…",
+      "cancel": "Annulla",
+      "looping": "La registrazione di {{phone}} è ora in loop.",
+      "failed": "Impossibile riprodurre in loop la registrazione dal telefono.",
+      "cancelledByPhone": "Il telefono ha annullato la registrazione.",
+      "expired": "La richiesta è già scaduta. Tocca di nuovo «Record a loop» sul telefono."
     }
   },
   "tray": {

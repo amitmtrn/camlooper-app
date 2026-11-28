@@ -211,6 +211,18 @@
       "failed": "Telefonunuzdan gelen video döngüye alınamadı.",
       "cancelledByPhone": "Telefon videoyu iptal etti.",
       "expired": "Bu isteğin süresi zaten doldu. Videoyu telefonunuzdan yeniden gönderin."
+    },
+    "record": {
+      "confirmTitle": "{{phone}} cihazından döngü kaydedilsin mi?",
+      "confirmBody": "{{phone}} en fazla 60 saniye kaydedecek. Ardından CamLooper kaydı, bu bilgisayardaki bir videoda olduğu gibi kameranızda döngüye alır. Sonrasında telefonu kapatabilirsiniz.",
+      "recording": "{{phone}} cihazından döngü kaydediliyor — {{time}}",
+      "preparing": "Döngü hazırlanıyor…",
+      "cancelling": "İptal ediliyor…",
+      "cancel": "İptal",
+      "looping": "{{phone}} cihazından gelen kayıt şimdi döngüde oynatılıyor.",
+      "failed": "Telefonunuzdaki kayıt döngüye alınamadı.",
+      "cancelledByPhone": "Telefon kaydı iptal etti.",
+      "expired": "Bu isteğin süresi zaten doldu. Telefonunuzda tekrar \"Record a loop\" seçeneğine dokunun."
     }
   },
   "tray": {

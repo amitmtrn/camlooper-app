@@ -253,6 +253,18 @@
       "failed": "Couldn't loop the video from your phone.",
       "cancelledByPhone": "The phone cancelled the video.",
       "expired": "That request has already expired. Send the video from your phone again."
+    },
+    "record": {
+      "confirmTitle": "Record a loop from {{phone}}?",
+      "confirmBody": "{{phone}} will record up to 60 seconds. CamLooper then loops the recording on your camera, the same way it does with a video from this computer. After that you can close the phone.",
+      "recording": "Recording a loop from {{phone}} — {{time}}",
+      "preparing": "Preparing loop…",
+      "cancelling": "Cancelling…",
+      "cancel": "Cancel",
+      "looping": "Now looping the recording from {{phone}}.",
+      "failed": "Couldn't loop the recording from your phone.",
+      "cancelledByPhone": "The phone cancelled the recording.",
+      "expired": "That request has already expired. Tap Record a loop on your phone again."
     }
   },
   "tray": {

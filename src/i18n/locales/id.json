@@ -211,6 +211,18 @@
       "failed": "Tidak dapat memutar berulang video dari ponsel Anda.",
       "cancelledByPhone": "Ponsel membatalkan video.",
       "expired": "Permintaan itu sudah kedaluwarsa. Kirim lagi videonya dari ponsel Anda."
+    },
+    "record": {
+      "confirmTitle": "Rekam loop dari {{phone}}?",
+      "confirmBody": "{{phone}} akan merekam hingga 60 detik. Setelah itu CamLooper memutar rekaman tersebut berulang di kamera Anda, sama seperti video dari komputer ini. Sesudahnya Anda boleh menutup ponsel.",
+      "recording": "Merekam loop dari {{phone}} — {{time}}",
+      "preparing": "Menyiapkan pemutaran berulang…",
+      "cancelling": "Membatalkan…",
+      "cancel": "Batal",
+      "looping": "Rekaman dari {{phone}} sekarang diputar berulang.",
+      "failed": "Tidak dapat memutar ulang rekaman dari ponsel Anda.",
+      "cancelledByPhone": "Ponsel membatalkan rekaman.",
+      "expired": "Permintaan itu sudah kedaluwarsa. Ketuk \"Record a loop\" lagi di ponsel Anda."
     }
   },
   "tray": {

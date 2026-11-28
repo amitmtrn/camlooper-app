@@ -89,8 +89,156 @@ enable raises a single UAC prompt to register the driver; that is by design.
 
 <!-- Newest entries first. -->
 
+### Record a loop on the phone (remote v2, phase 3b): phone page and desktop UI
+_Added 2026-11-28 · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, locales_
+
+The phone page no longer offers "Choose a video / Send & loop". Next to **Start streaming**
+there is **Record a loop**: the phone films up to 1 minute through the normal live path, the
+computer saves it, and after Stop the computer loops the take as its camera. The phone can
+then be locked or closed.
+
+**Already automated, don't repeat by hand:** `node remote-web/dev/smoke-record.mjs` (needs
+`PLAYWRIGHT_CORE`, see `remote-web/dev/README.md`) covers the phone page against a fake
+computer: the file card is never visible; `hello` is sent once with `appProtocol: 3`; Record
+a loop is disabled until `hello_ok` (appProtocol ≥ 3 with `record`), and with no answer in
+5 s / an old answer the page shows "Update CamLooper on your computer to record a loop." and
+sends no request; `stream_request` carries `mode: "record"`; `REC 0:0x / 1:00`; Switch camera
+disabled; Stop sends `stream_stop{user}`; the phone stops by itself at 1:00; too-short,
+failed, cancelled-on-the-computer, declined / busy / timeout / unsupported messages; Stop
+loop / Play loop afterwards. What is left for eyes is below.
+
+**Setup:** a build of this branch on the computer (desktop and phone page must both be 3b),
+the virtual camera on, a phone linked (see "Phone remote: linking with a code"), both on the
+same Wi-Fi. A camera viewer on the computer (Zoom's video preview, or `ffplay /dev/video10`
+on Linux).
+
+**Steps:**
+1. Open the phone page. Wait for "Online".
+2. Look at the "Use this phone as the camera" card.
+3. Tap **Record a loop**. On the computer, read the dialog, then click **Accept**.
+4. Watch the phone and the top of the CamLooper window for about 10 seconds.
+5. On the phone tap **Stop**.
+6. Lock the phone (or close the app) and watch the camera viewer for 30 seconds.
+7. Unlock the phone, tap **Stop loop**, then **Play loop**.
+8. Tap **Record a loop** again, accept, and this time click **Cancel** in the computer's
+   banner after about 5 seconds.
+9. Tap **Record a loop**, accept, and tap **Stop** on the phone within one second.
+10. Tap **Record a loop**, accept, and leave it alone for 60 seconds.
+11. Tap **Start streaming**, accept, then stop it from the phone.
+12. Old computer: link the phone to a CamLooper build from before 3b (or quit CamLooper,
+    start the older build) and reopen the phone page.
+
+**Expected:**
+- Step 2: two buttons side by side, **Start streaming** and **Record a loop** (red dot).
+  No "Choose a video", no "Send & loop" anywhere on the page. Record a loop becomes
+  tappable within a second of "Online".
+- Step 3: the dialog title is "Record a loop from <phone name>?" and the text says the
+  phone records up to 60 seconds, the recording then loops on the camera like a local video,
+  and the phone can be closed afterwards. Accept is greyed for about a second; Escape and
+  Decline decline.
+- Step 4: phone: red chip `REC 0:03 / 1:00` counting up, the camera preview, **Switch
+  camera** greyed out, "Keep this page open and the screen on while recording." Computer: a
+  red banner "Recording a loop from <phone name> — 0:03" counting up with a **Cancel**
+  button; the camera viewer shows the phone's camera live.
+- Step 5: the phone returns to the home screen with a "Loop on your computer" card showing
+  a spinner and "Preparing loop…"; both start buttons are greyed until it resolves. The
+  computer's banner reads "Preparing loop…". Then: phone shows "Recording done ✓", a green
+  dot with "Looping on your computer now", the line "You can lock this phone or close the
+  app. The loop keeps playing." and a **Stop loop** button; the computer shows the toast
+  "Now looping the recording from <phone name>." and the banner is gone; the video card
+  shows the take as the loaded video.
+- Step 6: the camera viewer keeps playing the take on repeat.
+- Step 7: the viewer freezes/blanks on Stop loop and the button becomes **Play loop**; it
+  plays again after Play loop.
+- Step 8: the phone leaves the recording screen by itself; the take (longer than 2 s) still
+  becomes the loop, with the same success texts as step 5.
+- Step 9: phone: "That recording was too short to loop. Record at least 2 seconds." No
+  error banner on the computer, and whatever was looping before is unchanged.
+- Step 10: at `REC 1:00 / 1:00` the phone stops on its own and step 5's sequence follows.
+- Step 11: exactly as before 3b: the "Use your phone as the camera?" dialog, the "Phone
+  camera live" banner with **Stop**, Switch camera usable on the phone.
+- Step 12: about 5 seconds after "Online" the phone shows "Update CamLooper on your
+  computer to record a loop." under the buttons; Record a loop stays greyed; tapping Start
+  streaming shows "Update CamLooper on your computer to use this phone as a camera." and
+  nothing appears on the computer.
+
+**Known gotchas:**
+- The phone's clock starts when the connection is up and is corrected to the computer's own
+  count a moment later (the computer skips the first half second), so it can jump back by
+  up to a second right at the start.
+- A new phone page with an old computer cannot stream live either. That is intended: both
+  sides are updated together.
+- While "Preparing loop…" shows, the phone waits up to 45 s for the computer. If the
+  computer never answers it says "The computer didn't confirm the loop. Check CamLooper on
+  your computer." and then shows whatever the computer reports as playing.
+- The desktop strings in the 17 non-English locales are machine translated.
+
+### Record a loop on the phone (remote v2, phase 3b): what the computer does with the take
+_Added 2026-11-28 · All · `src-tauri/src/remote/stream/record.rs`, `runner.rs`, `machine.rs`, `signal.rs`, `handoff.rs`_
+
+The computer's half of "Record a loop": while the phone's camera is live on the virtual
+camera, the same video is saved to a private file; on Stop it is repackaged (not re-encoded)
+and looped by the normal loop engine. The buttons and texts are covered by the entry above;
+this one is about the result.
+
+**Already automated, don't repeat by hand:** `cd src-tauri && cargo test --lib && cargo test
+--test phone_stream_loopback` (needs `ffmpeg`/`ffprobe` on PATH) covers: `hello` →
+`hello_ok` and its rate limit; `mode: "record"` never being treated as live, unknown modes
+answered `unsupported`; a real WebRTC stream (H.264 and VP8) recorded, remuxed to MP4 / WebM
+with the take's duration, handed to the loop engine, `stream_stop{done}`, and the loop
+outliving the phone; the 2 s minimum (`too_short`, file deleted); the 60 s cap; cancel while
+processing; a take that is mostly stalls or that the loader refuses (`incomplete`, file
+deleted, the earlier loop restored); and the real loop engine playing a recorded take.
+
+**Setup:** as in the entry above. A camera viewer on the computer. On Linux, a terminal
+ready with `ls -la ~/.local/share/com.camlooper.app/phone-videos/` (Windows:
+`dir %APPDATA%\com.camlooper.app\phone-videos`); if the folder is elsewhere on your build,
+it is `phone-videos` inside the app's data folder.
+
+**Steps:**
+1. With a local video looping in CamLooper, tap **Record a loop** on the phone and accept.
+2. Wave a hand in front of the phone for about 10 seconds while watching the camera viewer,
+   and list the `phone-videos` folder during that time.
+3. Tap **Stop** on the phone. When the phone says "Looping on your computer now", list the
+   folder again and watch the viewer for 30 seconds.
+4. Turn the phone's Wi-Fi off (or close the app). Watch the viewer for another 30 seconds.
+5. In CamLooper, load a video from the computer with the file picker. List the folder.
+6. Record again, and after 5 seconds turn the phone's Wi-Fi off instead of tapping Stop.
+   Wait 15 seconds, then list the folder.
+
+**Expected:**
+- Step 2: the viewer shows the phone's camera live (not the local video), without visible
+  stutter from the recording. The folder holds exactly one file, `phone-<16 hex>.part`,
+  growing.
+- Step 3: within a few seconds the viewer switches from the live picture to the take. It
+  shows the hand-waving from about half a second after "live" up to the Stop, plays past its
+  own length without a freeze or jump back to a black frame (natural motion), and the
+  picture is as sharp as the live one was (it is the same video, not a re-encode). The
+  folder holds exactly one file, `phone-<16 hex>.mp4` (`.webm` if the phone sent VP8); no
+  `.part`. The video card in CamLooper shows "Phone recording.mp4".
+- Step 4: nothing changes in the viewer. No error appears in CamLooper.
+- Step 5: the folder is empty.
+- Step 6: within about 15 seconds the recording banner disappears, as it does for a live
+  stream whose phone vanished; nothing of the take is kept (a take is only looped when it is
+  stopped, not when the connection is lost); the video from step 5 is looping again; the
+  folder is empty.
+
+**Known gotchas:**
+- The loop starts about half a second into what the phone filmed: the first moments, while
+  the phone's encoder is still ramping up its quality, are skipped on purpose.
+- If the phone films at a low frame rate (a dark room), the loop has that frame rate too.
+- A take stopped under 2 seconds leaves no error on the computer at all — the message is on
+  the phone.
+- Windows: a `.part` or `.mp4` that could not be deleted because ffmpeg still had it open is
+  removed the next time a video is loaded, or at the next start.
+
 ### Loop a video sent from the phone (remote v2, phase 3)
 _Added 2026-11-27, Video info / instant Stop-Play follow-up and the security-review fixes (steps 12–15) the same day · All · `remote-web/index.html`, `src/components/PhoneStream.tsx`, `src/hooks/use-phone-stream.ts`, `src/App.tsx`, `src-tauri/src/remote/stream/`_
+
+> **Since 3b (2026-11-28) the phone page no longer shows this card** (see "Record a loop on
+> the phone" above), and `remote-web/dev/smoke-file.mjs` was replaced by `smoke-record.mjs`.
+> The phone-page steps below cannot be run from the page any more; the desktop side of a
+> `mode: "file"` session is unchanged.
 
 On the phone page the "Loop a video" card sends one video file straight to the computer
 (WebRTC DataChannel, no upload to a server). The computer asks before taking it, shows the
@@ -777,6 +925,53 @@ builds them).
 ## Linux
 
 <!-- Newest entries first. -->
+
+### Headless CLI: record a loop from the phone (remote v2, phase 3b)
+_Added 2026-11-28 · Linux · `src-tauri/examples/phone_stream_cli.rs`, `src-tauri/src/remote/stream/record.rs`_
+
+`phone_stream_cli` accepts the phone page's "Record a loop" by itself and runs the app's own
+path: live to `--device`, the take teed into its private temp folder, remuxed, and looped by
+the real loop engine — which keeps looping after the phone has gone. Dev tool; nothing here
+ships.
+
+**Setup:** as in the file-mode entry below (`/dev/video10`, `ffmpeg`, `ffplay`, the phone page
+showing a 6-digit code, `cargo build --example phone_stream_cli` in `src-tauri/`).
+
+**Steps:**
+1. `./target/debug/examples/phone_stream_cli --code <6 digits> --device /dev/video10 --seconds 120 2>/tmp/cli.err | tee /tmp/cli.jsonl`
+2. `ffplay -f v4l2 /dev/video10` in a second terminal.
+3. On the phone tap **Record a loop**, film for about 8 seconds, tap **Stop**.
+4. Close the phone page (or turn its Wi-Fi off). Keep watching ffplay for 20 seconds.
+5. `ls /tmp/camlooper-cli-*/phone-videos/`, then
+   `ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/camlooper-cli-*/phone-videos/phone-*.mp4`
+6. Press Ctrl-C in the first terminal, then `ls -d /tmp/camlooper-cli-* 2>/dev/null; grep -vc '^{' /tmp/cli.jsonl`.
+
+**Expected:**
+- Step 1: `{"event":"connected","protocol":2,"appProtocol":3}`; the phone's Record a loop
+  button becomes tappable (a `send` of `hello_ok` is logged).
+- Step 3: `{"event":"stream_request",…,"mode":"record","autoAccept":true}`, state lines up to
+  `live` with `"mode":"record"`, per-second `status` lines, then
+  `{"event":"recording","elapsedMs":…,"capMs":60000}` about a second into the take. ffplay
+  shows the phone's camera. After Stop: `{"event":"processing","elapsedMs":<about 7500>}`,
+  `{"event":"file_saved","path":"/tmp/camlooper-cli-…/phone-videos/phone-<16 hex>.mp4",…}`,
+  `{"event":"video_loaded","video":{…,"filename":"Phone recording.mp4",…},"playing":true}`,
+  `{"event":"looping","name":"Phone recording.mp4"}`, a `send` of `stream_stop(done)`,
+  `{"event":"loop_status","playing":true,"fromPhone":true,"name":"Phone recording.mp4",…}`,
+  and from then on one `{"event":"loop","playing":true,…}` line per second. ffplay shows the
+  take, moving.
+- Step 4: the `loop` lines and the picture in ffplay go on unchanged; the CLI does not exit.
+- Step 5: exactly one file, `phone-<16 hex>.mp4`; the duration printed is within half a
+  second of the `elapsedMs` of the `processing` line.
+- Step 6: `{"event":"cleanup","deleted":1,"dirRemoved":true,"loopStopped":true,…}`,
+  `unpaired`, exit status 0; the `ls` prints nothing and the `grep` prints `0`.
+
+**Known gotchas:**
+- Tapping Stop less than 2 seconds into the take prints no `processing`; the phone is sent
+  `stream_stop(too_short)`, the temp folder is empty again, and the CLI keeps running until
+  `--seconds` (as after a file session), so the phone can try again.
+- If `--seconds` runs out during a take, the take is finished and looped first, then the CLI
+  cleans up and exits.
+- A phone that sends VP8 gives `phone-<16 hex>.webm` and "Phone recording.webm".
 
 ### Headless CLI: loop a video from the phone (remote v2, phase 3)
 _Added 2026-11-27 · Linux · `src-tauri/examples/phone_stream_cli.rs`, `src-tauri/src/remote/stream/loop_engine.rs`, `src-tauri/src/virtual_camera.rs`_

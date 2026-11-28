@@ -213,6 +213,18 @@
       "failed": "Nie udało się zapętlić filmu z telefonu.",
       "cancelledByPhone": "Telefon anulował wysyłanie filmu.",
       "expired": "Ta prośba już wygasła. Wyślij film z telefonu jeszcze raz."
+    },
+    "record": {
+      "confirmTitle": "Nagrać pętlę z {{phone}}?",
+      "confirmBody": "{{phone}} nagra do 60 sekund. Następnie CamLooper będzie odtwarzać nagranie w pętli na Twojej kamerze, tak samo jak film z tego komputera. Potem możesz zamknąć telefon.",
+      "recording": "Nagrywanie pętli z {{phone}} — {{time}}",
+      "preparing": "Przygotowywanie pętli…",
+      "cancelling": "Anulowanie…",
+      "cancel": "Anuluj",
+      "looping": "Nagranie z {{phone}} jest teraz odtwarzane w pętli.",
+      "failed": "Nie udało się zapętlić nagrania z telefonu.",
+      "cancelledByPhone": "Telefon anulował nagrywanie.",
+      "expired": "Ta prośba już wygasła. Stuknij ponownie „Record a loop” na telefonie."
     }
   },
   "tray": {

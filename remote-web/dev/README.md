@@ -53,6 +53,7 @@ node selftest.mjs         # proxy vs. a local fake upstream (HTTP + raw WebSocke
 node smoke-shots.mjs      # headless Chrome 412×915 → shot-pair.png, shot-code.png, shot-home.png
 node smoke-stream.mjs     # phone page (fake camera) → fake desktop peer through a mocked relay socket
 node smoke-behaviors.mjs  # mic note/mute, stale stream_stop, codec rejection, relay too_large, 4000, retry msg
+node smoke-record.mjs     # Record a loop: app-protocol hello gating, a take (REC clock, Stop, 1:00 auto-stop), outcomes, loop controls; the old file card stays hidden → shot-record-*.png
 ```
 
 The smoke scripts need `playwright-core` (the library only; it downloads no browser) and

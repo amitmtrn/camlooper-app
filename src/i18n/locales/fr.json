@@ -211,6 +211,18 @@
       "failed": "Impossible de lire en boucle la vidéo de votre téléphone.",
       "cancelledByPhone": "Le téléphone a annulé la vidéo.",
       "expired": "Cette demande a déjà expiré. Renvoyez la vidéo depuis votre téléphone."
+    },
+    "record": {
+      "confirmTitle": "Enregistrer une boucle depuis {{phone}} ?",
+      "confirmBody": "{{phone}} va enregistrer jusqu'à 60 secondes. CamLooper lira ensuite l'enregistrement en boucle sur votre caméra, comme pour une vidéo de cet ordinateur. Vous pourrez alors fermer le téléphone.",
+      "recording": "Enregistrement d'une boucle depuis {{phone}} — {{time}}",
+      "preparing": "Préparation de la boucle…",
+      "cancelling": "Annulation…",
+      "cancel": "Annuler",
+      "looping": "L'enregistrement de {{phone}} est maintenant lu en boucle.",
+      "failed": "Impossible de lire en boucle l'enregistrement de votre téléphone.",
+      "cancelledByPhone": "Le téléphone a annulé l'enregistrement.",
+      "expired": "Cette demande a déjà expiré. Touchez à nouveau « Record a loop » sur votre téléphone."
     }
   },
   "tray": {

@@ -211,6 +211,18 @@
       "failed": "Không thể phát lặp video từ điện thoại của bạn.",
       "cancelledByPhone": "Điện thoại đã hủy gửi video.",
       "expired": "Yêu cầu đó đã hết hạn. Hãy gửi lại video từ điện thoại của bạn."
+    },
+    "record": {
+      "confirmTitle": "Ghi một vòng lặp từ {{phone}}?",
+      "confirmBody": "{{phone}} sẽ ghi tối đa 60 giây. Sau đó CamLooper phát lặp lại bản ghi trên camera của bạn, giống như với video từ máy tính này. Sau đó bạn có thể đóng điện thoại.",
+      "recording": "Đang ghi vòng lặp từ {{phone}} — {{time}}",
+      "preparing": "Đang chuẩn bị phát lặp…",
+      "cancelling": "Đang hủy…",
+      "cancel": "Hủy",
+      "looping": "Đang phát lặp lại bản ghi từ {{phone}}.",
+      "failed": "Không thể phát lặp lại bản ghi từ điện thoại của bạn.",
+      "cancelledByPhone": "Điện thoại đã hủy bản ghi.",
+      "expired": "Yêu cầu đó đã hết hạn. Hãy nhấn lại \"Record a loop\" trên điện thoại."
     }
   },
   "tray": {
