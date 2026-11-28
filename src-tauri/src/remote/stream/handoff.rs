@@ -54,6 +54,16 @@ impl Undo {
     fn take_for(&mut self, epoch: u64) -> Option<Undo> {
         (self.claimed && self.epoch == epoch).then(|| std::mem::take(self))
     }
+
+    /// `epoch`'s recorded take now loops on the camera: the camera it started stays on, and
+    /// the video it paused is not resumed (it was replaced). The claim itself stays until
+    /// the release.
+    fn keep_for_loop(&mut self, epoch: u64) {
+        if self.claimed && self.epoch == epoch {
+            self.resume_playback = false;
+            self.stop_camera = false;
+        }
+    }
 }
 
 /// How many early releases are remembered; see [`Claims::released_early`].
@@ -176,6 +186,24 @@ impl CameraControl for AppCamera {
         Box::pin(self.acquire_inner(epoch, cancel))
     }
 
+    fn yield_to_loop(&self, epoch: u64) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            // The claim (and with it everything `release` would undo) stays; only the
+            // refusal of other writers ends, so the loop engine can start the take.
+            let claims = self.claims.lock().await;
+            if claims.undo.claimed && claims.undo.epoch == epoch {
+                PHONE_OWNS_CAMERA.store(false, Ordering::SeqCst);
+            }
+        })
+    }
+
+    fn keep_for_loop(&self, epoch: u64) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let mut claims = self.claims.lock().await;
+            claims.undo.keep_for_loop(epoch);
+        })
+    }
+
     fn release(&self, epoch: u64) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             // Waits for an acquire that is still running (it holds both locks throughout).
@@ -274,6 +302,22 @@ mod tests {
         assert_eq!(undo.take_for(2), None);
         assert!(undo.claimed && undo.stop_camera && undo.epoch == 3);
         assert!(undo.take_for(3).is_some());
+    }
+
+    #[test]
+    fn a_take_that_loops_keeps_the_camera_and_does_not_bring_the_old_video_back() {
+        let mut undo = Undo::default();
+        undo.claim(4).unwrap();
+        undo.stop_camera = true;
+        undo.resume_playback = true;
+        // Another session's take is not this one's business.
+        undo.keep_for_loop(3);
+        assert!(undo.stop_camera && undo.resume_playback);
+        undo.keep_for_loop(4);
+        // Still claimed until the release, which then finds nothing to undo.
+        assert_eq!(undo, Undo { resume_playback: false, stop_camera: false, claimed: true, epoch: 4 });
+        assert_eq!(undo.take_for(4), Some(Undo { resume_playback: false, stop_camera: false, claimed: true, epoch: 4 }));
+        assert_eq!(undo, Undo::default());
     }
 
     #[test]

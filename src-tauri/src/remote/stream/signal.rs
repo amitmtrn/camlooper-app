@@ -31,13 +31,26 @@ pub const MAX_LOOP_ERROR: usize = 120;
 /// File extensions a phone video may have (also what the stored file is named with).
 pub const PHONE_VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "3gp"];
 
-/// What a phone session carries: its live camera, or one video file to loop.
+/// The app-level protocol this desktop speaks (`hello` / `hello_ok`). Independent of the
+/// relay's `?protocol=2`. 3 added `hello` itself and `mode: "record"`.
+pub const APP_PROTOCOL: u32 = 3;
+/// A recorded take is at most this long; the desktop finalizes it then, whatever the phone does.
+pub const RECORD_CAP_MS: u64 = 60_000;
+/// `hello_ok.features` entries are short lowercase words; this many at most are kept.
+const MAX_FEATURES: usize = 16;
+const MAX_FEATURE_LEN: usize = 24;
+
+/// What a phone session carries: its live camera, one video file to loop, or its live camera
+/// recorded on the desktop and then looped (`record`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamMode {
     #[default]
     Live,
     File,
+    /// The phone streams as for `live`; the desktop tees the stream to a file and, when the
+    /// take ends, loops that file. Never treated as `live`.
+    Record,
 }
 
 impl StreamMode {
@@ -128,7 +141,19 @@ pub enum StreamSignal {
         fps: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codec: Option<String>,
+        /// `record` for a record session; absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<StreamMode>,
+        /// Record sessions: where the take is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record: Option<RecordStatus>,
     },
+    /// phone → desktop, once after pairing: "which app protocol do you speak?". `sessionId`
+    /// is any valid id; no session needs to be open. Answered with `hello_ok`.
+    Hello { session_id: String, app_protocol: u32 },
+    /// desktop → phone: the answer to `hello`. `features` are the request modes this
+    /// desktop takes (`live`, `record`, `file`).
+    HelloOk { session_id: String, app_protocol: u32, features: Vec<String> },
     /// phone → desktop: act on the video loaded on the desktop. `sessionId` is any valid id;
     /// no session needs to be open. Always answered with `loop_status`.
     LoopControl { session_id: String, action: LoopAction },
@@ -145,6 +170,39 @@ pub enum StreamSignal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+}
+
+/// Where a recorded take is (`record.phase`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordPhase {
+    /// From the request on: connecting, then teeing the stream into the take.
+    Recording,
+    /// The take ended; it is being remuxed and loaded.
+    Processing,
+    /// Looping on the virtual camera. The session is over by now.
+    Looping,
+    Failed,
+}
+
+/// `record` in the UI status and in the phone's `status` signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordStatus {
+    /// Media in the take so far (after the pre-roll).
+    pub elapsed_ms: u64,
+    /// [`RECORD_CAP_MS`].
+    pub cap_ms: u64,
+    pub phase: RecordPhase,
+    /// With `failed`: short text saying why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl RecordStatus {
+    pub fn new(phase: RecordPhase, elapsed_ms: u64) -> Self {
+        Self { elapsed_ms: elapsed_ms.min(RECORD_CAP_MS), cap_ms: RECORD_CAP_MS, phase, error: None }
+    }
 }
 
 fn null_as_empty<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -183,9 +241,15 @@ pub enum StopReason {
     /// with a reason of its own followed. A normal ending, never sent to the phone.
     PeerStopped,
     Timeout,
-    /// A file session finished: the video was received and is looping. A success on both
-    /// sides, never an error.
+    /// A file or record session finished: the video is looping. A success on both sides,
+    /// never an error.
     Done,
+    /// A record session was stopped before the take held [`super::record::MIN_TAKE_MS`] of
+    /// media. Nothing loops; not an error.
+    TooShort,
+    /// A record session's take could not be made into a loop (no keyframe, mostly stalls,
+    /// the remux or the loader refused it). Nothing loops.
+    Incomplete,
     Other(String),
 }
 
@@ -199,6 +263,8 @@ impl StopReason {
             StopReason::PeerStopped => "peer_stopped",
             StopReason::Timeout => "timeout",
             StopReason::Done => "done",
+            StopReason::TooShort => "too_short",
+            StopReason::Incomplete => "incomplete",
             StopReason::Other(s) => s,
         }
     }
@@ -212,13 +278,18 @@ impl StopReason {
             "peer_stopped" => StopReason::PeerStopped,
             "timeout" => StopReason::Timeout,
             "done" | "finished" => StopReason::Done,
+            "too_short" => StopReason::TooShort,
+            "incomplete" => StopReason::Incomplete,
             other => StopReason::Other(sanitize_label(other, 32).unwrap_or_else(|| "unknown".into())),
         }
     }
 
     /// Whether this ending is a failure worth surfacing as `lastError`.
     pub fn is_failure(&self) -> bool {
-        !matches!(self, StopReason::User | StopReason::PeerOffline | StopReason::PeerStopped | StopReason::Done)
+        !matches!(
+            self,
+            StopReason::User | StopReason::PeerOffline | StopReason::PeerStopped | StopReason::Done | StopReason::TooShort
+        )
     }
 }
 
@@ -265,6 +336,8 @@ const KNOWN_KINDS: &[&str] = &[
     "answer",
     "candidate",
     "status",
+    "hello",
+    "hello_ok",
     "loop_control",
     "loop_status",
 ];
@@ -302,10 +375,12 @@ fn parse_request(obj: &serde_json::Map<String, Value>) -> Result<StreamSignal, S
         None | Some(Value::Null) => StreamMode::Live,
         Some(Value::String(m)) if m == "live" => StreamMode::Live,
         Some(Value::String(m)) if m == "file" => StreamMode::File,
-        // A mode from a newer phone page.
+        Some(Value::String(m)) if m == "record" => StreamMode::Record,
+        // A mode from a newer phone page: answered `unsupported`, never taken for live.
         Some(_) => return Err(refuse(RejectReason::Unsupported)),
     };
-    if mode == StreamMode::Live {
+    // Live and record carry no file; a stray `file` on them is dropped.
+    if mode != StreamMode::File {
         return Ok(StreamSignal::StreamRequest { session_id, device_label, mode, file: None });
     }
     let file = obj.get("file").and_then(Value::as_object).ok_or_else(|| refuse(RejectReason::Unsupported))?;
@@ -401,6 +476,21 @@ fn validate(sig: StreamSignal) -> Result<StreamSignal, SignalError> {
             from_phone,
             error: error.and_then(|e| sanitize_label(&e, MAX_LOOP_ERROR)),
         },
+        StreamSignal::Hello { session_id, app_protocol } => {
+            if app_protocol == 0 {
+                return Err(SignalError::Malformed("appProtocol must be at least 1".into()));
+            }
+            StreamSignal::Hello { session_id, app_protocol }
+        }
+        StreamSignal::HelloOk { session_id, app_protocol, features } => StreamSignal::HelloOk {
+            session_id,
+            app_protocol,
+            features: features
+                .into_iter()
+                .filter(|f| !f.is_empty() && f.len() <= MAX_FEATURE_LEN && f.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                .take(MAX_FEATURES)
+                .collect(),
+        },
         StreamSignal::Offer { session_id, sdp } => {
             check_sdp(&sdp)?;
             StreamSignal::Offer { session_id, sdp }
@@ -444,6 +534,8 @@ impl StreamSignal {
             | StreamSignal::Answer { session_id, .. }
             | StreamSignal::Candidate { session_id, .. }
             | StreamSignal::Status { session_id, .. }
+            | StreamSignal::Hello { session_id, .. }
+            | StreamSignal::HelloOk { session_id, .. }
             | StreamSignal::LoopControl { session_id, .. }
             | StreamSignal::LoopStatus { session_id, .. } => session_id,
         }
@@ -458,6 +550,8 @@ impl StreamSignal {
             StreamSignal::Answer { .. } => "answer",
             StreamSignal::Candidate { .. } => "candidate",
             StreamSignal::Status { .. } => "status",
+            StreamSignal::Hello { .. } => "hello",
+            StreamSignal::HelloOk { .. } => "hello_ok",
             StreamSignal::LoopControl { .. } => "loop_control",
             StreamSignal::LoopStatus { .. } => "loop_status",
         }
@@ -629,6 +723,102 @@ mod tests {
         let explicit = json!({"kind":"stream_request","sessionId":"s1","deviceLabel":"Pixel","mode":"live","file":{"name":"x.mp4","size":1,"mime":"video/mp4"}});
         assert_eq!(parse_signal(&explicit).unwrap(), sig);
         assert_eq!(parse_signal(&json!({"kind":"stream_request","sessionId":"s1","deviceLabel":"Pixel","mode":null})).unwrap(), sig);
+    }
+
+    #[test]
+    fn hello_is_answered_with_the_app_protocol_and_the_features() {
+        assert_eq!(APP_PROTOCOL, 3);
+        assert_eq!(
+            parse_signal(&json!({"kind":"hello","sessionId":"h1","appProtocol":3})).unwrap(),
+            StreamSignal::Hello { session_id: "h1".into(), app_protocol: 3 }
+        );
+        // A newer phone (extra fields, a higher protocol) is still answered.
+        assert_eq!(
+            parse_signal(&json!({"kind":"hello","sessionId":"h1","appProtocol":7,"wants":["x"]})).unwrap(),
+            StreamSignal::Hello { session_id: "h1".into(), app_protocol: 7 }
+        );
+        // No protocol, not a number, zero, negative, or nobody to answer.
+        for bad in [
+            json!({"kind":"hello","sessionId":"h1"}),
+            json!({"kind":"hello","sessionId":"h1","appProtocol":"3"}),
+            json!({"kind":"hello","sessionId":"h1","appProtocol":0}),
+            json!({"kind":"hello","sessionId":"h1","appProtocol":-1}),
+            json!({"kind":"hello","sessionId":"h1","appProtocol":3.5}),
+            json!({"kind":"hello","appProtocol":3}),
+        ] {
+            assert!(matches!(parse_signal(&bad), Err(SignalError::Malformed(_))), "{bad}");
+        }
+        assert_eq!(parse_signal(&json!({"kind":"hello","sessionId":"bad id","appProtocol":3})), Err(SignalError::BadSessionId));
+
+        let ok = StreamSignal::HelloOk { session_id: "h1".into(), app_protocol: APP_PROTOCOL, features: vec!["live".into(), "record".into()] };
+        assert_eq!(ok.kind(), "hello_ok");
+        let wire = json!({"kind":"hello_ok","sessionId":"h1","appProtocol":3,"features":["live","record"]});
+        assert_eq!(serde_json::to_value(&ok).unwrap(), wire);
+        assert_eq!(parse_signal(&wire).unwrap(), ok);
+        // Features are short lowercase words; anything else is dropped, and the list is bounded.
+        let StreamSignal::HelloOk { features, .. } =
+            parse_signal(&json!({"kind":"hello_ok","sessionId":"h1","appProtocol":3,"features":["live","Re cord","","x".repeat(40),"file"]})).unwrap()
+        else {
+            panic!("not a hello_ok")
+        };
+        assert_eq!(features, vec!["live", "file"]);
+        assert!(matches!(parse_signal(&json!({"kind":"hello_ok","sessionId":"h1","appProtocol":3})), Err(SignalError::Malformed(_))));
+        assert!(matches!(parse_signal(&json!({"kind":"hello_ok","sessionId":"h1","appProtocol":3,"features":"live"})), Err(SignalError::Malformed(_))));
+    }
+
+    #[test]
+    fn a_record_request_is_its_own_mode_and_never_live() {
+        let wire = json!({"kind":"stream_request","sessionId":"r1","deviceLabel":"Pixel","mode":"record"});
+        let sig = parse_signal(&wire).unwrap();
+        assert_eq!(
+            sig,
+            StreamSignal::StreamRequest { session_id: "r1".into(), device_label: Some("Pixel".into()), mode: StreamMode::Record, file: None }
+        );
+        assert_eq!(serde_json::to_value(&sig).unwrap(), wire);
+        // A stray `file` on it is dropped, not required.
+        let with_file = json!({"kind":"stream_request","sessionId":"r1","deviceLabel":"Pixel","mode":"record","file":{"name":"x.mp4","size":1}});
+        assert_eq!(parse_signal(&with_file).unwrap(), sig);
+        // Modes are exact: nothing close to a known one is taken for it, or for live.
+        for mode in ["Record", "RECORD", "record ", "rec", "live_record", ""] {
+            assert_eq!(
+                parse_signal(&json!({"kind":"stream_request","sessionId":"f1","mode":mode})),
+                refused(RejectReason::Unsupported),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_phone_status_carries_the_take() {
+        let status = StreamSignal::Status {
+            session_id: "r1".into(),
+            state: LinkState::Live,
+            width: Some(1280),
+            height: Some(720),
+            fps: Some(30),
+            codec: Some("H264".into()),
+            mode: Some(StreamMode::Record),
+            record: Some(RecordStatus::new(RecordPhase::Recording, 12_345)),
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            json!({"kind":"status","sessionId":"r1","state":"live","width":1280,"height":720,"fps":30,"codec":"H264",
+                   "mode":"record","record":{"elapsedMs":12345,"capMs":60000,"phase":"recording"}})
+        );
+        let failed = RecordStatus { error: Some("too short".into()), ..RecordStatus::new(RecordPhase::Failed, 99_000) };
+        assert_eq!(serde_json::to_value(&failed).unwrap(), json!({"elapsedMs":60000,"capMs":60000,"phase":"failed","error":"too short"}));
+        for (phase, text) in [(RecordPhase::Processing, "processing"), (RecordPhase::Looping, "looping")] {
+            assert_eq!(serde_json::to_value(phase).unwrap(), json!(text));
+        }
+    }
+
+    #[test]
+    fn the_record_endings_have_their_own_reasons() {
+        for (reason, text, failure) in [(StopReason::TooShort, "too_short", false), (StopReason::Incomplete, "incomplete", true)] {
+            assert_eq!(StopReason::parse(text), reason);
+            assert_eq!(reason.as_str(), text);
+            assert_eq!(reason.is_failure(), failure, "{text}");
+        }
     }
 
     #[test]
@@ -932,7 +1122,7 @@ mod tests {
             json!({"kind":"answer","sessionId":"s","sdp":"v=0"})
         );
         assert_eq!(
-            s(StreamSignal::Status { session_id: "s".into(), state: LinkState::Connecting, width: None, height: None, fps: None, codec: None }),
+            s(StreamSignal::Status { session_id: "s".into(), state: LinkState::Connecting, width: None, height: None, fps: None, codec: None, mode: None, record: None }),
             json!({"kind":"status","sessionId":"s","state":"connecting"})
         );
         assert_eq!(
@@ -942,7 +1132,9 @@ mod tests {
                 width: Some(1280),
                 height: Some(720),
                 fps: Some(30),
-                codec: Some("H264".into())
+                codec: Some("H264".into()),
+                mode: None,
+                record: None,
             }),
             json!({"kind":"status","sessionId":"s","state":"live","width":1280,"height":720,"fps":30,"codec":"H264"})
         );

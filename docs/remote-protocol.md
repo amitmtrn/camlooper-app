@@ -30,16 +30,22 @@ attempt: 1–64 printable ASCII characters, no spaces (e.g. 16 random base64url 
 
 | `kind` | Direction | Fields | Meaning |
 |---|---|---|---|
-| `stream_request` | phone → desktop | `sessionId`, `deviceLabel?` (the desktop strips control and invisible/bidi format characters and keeps the first 40 characters) | "May I stream my camera?" The desktop asks its user. |
+| `hello` | phone → desktop | `sessionId` (any valid id; no session is needed), `appProtocol` (integer ≥ 1; `3` today) | "Which app protocol do you speak?" Sent once after pairing, when the desktop is online. See [App protocol 3](#app-protocol-3-hello-and-record-mode). |
+| `hello_ok` | desktop → phone | `sessionId` (the same), `appProtocol`: `3`, `features`: e.g. `["live","record","file"]` | The answer. `features` are the `stream_request` modes this desktop takes. |
+| `stream_request` | phone → desktop | `sessionId`, `deviceLabel?` (the desktop strips control and invisible/bidi format characters and keeps the first 40 characters), `mode?`: `live` (default) \| `record` \| `file` (with `file: {name, size, mime}`) | "May I stream my camera?" — with `record`: "…and loop what I film?" The desktop asks its user. |
 | `stream_accept` | desktop → phone | `sessionId` | The user accepted. Send the offer now. |
 | `stream_reject` | desktop → phone | `sessionId`, `reason`: `declined` \| `busy` \| `timeout` \| `unsupported` | No stream. `busy`: another session is active. `timeout`: nobody answered within 60 s. |
 | `offer` | phone → desktop | `sessionId`, `sdp` (≤ 14 KB) | The phone's SDP offer (video sendonly; an audio m-line is accepted and ignored). |
 | `answer` | desktop → phone | `sessionId`, `sdp` | The desktop's answer. **All desktop candidates are embedded in it**; the desktop does not trickle. |
 | `candidate` | phone → desktop (either direction allowed) | `sessionId`, `candidate`, `sdpMid?`, `sdpMLineIndex?` | One trickled ICE candidate (`candidate:…`, an `a=` prefix is tolerated). Empty string or `null` = end of candidates. |
-| `status` | desktop → phone | `sessionId`, `state`: `connecting` \| `live`, `width?`, `height?`, `fps?`, `codec?` (`H264` \| `VP8`) | Progress for the phone's UI. `live` is sent when the first frame reaches the virtual camera, and again (at most every 2 s) when codec or resolution changes. |
+| `status` | desktop → phone | `sessionId`, `state`: `connecting` \| `live`, `width?`, `height?`, `fps?`, `codec?` (`H264` \| `VP8`); record sessions: `mode`: `record`, and once the take has started `record: {elapsedMs, capMs, phase, error?}` | Progress for the phone's UI. `live` is sent when the first frame reaches the virtual camera, and again (at most every 2 s) when codec or resolution changes. In a record session also when the take starts and when it is being processed. |
+| `loop_control` | phone → desktop | `sessionId` (any valid id), `action`: `stop` \| `start` \| `status` | Act on the video that loops on the desktop. No session needs to be open; refused (`busy`) while one is. `start` never turns on a virtual camera that is off (`camera_off`). |
+| `loop_status` | desktop → phone | `sessionId`, `playing`, `name?`, `fromPhone`, `error?` | The answer to `loop_control`, and sent after every file or record session. |
 
 Stop (`stream_stop.data`): `{sessionId, reason}` with `reason` one of `user`, `ice_failed`,
-`error`, `peer_offline`, `timeout`. Unknown reasons are accepted. **`sessionId` is required
+`error`, `peer_offline`, `timeout`, and from the desktop at the end of a file or record
+session `done` (a success: the video loops), `too_short` and `incomplete` (record only, see
+below). Unknown reasons are accepted. **`sessionId` is required
 once the desktop has accepted the session:** a `stream_stop` without `data` or without
 `sessionId`, or naming another session, is ignored then (a late stop from an earlier attempt
 must not end the stream that is running). Before the user has decided, a `stream_stop`
@@ -127,6 +133,92 @@ declined request costs the phone no camera start.
 - Send `stream_stop{sessionId, reason:"user"}` when the user stops, and before the page is
   hidden or closed (`pagehide`). Always include `sessionId`. Closing the `RTCPeerConnection`
   alone also ends the session cleanly on the desktop, but without a reason.
+
+## App protocol 3: `hello` and record mode
+
+The app-level protocol has a version of its own, **3**, independent of the relay's
+`?protocol=2` (which is unchanged). It exists so that a new phone page and an old desktop —
+or the reverse — find out at once, instead of one side taking a request for something else
+and the attempt ending as a timeout.
+
+### `hello` / `hello_ok`
+
+- After the phone is paired and the desktop is online, the phone sends once
+  `{"kind":"hello","sessionId":"<valid id>","appProtocol":3}`.
+- A desktop that speaks protocol 3 answers
+  `{"kind":"hello_ok","sessionId":"<same>","appProtocol":3,"features":["live","record","file"]}`.
+  `features` are the modes it takes. `record` and `file` are listed only when the desktop
+  has a place to store a video (its app data directory); otherwise the list is `["live"]`.
+- No `hello_ok` within 5 s, `appProtocol < 3`, or no `record` in `features`: the phone shows
+  "Update CamLooper on your computer to record a loop." and does not enable Record. (An older
+  desktop ignores the unknown kind, so the phone sees the timeout.)
+- The desktop answers at most 5 `hello`s per 10 s; a `hello` without a numeric
+  `appProtocol ≥ 1` is dropped as malformed. A phone's higher `appProtocol` is still
+  answered with `3` — the phone decides what it can do with that.
+- `hello` is **not** a precondition. A desktop takes a `mode: "live"` request (or one
+  without `mode`, from an older phone page) and a `mode: "record"` request without a
+  `hello` before it: the request itself is unambiguous.
+- A `mode` the desktop does not know is answered `stream_reject{unsupported}`. It is never
+  taken for `live`. The same answer is given to `record` / `file` on a desktop that has no
+  place to store a video.
+
+### `mode: "record"` — film on the phone, loop on the desktop
+
+No file is transferred. The phone streams its camera exactly as for `live` — same
+`RTCPeerConnection`, same ICE, same codecs, no data channel — and the desktop *tees* the
+stream into a file while it shows it live on the virtual camera. When the take ends, the
+desktop loops the file with the engine that loops a local video (natural motion included),
+and the phone is no longer needed.
+
+```text
+phone                                                             desktop
+  │ signal{stream_request, s1, mode:"record"}                        │ "Record a loop from <device>?"
+  │ … stream_accept, status{connecting, mode:"record"}, offer, answer, ICE — as for live …
+  │◀──── signal{status, live, mode:"record"} ────────────────────────│ first frame on the camera; pre-roll
+  │◀──── signal{status, live, mode:"record",                         │ the take starts
+  │        record:{elapsedMs:0, capMs:60000, phase:"recording"}} ────│
+  │ stream_stop{s1, user}  (or 60 s pass, or the desktop's Stop)     │
+  │◀──── signal{status, …, record:{…, phase:"processing"}} ──────────│ remux, load
+  │◀──── stream_stop{s1, done} ──────────────────────────────────────│ looping
+  │◀──── signal{loop_status, s1, playing:true, fromPhone:true} ──────│
+```
+
+| What | Rule |
+|---|---|
+| Confirm dialog | the same Accept / Decline / 60 s / busy / cooldown rules as `live`; the request the UI gets carries `mode: "record"` |
+| Pre-roll | the take starts after the stream has been live 500 ms (the desktop asks for a keyframe then and starts on it), or on a second keyframe if one comes sooner; at 1 s at the latest, from the last keyframe seen. The first `status` that carries `record` marks the start: `elapsedMs` counts from there |
+| Cap | 60 s of take (`capMs`). The desktop finalizes then, whether or not the phone has stopped |
+| Minimum | `MIN_TAKE_MS` = 2000 ms of teed media |
+| The phone's `stream_stop`, the desktop's Stop / Cancel, or the phone closing the connection, **during the take** | ≥ 2 s teed: the take is finalized and looped; the session ends with `stream_stop{done}` from the desktop (also when it was the phone that stopped) followed by `loop_status`. < 2 s: the partial file is deleted and nothing loops; after the phone's stop the desktop answers `stream_stop{too_short}`, after its own it sends `stream_stop{user}`. Neither is an error on the desktop |
+| A stop before the take has started (connecting, pre-roll) | an ordinary stop, as for `live` |
+| While the take is processed | the desktop keeps the connection up but no longer needs it: the phone may stop its camera, close the connection, leave the relay or send further `stream_stop`s — none of it changes the outcome. Only the desktop's own Stop (a second one, if the first ended the take) cancels: `stream_stop{user}`, the file is deleted |
+| The take cannot be looped (it is mostly stalls, the remux fails, the loader refuses the result) | `stream_stop{incomplete}`; the file is deleted; what looped before is restored. Desktop text: "The recording was too incomplete to loop. Try again." |
+| The connection fails during the take (`ice_failed`, `timeout`, `peer_offline`, decoder failure) | as for `live`; nothing is salvaged, the partial file is deleted |
+| Size or codec changes mid-take | those frames stay out of the take until the stream is back at its original size (on a keyframe). The phone page disables Switch camera during a take |
+| After the session | `loop_control` / `loop_status` as after a file: the phone can stop and start the loop while it is paired, and `start` never turns a camera on |
+
+**The take on disk.** Under `<app data>/phone-videos/` like every phone video: a random name
+(`phone-<16 hex>.part`), the directory 0700 and the file 0600, nothing from the phone in a
+path. The tee file is IVF for both codecs (FourCC `VP80`, or `H264` with one Annex-B access
+unit per record — the bytes the live decoder was given), which gives every frame its
+timestamp: the RTP clock, or the arrival time where RTP is implausible. On a clean end the
+bundled ffmpeg copies it, without re-encoding and reading nothing but that one file
+(`-protocol_whitelist file -f ivf … -c copy`), into MP4 (H.264) or WebM (VP8); the result is
+sniffed like a received file (`ftyp` / EBML), fsynced and renamed to `phone-<16 hex>.mp4` /
+`.webm`, and loaded under the name "Phone recording.mp4" / ".webm". Partial and failed files
+are deleted when the session ends, by the sweeps that follow any video load, and at exit.
+
+**Status for the desktop UI** (`remote_stream_status`, `remote://stream-status`): `mode:
+"record"` and `record: {elapsedMs, capMs: 60000, phase: "recording" | "processing" |
+"looping" | "failed", error?}`. `record` is present from the request on (`recording`, 0 ms
+until the take starts, then updated once a second), and stays after the session as `looping`
+or `failed` (with `error`) until the next request; it is absent for live and file sessions.
+`state` is `live` while recording and processing. A take that loops is announced with the
+same `remote://phone-video-loaded` event as a received file.
+
+The end-to-end authentication gap described below applies to a record session exactly as it
+does to a live stream: a relay that can answer the phone can be the one whose video is
+recorded.
 
 ## Known limitation / later: the offer is not authenticated end to end
 

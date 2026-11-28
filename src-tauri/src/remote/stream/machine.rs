@@ -34,14 +34,23 @@
 //! (`status.file.phase` says which), and back to `idle` once it loops — the session ends by
 //! itself with `stream_stop{done}`, which is a success. The outcome stays readable in
 //! `status.file` (`looping`, or `failed` with the reason) until the next request.
+//!
+//! A request with `mode: "record"` is a live session whose stream the desktop also tees into
+//! a file (`status.record` says how far the take is). What ends a live stream at once — the
+//! phone's Stop, the desktop's — *finishes* the take instead ([`SessionCommand::Finish`]):
+//! the session stays up (`live`, `record.phase: processing`) while the take is remuxed and
+//! loaded, and ends by itself with `stream_stop{done}` once it loops. A take that is too
+//! short ends with `too_short`, one that cannot be looped with `incomplete`. A second Stop
+//! from the desktop while it is processing is a real stop (a cancel).
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::runner::{FileStage, MediaStats, SessionCommand, SessionEvent, SessionKind};
+use super::record::INCOMPLETE;
+use super::runner::{FileStage, MediaStats, RecordStage, SessionCommand, SessionEvent, SessionKind};
 use super::signal::{
-    FileOffer, LinkState, LoopAction, OutboundFrame, RejectReason, StopData, StopReason, StreamMode, StreamSignal,
-    MAX_REMOTE_CANDIDATES,
+    FileOffer, LinkState, LoopAction, OutboundFrame, RecordPhase, RecordStatus, RejectReason, StopData, StopReason, StreamMode,
+    StreamSignal, MAX_REMOTE_CANDIDATES,
 };
 
 /// The user has this long to accept or decline before the request is auto-rejected.
@@ -134,6 +143,11 @@ pub struct StreamStatus {
     /// File sessions only: the video and how far along it is. Kept after the session ended
     /// as `looping` or `failed`, until the next request.
     pub file: Option<FileStatus>,
+    /// Record sessions only: `{elapsedMs, capMs, phase, error?}`. Present from the request
+    /// on (`recording`, 0 ms until the take starts); kept after the session ended as
+    /// `looping` or `failed`, until the next request. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<RecordStatus>,
     pub session_id: Option<String>,
     /// The phone's label from `stream_request` (falls back to the paired phone's name).
     pub device_name: Option<String>,
@@ -174,6 +188,7 @@ impl Default for StreamStatus {
             state: Phase::Idle,
             mode: StreamMode::Live,
             file: None,
+            record: None,
             session_id: None,
             device_name: None,
             codec: None,
@@ -242,6 +257,15 @@ struct Session {
     id: String,
     /// The video of a file session; `None` for a live one.
     file: Option<FileOffer>,
+    /// A record session: live, with the stream teed into a take.
+    record: bool,
+    /// Record: the take was asked to finish (not: the session to stop) for this reason, and
+    /// whether it was the phone that asked. The session ends by itself.
+    finishing: Option<(StopReason, bool)>,
+    /// Record: the session reported the first teed frame.
+    take_started: bool,
+    /// Record: the phone was told that the take started.
+    take_told: bool,
     /// Set when the session task is started (on accept).
     epoch: Option<u64>,
     /// The session task reported that the camera handoff and the sockets are done.
@@ -346,6 +370,38 @@ impl Machine {
         }
     }
 
+    /// [`Self::finish`] for a record session: what became of the take stays in the status.
+    fn finish_record(&mut self, error: Option<(StopReason, String)>, record: Option<RecordStatus>) {
+        self.finish(error);
+        if record.is_some() {
+            self.status.mode = StreamMode::Record;
+            self.status.record = record;
+        }
+    }
+
+    /// A record session whose take has started and has not been asked to finish yet: a stop
+    /// now finishes the take rather than ending the session.
+    fn take_can_finish(&self) -> bool {
+        // Still recording: a take the session is already processing (it hit the cap by
+        // itself) has nothing left to finish.
+        self.status.record.as_ref().is_some_and(|r| r.phase == RecordPhase::Recording)
+            && self.session.as_ref().is_some_and(|s| s.record && s.accepted && s.take_started && s.finishing.is_none() && s.stop_reason.is_none())
+    }
+
+    /// Ask the session to finish its take. It answers with `Record(Processing)` or `Closed`.
+    fn finish_take(&mut self, reason: StopReason, from_phone: bool) -> Vec<Action> {
+        let Some(s) = self.session.as_mut() else { return vec![] };
+        s.finishing = Some((reason.clone(), from_phone));
+        vec![Action::ToSession(SessionCommand::Finish(reason))]
+    }
+
+    /// The take is past the point where the phone is needed (or was asked to be): the
+    /// phone's stops and its leaving the relay no longer end anything.
+    fn take_is_finishing(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.finishing.is_some())
+            || self.status.record.as_ref().is_some_and(|r| matches!(r.phase, RecordPhase::Processing | RecordPhase::Looping))
+    }
+
     /// What tells a session with the phone off the relay apart from a dead one: frames
     /// written (live) or bytes received (file).
     fn progress(&self) -> u64 {
@@ -394,14 +450,17 @@ impl Machine {
                 // `parse_signal` guarantees a file for file mode; one that got here without
                 // (a caller that built the signal by hand) is not a request to act on.
                 let file = match (mode, file) {
-                    (StreamMode::Live, _) => None,
+                    (StreamMode::Live | StreamMode::Record, _) => None,
                     (StreamMode::File, Some(file)) => Some(file),
                     (StreamMode::File, None) => {
                         return vec![signal(StreamSignal::StreamReject { session_id, reason: RejectReason::Unsupported })]
                     }
                 };
-                self.on_request(session_id, device_label, file, now)
+                self.on_request(session_id, device_label, mode, file, now)
             }
+            // `hello` is answered by the manager (it knows what this desktop can take);
+            // one that reaches the machine changes nothing.
+            StreamSignal::Hello { .. } | StreamSignal::HelloOk { .. } => vec![],
             // Allowed while a request is merely pending (nothing holds the camera yet); not
             // once a session was accepted, or while a given-up one is still shutting down.
             StreamSignal::LoopControl { session_id, action } => {
@@ -457,6 +516,7 @@ impl Machine {
         &mut self,
         session_id: String,
         device_label: Option<String>,
+        mode: StreamMode,
         file: Option<FileOffer>,
         now: Instant,
     ) -> Vec<Action> {
@@ -480,10 +540,14 @@ impl Machine {
         self.prompts.push_back(now);
         let received_at = wall_ms();
         let device_name = device_label.or_else(|| self.default_device_name.clone());
-        let mode = if file.is_some() { StreamMode::File } else { StreamMode::Live };
+        let record = mode == StreamMode::Record;
         self.session = Some(Session {
             id: session_id.clone(),
             file: file.clone(),
+            record,
+            finishing: None,
+            take_started: false,
+            take_told: false,
             epoch: None,
             prepared: false,
             requested_at: now,
@@ -509,6 +573,7 @@ impl Machine {
                 phase: FilePhase::Pending,
                 error: None,
             }),
+            record: record.then(|| RecordStatus::new(RecordPhase::Recording, 0)),
             ..StreamStatus::default()
         };
         self.enter(Phase::Requested);
@@ -528,6 +593,16 @@ impl Machine {
             None if s.accepted => return vec![],
             _ => {}
         }
+        // A take that is being recorded: the phone's Stop is how it normally ends.
+        if self.take_can_finish() {
+            return self.finish_take(stop.reason, true);
+        }
+        // Finishing already (or loading): the phone has nothing more to say about it — it
+        // may well send a second stop as its page closes, and that must not undo the loop.
+        if self.take_is_finishing() {
+            return vec![];
+        }
+        let Some(s) = self.session.as_mut() else { return vec![] };
         if s.stop_reason.is_none() {
             s.stop_from_phone = true;
         }
@@ -602,8 +677,10 @@ impl Machine {
         let id = s.id.clone();
         let kind = match &s.file {
             Some(file) => SessionKind::File(file.clone()),
+            None if s.record => SessionKind::Record,
             None => SessionKind::Live,
         };
+        let mode = s.record.then_some(StreamMode::Record);
         let mut actions = vec![
             signal(StreamSignal::StreamAccept { session_id: id.clone() }),
             signal(StreamSignal::Status {
@@ -613,6 +690,9 @@ impl Machine {
                 height: None,
                 fps: None,
                 codec: None,
+                mode,
+                // The take has not started: see [`Self::status_update`].
+                record: None,
             }),
             Action::StartSession { session_id: id, epoch, kind },
         ];
@@ -648,6 +728,13 @@ impl Machine {
                 signal(StreamSignal::StreamReject { session_id: id, reason: RejectReason::Declined }),
             ];
         }
+        // The desktop's Stop / Cancel during a take finishes it: long enough, it loops;
+        // too short, the session ends as the cancel it was. (A second one, while the take
+        // is being processed, falls through to a real stop.)
+        if self.take_can_finish() {
+            return self.finish_take(reason, false);
+        }
+        let Some(s) = self.session.as_mut() else { return vec![] };
         if s.stop_reason.is_some() {
             // Already stopping. A repeated Stop after [`FORCE_STOP_AFTER`] is the user's way
             // out of a teardown that hangs: give up on the session now, as the watchdog
@@ -712,7 +799,8 @@ impl Machine {
                 // A video that has arrived in full needs nothing more from the phone: it
                 // is common to switch apps once the upload is done. Stopping the session
                 // now would race the load, for no reason.
-                let all_received = self.status.file.as_ref().is_some_and(|f| matches!(f.phase, FilePhase::Processing | FilePhase::Looping));
+                let all_received = self.status.file.as_ref().is_some_and(|f| matches!(f.phase, FilePhase::Processing | FilePhase::Looping))
+                    || self.take_is_finishing();
                 if frames > frames_then || all_received {
                     // Video is still arriving peer to peer: the stream is healthy without
                     // the relay. A phone known to be off the relay is looked at again after
@@ -832,6 +920,31 @@ impl Machine {
                 self.enter(Phase::Live);
                 vec![]
             }
+            SessionEvent::Record { stage, elapsed_ms } => {
+                let Some(s) = self.session.as_mut() else { return vec![] };
+                if s.stop_reason.is_some() || !s.record {
+                    return vec![];
+                }
+                s.prepared = true;
+                s.take_started = true;
+                let phase = match stage {
+                    RecordStage::Recording => RecordPhase::Recording,
+                    RecordStage::Processing => RecordPhase::Processing,
+                    RecordStage::Looping => RecordPhase::Looping,
+                };
+                // The phone hears when the take starts (its timer) and when it is being
+                // processed (it can stop its camera); the seconds in between it counts itself.
+                let tell = !s.take_told || self.status.record.as_ref().map(|r| r.phase) != Some(phase);
+                s.take_told = true;
+                self.status.record = Some(RecordStatus::new(phase, elapsed_ms));
+                self.enter(Phase::Live);
+                if tell {
+                    self.status_update(now, true)
+                } else {
+                    vec![]
+                }
+            }
+            SessionEvent::Closed { reason, error } if self.session.as_ref().is_some_and(|s| s.record) => self.on_record_closed(reason, error),
             SessionEvent::Closed { reason, error } => {
                 let s = self.session.as_ref().expect("current_epoch checked");
                 let requested = s.stop_reason.clone();
@@ -899,6 +1012,85 @@ impl Machine {
         }
     }
 
+    /// A record session's task has ended.
+    fn on_record_closed(&mut self, reason: StopReason, error: Option<String>) -> Vec<Action> {
+        let s = self.session.as_ref().expect("current_epoch checked");
+        let requested = s.stop_reason.clone();
+        let stop_from_phone = s.stop_from_phone;
+        let finishing = s.finishing.clone();
+        let phone_offline = s.peer_offline.is_some_and(|p| p.confirmed);
+        let id = s.id.clone();
+        let elapsed_ms = self.status.record.as_ref().map(|r| r.elapsed_ms).unwrap_or(0);
+        let failed = |text: &str| Some(RecordStatus { error: Some(text.to_string()), ..RecordStatus::new(RecordPhase::Failed, elapsed_ms) });
+        let stop = |reason: StopReason| Action::Send(OutboundFrame::StreamStop { session_id: id.clone(), reason });
+        // Whatever happened, the phone's idea of the desktop's loop may be stale now.
+        let report = Action::ReportLoop { session_id: id.clone() };
+        match (reason, requested) {
+            // The take loops — also when a cancel came too late to prevent it. The phone
+            // hears `done` in every case: unlike a file session it has no data channel
+            // that told it already.
+            (StopReason::Done, _) => {
+                self.finish_record(None, Some(RecordStatus::new(RecordPhase::Looping, elapsed_ms)));
+                vec![stop(StopReason::Done), report]
+            }
+            // Stopped before the take held enough: a cancel, on this side — idle, no error,
+            // nothing kept. The desktop's own Stop is told to the phone as that; the phone's
+            // is answered `too_short` (only the desktop knows how much was teed), and the
+            // phone says so to whoever is holding it.
+            (StopReason::TooShort, None) => {
+                let by_desktop = matches!(finishing, Some((_, false)));
+                self.finish(None);
+                self.status.ended_by_phone = !by_desktop;
+                vec![stop(if by_desktop { StopReason::User } else { StopReason::TooShort }), report]
+            }
+            // The take could not be made into a loop.
+            (StopReason::Incomplete, None) => {
+                let message = error.unwrap_or_else(|| INCOMPLETE.to_string());
+                self.finish_record(Some((StopReason::Incomplete, message.clone())), failed(&message));
+                vec![stop(StopReason::Incomplete), report]
+            }
+            // A real stop was asked for (before the take started, or a cancel while it was
+            // being processed); whoever asked knows.
+            (reason, Some(_)) => {
+                let failure = error.filter(|_| reason.is_failure()).map(|e| (reason, e));
+                let clean = failure.is_none();
+                let record = failure.as_ref().and_then(|(_, e)| failed(e));
+                self.finish_record(failure, record);
+                self.status.ended_by_phone = clean && stop_from_phone;
+                vec![report]
+            }
+            // The phone closed the connection before the take started.
+            (StopReason::PeerStopped, None) => {
+                self.finish(None);
+                self.status.ended_by_phone = true;
+                vec![report]
+            }
+            // The take was asked to finish and the session ended as that stop instead (it
+            // had not started the take on its side yet): a cancel. The phone knows its own;
+            // the desktop's it has to be told.
+            (reason, None) if finishing.is_some() && !reason.is_failure() => {
+                let from_phone = matches!(finishing, Some((_, true)));
+                self.finish(None);
+                self.status.ended_by_phone = from_phone;
+                if from_phone {
+                    vec![report]
+                } else {
+                    vec![stop(reason), report]
+                }
+            }
+            (StopReason::Timeout, None) if phone_offline => {
+                self.finish(None);
+                vec![report]
+            }
+            // The session failed on its own (ICE, timeout, the decoder): nothing loops.
+            (reason, None) => {
+                let message = error.unwrap_or_else(|| reason.to_string());
+                self.finish_record(Some((reason.clone(), message.clone())), failed(&message));
+                vec![stop(reason), report]
+            }
+        }
+    }
+
     fn apply_stats(&mut self, stats: &MediaStats) {
         self.status.codec = stats.codec.map(|c| c.name().to_string());
         self.status.width = stats.width;
@@ -927,6 +1119,10 @@ impl Machine {
             height: st.height,
             fps: st.fps.map(|f| f.round() as u32),
             codec: st.codec.clone(),
+            mode: s.record.then_some(StreamMode::Record),
+            // Only once the take has started: its first appearance is the phone's cue
+            // that recording began (the stream is live a moment earlier, for the pre-roll).
+            record: st.record.clone().filter(|_| s.record && s.take_started),
         })]
     }
 }
@@ -1839,5 +2035,286 @@ mod tests {
         let bare = StreamSignal::StreamRequest { session_id: "f1".into(), device_label: None, mode: StreamMode::File, file: None };
         assert_eq!(sent(&m.on_signal(bare, t)), vec!["reject:Unsupported"]);
         assert_eq!(m.status().state, Phase::Idle);
+    }
+
+    // --- record sessions ------------------------------------------------------------------
+
+    fn record_req(id: &str) -> StreamSignal {
+        StreamSignal::StreamRequest { session_id: id.into(), device_label: Some("Pixel".into()), mode: StreamMode::Record, file: None }
+    }
+    fn take(stage: RecordStage, elapsed_ms: u64) -> SessionEvent {
+        SessionEvent::Record { stage, elapsed_ms }
+    }
+    fn record_phase(m: &Machine) -> Option<(RecordPhase, u64)> {
+        m.status().record.as_ref().map(|r| (r.phase, r.elapsed_ms))
+    }
+    /// Request, accept, live, and the take has started.
+    fn recording(m: &mut Machine, id: &str, t: Instant) -> u64 {
+        m.on_signal(record_req(id), t);
+        m.accept(id, t).unwrap();
+        let epoch = m.current_epoch().unwrap();
+        m.on_signal(offer(id), t);
+        m.on_session_event(epoch, SessionEvent::Live(stats(1280, 720)), t);
+        m.on_session_event(epoch, take(RecordStage::Recording, 0), t);
+        assert_eq!((m.status().state, m.status().mode), (Phase::Live, StreamMode::Record));
+        epoch
+    }
+    use crate::remote::stream::record::TOO_SHORT;
+    fn stop_from_phone(id: &str) -> StopData {
+        StopData { session_id: Some(id.into()), reason: StopReason::User }
+    }
+    fn closed(reason: StopReason, error: Option<&str>) -> SessionEvent {
+        SessionEvent::Closed { reason, error: error.map(str::to_string) }
+    }
+
+    #[test]
+    fn a_record_session_from_request_to_looping() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        // The same confirm flow as live, with the mode in the request.
+        let a = m.on_signal(record_req("r1"), t);
+        assert!(matches!(&a[..], [Action::AskUser(r)] if r.mode == StreamMode::Record && r.file.is_none() && r.device_name.as_deref() == Some("Pixel")));
+        assert_eq!((m.status().state, m.status().mode), (Phase::Requested, StreamMode::Record));
+        assert_eq!(record_phase(&m), Some((RecordPhase::Recording, 0)));
+
+        // Accepted: a record session is started — never a live one.
+        let a = m.accept("r1", t).unwrap();
+        assert_eq!(sent(&a), vec!["stream_accept", "status:Connecting"]);
+        assert!(a.contains(&Action::StartSession { session_id: "r1".into(), epoch: 1, kind: SessionKind::Record }));
+        assert!(!a.iter().any(|x| matches!(x, Action::StartSession { kind: SessionKind::Live, .. })));
+        m.on_signal(offer("r1"), t);
+
+        // Live (the pre-roll): the phone hears the mode, but no take yet.
+        let a = m.on_session_event(1, SessionEvent::Live(stats(1280, 720)), t);
+        let [Action::Send(OutboundFrame::Signal(StreamSignal::Status { mode, record, state: LinkState::Live, .. }))] = &a[..] else { panic!("{a:?}") };
+        assert_eq!((*mode, record), (Some(StreamMode::Record), &None));
+        // The take starts: that is the phone's cue.
+        let a = m.on_session_event(1, take(RecordStage::Recording, 0), t);
+        let [Action::Send(OutboundFrame::Signal(StreamSignal::Status { record: Some(r), .. }))] = &a[..] else { panic!("{a:?}") };
+        assert_eq!((r.phase, r.elapsed_ms, r.cap_ms), (RecordPhase::Recording, 0, 60_000));
+        // It grows: the window follows, the phone counts for itself.
+        assert!(m.on_session_event(1, take(RecordStage::Recording, 1000), t).is_empty());
+        assert!(m.on_session_event(1, take(RecordStage::Recording, 4000), t).is_empty());
+        assert_eq!(record_phase(&m), Some((RecordPhase::Recording, 4000)));
+        assert!(m.loop_refused(), "the phone cannot steer the loop under a take");
+
+        // The phone taps Stop: the take is finished, the session is not stopped.
+        let a = m.on_remote_stop(stop_from_phone("r1"), t);
+        assert_eq!(a, vec![Action::ToSession(SessionCommand::Finish(StopReason::User))]);
+        assert_eq!(m.status().state, Phase::Live, "no 'stopping': the take is about to be processed");
+        let a = m.on_session_event(1, take(RecordStage::Processing, 4200), t);
+        assert_eq!(sent(&a), vec!["status:Live"], "the phone hears that it is being processed");
+        assert_eq!(record_phase(&m), Some((RecordPhase::Processing, 4200)));
+        assert!(m.on_session_event(1, take(RecordStage::Looping, 4200), t).len() == 1);
+
+        // It loops: the session ends as a success, and the phone is told `done`.
+        let a = m.on_session_event(1, closed(StopReason::Done, None), t);
+        assert_eq!(sent(&a), vec!["stop:done"]);
+        assert_eq!(a.last(), Some(&Action::ReportLoop { session_id: "r1".into() }));
+        let st = m.status();
+        assert_eq!((st.state, st.mode, st.last_error.clone()), (Phase::Idle, StreamMode::Record, None));
+        assert_eq!(record_phase(&m), Some((RecordPhase::Looping, 4200)));
+        assert!(!m.loop_refused(), "the phone may stop and start the loop again");
+        // The outcome stays until the next request.
+        m.on_signal(req("s2"), t);
+        assert_eq!((m.status().mode, m.status().record.clone()), (StreamMode::Live, None));
+    }
+
+    #[test]
+    fn the_status_payload_for_a_record_session() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        recording(&mut m, "r1", t);
+        m.on_session_event(1, take(RecordStage::Recording, 12_345), t);
+        let v = serde_json::to_value(m.status()).unwrap();
+        assert_eq!((v["state"].as_str(), v["mode"].as_str()), (Some("live"), Some("record")));
+        assert_eq!(v["record"], serde_json::json!({"elapsedMs":12345,"capMs":60000,"phase":"recording"}));
+        assert!(v["file"].is_null());
+        m.on_remote_stop(stop_from_phone("r1"), t);
+        m.on_session_event(1, closed(StopReason::Incomplete, Some(INCOMPLETE)), t);
+        let v = serde_json::to_value(m.status()).unwrap();
+        assert_eq!(
+            v["record"],
+            serde_json::json!({"elapsedMs":12345,"capMs":60000,"phase":"failed","error":"The recording was too incomplete to loop. Try again."})
+        );
+        assert_eq!((v["state"].as_str(), v["lastErrorCode"].as_str()), (Some("error"), Some("incomplete")));
+        // Live sessions and idle carry no `record` at all.
+        let v = serde_json::to_value(Machine::new().status()).unwrap();
+        assert!(v.get("record").is_none(), "{v}");
+        // The request, as the confirm dialog gets it.
+        let mut m = Machine::new();
+        let a = m.on_signal(record_req("r2"), t);
+        let [Action::AskUser(r)] = &a[..] else { panic!("{a:?}") };
+        let v = serde_json::to_value(r).unwrap();
+        assert_eq!((v["mode"].as_str(), v.get("file")), (Some("record"), None));
+    }
+
+    #[test]
+    fn the_desktop_finalizes_at_the_cap_without_being_asked() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        recording(&mut m, "r1", t);
+        m.on_session_event(1, take(RecordStage::Recording, 59_000), t);
+        // The session hit the cap on its own (the phone is late, or gone quiet).
+        assert_eq!(sent(&m.on_session_event(1, take(RecordStage::Processing, 60_000), t)), vec!["status:Live"]);
+        // The phone's own stop at 60 s arrives now: it changes nothing.
+        assert!(m.on_remote_stop(stop_from_phone("r1"), t).is_empty());
+        assert_eq!(m.status().state, Phase::Live);
+        let a = m.on_session_event(1, closed(StopReason::Done, None), t);
+        assert_eq!(sent(&a), vec!["stop:done"]);
+        assert_eq!(record_phase(&m), Some((RecordPhase::Looping, 60_000)));
+        // Whatever is reported, the status never shows more than the cap.
+        let mut m = Machine::new();
+        recording(&mut m, "r2", t);
+        m.on_session_event(1, take(RecordStage::Recording, 61_500), t);
+        assert_eq!(record_phase(&m), Some((RecordPhase::Recording, 60_000)));
+    }
+
+    #[test]
+    fn the_desktops_stop_during_a_take_finishes_it_and_a_second_one_cancels() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        recording(&mut m, "r1", t);
+        // Stop / Cancel in the banner: finish the take; nothing is sent to the phone yet.
+        assert_eq!(m.stop(StopReason::User, t), vec![Action::ToSession(SessionCommand::Finish(StopReason::User))]);
+        assert_eq!(m.status().state, Phase::Live);
+        m.on_session_event(1, take(RecordStage::Processing, 8000), t);
+        // Long enough: it loops.
+        assert_eq!(sent(&m.on_session_event(1, closed(StopReason::Done, None), t)), vec!["stop:done"]);
+        assert_eq!((m.status().state, record_phase(&m)), (Phase::Idle, Some((RecordPhase::Looping, 8000))));
+
+        // Again, and this time the user cancels while it is being processed.
+        recording(&mut m, "r2", t);
+        m.stop(StopReason::User, t);
+        m.on_session_event(2, take(RecordStage::Processing, 8000), t);
+        let a = m.stop(StopReason::User, t);
+        assert_eq!(sent(&a), vec!["stop:user"]);
+        assert!(a.contains(&Action::ToSession(SessionCommand::Stop(StopReason::User))));
+        assert_eq!(m.status().state, Phase::Stopping);
+        let a = m.on_session_event(2, closed(StopReason::User, None), t);
+        assert_eq!(a, vec![Action::ReportLoop { session_id: "r2".into() }]);
+        let st = m.status();
+        assert_eq!((st.state, st.last_error.clone(), st.record.clone()), (Phase::Idle, None, None));
+
+        // A cancel that came too late to prevent the loop ends as the loop it is.
+        recording(&mut m, "r3", t);
+        m.stop(StopReason::User, t);
+        m.on_session_event(3, take(RecordStage::Processing, 8000), t);
+        m.stop(StopReason::User, t);
+        assert_eq!(sent(&m.on_session_event(3, closed(StopReason::Done, None), t)), vec!["stop:done"]);
+        assert_eq!(record_phase(&m), Some((RecordPhase::Looping, 8000)));
+    }
+
+    #[test]
+    fn a_take_that_is_too_short_is_a_cancel_not_an_error() {
+        let t = Instant::now();
+        // The desktop's Cancel right after the take started: an ordinary cancel.
+        let mut m = Machine::new();
+        recording(&mut m, "r1", t);
+        m.stop(StopReason::User, t);
+        let a = m.on_session_event(1, closed(StopReason::TooShort, Some(TOO_SHORT)), t);
+        assert_eq!(sent(&a), vec!["stop:user"], "the phone hears of the desktop's cancel now");
+        let st = m.status();
+        assert_eq!((st.state, st.last_error.clone(), st.last_error_code.clone(), st.record.clone()), (Phase::Idle, None, None, None));
+
+        // The phone's Stop after a second: the phone is told it was too short (it shows
+        // that); here it is a session the phone ended, and no error.
+        let mut m = Machine::new();
+        recording(&mut m, "r2", t);
+        m.on_session_event(1, take(RecordStage::Recording, 1000), t);
+        m.on_remote_stop(stop_from_phone("r2"), t);
+        let a = m.on_session_event(1, closed(StopReason::TooShort, Some(TOO_SHORT)), t);
+        assert_eq!(sent(&a), vec!["stop:too_short"]);
+        let st = m.status();
+        assert_eq!((st.state, st.last_error.clone(), st.last_error_code.clone(), st.record.clone()), (Phase::Idle, None, None, None));
+        assert!(st.ended_by_phone);
+
+        // The phone hung up without a word, a moment into the take: the same.
+        let mut m = Machine::new();
+        recording(&mut m, "r3", t);
+        let a = m.on_session_event(1, closed(StopReason::TooShort, Some(TOO_SHORT)), t);
+        assert_eq!(sent(&a), vec!["stop:too_short"]);
+        assert_eq!(m.status().state, Phase::Idle);
+    }
+
+    #[test]
+    fn a_stop_before_the_take_started_is_an_ordinary_stop() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        m.on_signal(record_req("r1"), t);
+        m.accept("r1", t).unwrap();
+        m.on_session_event(1, SessionEvent::Live(stats(1280, 720)), t);
+        // Still in the pre-roll.
+        let a = m.on_remote_stop(stop_from_phone("r1"), t);
+        assert_eq!(a, vec![Action::ToSession(SessionCommand::Stop(StopReason::User))]);
+        assert_eq!(m.status().state, Phase::Stopping);
+        let a = m.on_session_event(1, closed(StopReason::User, None), t);
+        assert_eq!(a, vec![Action::ReportLoop { session_id: "r1".into() }]);
+        let st = m.status();
+        assert_eq!((st.state, st.ended_by_phone, st.record.clone()), (Phase::Idle, true, None));
+
+        // And from the desktop: the phone is told at once, as for a live stream.
+        let mut m = Machine::new();
+        m.on_signal(record_req("r2"), t);
+        m.accept("r2", t).unwrap();
+        let a = m.stop(StopReason::User, t);
+        assert_eq!(sent(&a), vec!["stop:user"]);
+        assert!(a.contains(&Action::ToSession(SessionCommand::Stop(StopReason::User))));
+    }
+
+    #[test]
+    fn a_take_that_cannot_be_looped_and_a_stream_that_fails_are_errors() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        recording(&mut m, "r1", t);
+        m.on_remote_stop(stop_from_phone("r1"), t);
+        m.on_session_event(1, take(RecordStage::Processing, 5000), t);
+        let a = m.on_session_event(1, closed(StopReason::Incomplete, Some(INCOMPLETE)), t);
+        assert_eq!(sent(&a), vec!["stop:incomplete"]);
+        let st = m.status();
+        assert_eq!((st.state, st.last_error.as_deref(), st.last_error_code.as_deref()), (Phase::Error, Some(INCOMPLETE), Some("incomplete")));
+        assert_eq!(st.record.as_ref().map(|r| (r.phase, r.error.clone())), Some((RecordPhase::Failed, Some(INCOMPLETE.to_string()))));
+
+        // The connection died mid-take: nothing is salvaged, the phone hears why.
+        let mut m = Machine::new();
+        recording(&mut m, "r2", t);
+        let a = m.on_session_event(1, closed(StopReason::IceFailed, Some("ICE disconnected")), t);
+        assert_eq!(sent(&a), vec!["stop:ice_failed"]);
+        let st = m.status();
+        assert_eq!((st.state, st.last_error_code.as_deref()), (Phase::Error, Some("ice_failed")));
+        assert_eq!(st.record.as_ref().map(|r| r.phase), Some(RecordPhase::Failed));
+    }
+
+    #[test]
+    fn the_phone_leaving_while_the_take_is_processed_does_not_stop_it() {
+        let t = Instant::now();
+        let s = Duration::from_secs;
+        let mut m = Machine::new();
+        recording(&mut m, "r1", t);
+        m.on_remote_stop(stop_from_phone("r1"), t);
+        m.on_session_event(1, take(RecordStage::Processing, 5000), t);
+        // The page is closed: off the relay, no more frames — and a parting stop.
+        assert!(m.on_peer_offline(t).is_empty());
+        assert!(m.on_remote_stop(stop_from_phone("r1"), t + s(1)).is_empty());
+        assert!(m.tick(t + PEER_OFFLINE_GRACE + s(1)).is_empty());
+        assert!(m.tick(t + PEER_OFFLINE_GRACE * 3).is_empty());
+        assert_eq!(m.status().state, Phase::Live);
+        assert_eq!(sent(&m.on_session_event(1, closed(StopReason::Done, None), t + s(40))), vec!["stop:done"]);
+        assert_eq!(record_phase(&m), Some((RecordPhase::Looping, 5000)));
+    }
+
+    #[test]
+    fn a_second_request_during_a_take_is_busy_and_a_live_request_still_works_without_hello() {
+        let t = Instant::now();
+        let mut m = Machine::new();
+        recording(&mut m, "r1", t);
+        assert_eq!(sent(&m.on_signal(req("s2"), t)), vec!["reject:Busy"]);
+        assert_eq!(sent(&m.on_signal(record_req("r2"), t)), vec!["reject:Busy"]);
+        // Hello is not the machine's to answer, and is no precondition for anything.
+        assert!(m.on_signal(StreamSignal::Hello { session_id: "h".into(), app_protocol: 3 }, t).is_empty());
+        let mut m = Machine::new();
+        let a = m.on_signal(req("s1"), t);
+        assert!(matches!(&a[..], [Action::AskUser(r)] if r.mode == StreamMode::Live));
+        assert!(m.accept("s1", t).unwrap().contains(&Action::StartSession { session_id: "s1".into(), epoch: 1, kind: SessionKind::Live }));
     }
 }

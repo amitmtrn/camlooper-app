@@ -15,6 +15,7 @@
 //! * [`runner`] — one session: camera handoff, receiver, ffmpeg restarts.
 //! * [`rtc`] — str0m receiver task, candidate gathering, STUN.
 //! * [`media`] — Annex-B / IVF writers, SPS/VP8 size parsing, PLI limiter.
+//! * [`record`] — a record session's take: pre-roll, the tee file, the remux to MP4/WebM.
 //! * [`file_receive`] — phase 3: a video file from the phone over a data channel (protocol,
 //!   storage, the loop engine's interface); the desktop loops it like a locally picked one.
 //! * [`loop_engine`] — the app's video loop (`video_processor`) as a [`LoopPlayer`]; the
@@ -32,6 +33,7 @@ pub mod loop_engine;
 pub mod machine;
 pub mod manager;
 pub mod media;
+pub mod record;
 pub mod rtc;
 pub mod runner;
 pub mod signal;
@@ -41,6 +43,7 @@ pub use file_receive::{FileDeps, LoopPlayer, LoopState, PhoneVideoStore, PlayErr
 pub use machine::{FilePhase, FileStatus, Phase, StreamRequest, StreamStatus};
 pub use manager::{ChannelDecisions, DecisionEvent, DecisionSink, LoopDeps, SessionBackend, StreamManager};
 pub use runner::{CameraControl, CameraTarget, Cancel, FixedCamera, IceSource, NoStun, SessionDeps, SessionKind};
+pub use signal::{RecordPhase, RecordStatus};
 
 use super::protocol::ServerMessage;
 

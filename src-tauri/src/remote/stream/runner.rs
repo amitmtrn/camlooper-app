@@ -9,6 +9,14 @@
 //! channel. The bytes go to [`super::file_receive::PhoneVideoStore`]; once complete, the
 //! file is handed to the desktop's own loop engine ([`super::file_receive::LoopPlayer`]) and
 //! the session ends with [`StopReason::Done`].
+//!
+//! A **record session** ([`SessionKind::Record`]) is a live session in every respect — same
+//! handoff, same connection, same decoder, the phone's picture on the camera — plus a
+//! [`Recorder`]: every frame written to the decoder is also teed into a take file
+//! ([`super::record`]). When the take ends (the phone's or the desktop's Stop, the 60 s cap)
+//! the decoder is stopped, the take is remuxed, and the same loop engine a file session
+//! uses plays it; the session then ends with [`StopReason::Done`] and the camera stays with
+//! the loop instead of being handed back.
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
@@ -28,6 +36,7 @@ use super::file_receive::{
     self, reply, FileDeps, PartFile, PhoneContainer, PlayError, PlayRequest, Played, Sniff, TextStep, Transfer,
 };
 use super::media::{FrameOut, StreamWriter};
+use super::record::{self, PreRoll, PreRollStep, Take, TakeFault, TakeFrame, TakeStep};
 use super::rtc::{self, EncodedFrame, RtcClose, RtcCommand, RtcEvent, RtcMode, RtcOptions};
 use super::signal::{FileOffer, StopReason, MAX_REMOTE_CANDIDATES};
 use crate::pipeline::{self, CameraSink, EncodedCodec, Geometry, PipelineSpec, PreviewSpec, Source};
@@ -100,6 +109,17 @@ pub trait CameraControl: Send + Sync {
     /// camera is held by another epoch** (this session's acquire was refused because an
     /// earlier session had not released yet — that session's own release undoes it).
     fn release(&self, epoch: u64) -> BoxFuture<'_, ()>;
+    /// A record session's take is about to be played by the loop engine on the camera
+    /// `epoch` holds: stop refusing other writers. Nothing is undone yet — `release` still
+    /// does that (and brings back what was there before) if the loop does not start.
+    fn yield_to_loop(&self, _epoch: u64) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    /// The take loops on the camera now: forget what `acquire` changed, so that the
+    /// `release` that follows leaves the camera on and does not resume what played before.
+    fn keep_for_loop(&self, _epoch: u64) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// A fixed sink with nothing to hand back (CLI with `--device` / `--null`, tests).
@@ -165,6 +185,20 @@ pub enum SessionKind {
     Live,
     /// The phone sends this video file; the desktop loops it.
     File(FileOffer),
+    /// [`SessionKind::Live`], with the stream teed into a take that is looped once it ends
+    /// ([`super::record`]).
+    Record,
+}
+
+/// Where a record session's take is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordStage {
+    /// Frames are being teed.
+    Recording,
+    /// The take ended; it is being remuxed and loaded.
+    Processing,
+    /// Looping on the virtual camera.
+    Looping,
 }
 
 /// Where a file session is once every byte has arrived.
@@ -181,6 +215,10 @@ pub enum SessionCommand {
     Offer(String),
     RemoteCandidate(String),
     Stop(StopReason),
+    /// Record sessions: end the take now. With enough of it the session goes on to loop it
+    /// and ends as [`StopReason::Done`]; with too little it ends as
+    /// [`StopReason::TooShort`]. Anywhere else this is [`SessionCommand::Stop`].
+    Finish(StopReason),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,6 +252,9 @@ pub enum SessionEvent {
     FileProgress { received: u64 },
     /// File session: all bytes are saved.
     FileStage(FileStage),
+    /// Record session: the take started (`Recording`, 0 ms), grew (once a second), ended
+    /// and is being made into a loop (`Processing`), loops (`Looping`).
+    Record { stage: RecordStage, elapsed_ms: u64 },
     /// The session is over and the camera has been handed back.
     Closed { reason: StopReason, error: Option<String> },
 }
@@ -235,8 +276,22 @@ pub fn spawn_session(
     match kind {
         SessionKind::Live => {
             let camera = deps.camera.clone();
-            spawn_guarded(camera, epoch, events, async move { run_session(deps, epoch, rx, &session_events).await });
+            spawn_guarded(camera, epoch, events, async move { run_session(deps, epoch, rx, &session_events, None).await });
         }
+        // A live session with a tee. It needs what a file session needs: a place for the
+        // video and something to loop it.
+        SessionKind::Record => match deps.files.clone() {
+            Some(files) => {
+                let camera = deps.camera.clone();
+                spawn_guarded(camera, epoch, events, async move {
+                    let (outcome, loaded) = run_session_recording(deps, epoch, rx, &session_events, &files).await;
+                    // As after a transfer: whatever is not the loaded video goes.
+                    files.sweep_unused_keeping(loaded.as_deref()).await;
+                    outcome
+                });
+            }
+            None => spawn_reported(events, async { (StopReason::Error, Some("this build cannot record a loop from the phone".into())) }),
+        },
         // A file session never touches the camera: nothing to acquire, nothing to hand back.
         SessionKind::File(offer) => {
             spawn_reported(events, async move { run_file_session(deps, offer, rx, &session_events).await });
@@ -288,11 +343,26 @@ fn spawn_guarded(
 type Outcome = (StopReason, Option<String>);
 type Prepared = (CameraTarget, rtc::LocalTransport);
 
+/// [`run_session`] for a record session. Besides the outcome: the path the loop engine says
+/// it loaded, if the take loops.
+async fn run_session_recording(
+    deps: Arc<SessionDeps>,
+    epoch: u64,
+    cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
+    events: &mpsc::UnboundedSender<SessionEvent>,
+    files: &FileDeps,
+) -> (Outcome, Option<PathBuf>) {
+    let mut recorder = Recorder::new(files.clone());
+    let outcome = run_session(deps, epoch, cmd_rx, events, Some(&mut recorder)).await;
+    (outcome, recorder.loaded.take())
+}
+
 async fn run_session(
     deps: Arc<SessionDeps>,
     epoch: u64,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     events: &mpsc::UnboundedSender<SessionEvent>,
+    mut recorder: Option<&mut Recorder>,
 ) -> Outcome {
     // --- 1. prepare (camera, STUN, sockets) while the phone sends its offer -------------
     // In its own task, never cancelled: dropping `acquire` between "started the camera" and
@@ -345,11 +415,12 @@ async fn run_session(
 
     // --- 3. media ------------------------------------------------------------------------
     let mut media = MediaLoop::new(deps.ffmpeg.clone(), target, rtc_tx.clone());
+    media.tee = recorder.is_some();
     // Commands that arrived while a frame was being written (see `MediaLoop::on_frame`).
     let mut pending: VecDeque<SessionCommand> = VecDeque::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let outcome = loop {
+    let end = loop {
         tokio::select! {
             ev = rtc_rx.recv() => match ev {
                 Some(RtcEvent::IceConnected) => {
@@ -357,17 +428,31 @@ async fn run_session(
                     let _ = events.send(SessionEvent::IceConnected);
                 }
                 Some(RtcEvent::Frame(f)) => match media.on_frame(f, events, &mut cmd_rx, &mut pending).await {
-                    Ok(None) => {}
-                    Ok(Some(outcome)) => break outcome,
-                    Err(e) => break (StopReason::Error, Some(format!("{e:#}"))),
+                    Ok(None) => {
+                        if let (Some(rec), Some(frame)) = (recorder.as_deref_mut(), media.written.take()) {
+                            match rec.on_frame(frame, events).await {
+                                TeeStep::Continue => {}
+                                TeeStep::WantKeyframe => media.keyframe(),
+                                // The cap: the take is finalized whatever the phone does.
+                                TeeStep::Full => break End::Finish(StopReason::Done),
+                            }
+                        }
+                    }
+                    Ok(Some(interrupted)) => break interrupted,
+                    Err(e) => break End::Now((StopReason::Error, Some(format!("{e:#}")))),
                 },
                 // The phone closed the connection: a normal ending. Its `stream_stop` usually
-                // follows over the relay within a moment and carries the reason.
+                // follows over the relay within a moment and carries the reason. With a
+                // take that is long enough, that is the phone's Stop: no need to wait.
                 Some(RtcEvent::Closed(RtcClose::PeerClosed)) => {
-                    break (phone_stop_reason(&mut pending, &mut cmd_rx).await, None);
+                    if recorder.as_deref().is_some_and(|r| r.take.has_minimum()) {
+                        break End::Finish(StopReason::PeerStopped);
+                    }
+                    let reason = phone_stop_reason(&mut pending, &mut cmd_rx).await;
+                    break if recorder.as_deref().is_some_and(|r| r.take.started()) { End::Finish(reason) } else { End::Now((reason, None)) };
                 }
-                Some(RtcEvent::Closed(RtcClose::Stopped)) | None => break (StopReason::Error, Some("receiver stopped".into())),
-                Some(RtcEvent::Closed(RtcClose::Failed { reason, detail })) => break (reason, Some(detail)),
+                Some(RtcEvent::Closed(RtcClose::Stopped)) | None => break End::Now((StopReason::Error, Some("receiver stopped".into()))),
+                Some(RtcEvent::Closed(RtcClose::Failed { reason, detail })) => break End::Now((reason, Some(detail))),
                 // A data channel next to the video: not part of a live session.
                 Some(RtcEvent::ChannelOpen | RtcEvent::ChannelText(_) | RtcEvent::ChannelBinary(_) | RtcEvent::ChannelClosed) => {}
             },
@@ -376,22 +461,250 @@ async fn run_session(
                     let _ = rtc_tx.send(RtcCommand::RemoteCandidate(c));
                 }
                 Some(SessionCommand::Offer(_)) => log::debug!("phone stream: ignoring a second offer (no renegotiation)"),
-                Some(SessionCommand::Stop(r)) => break (r, None),
-                None => break (StopReason::Error, Some("session dropped".into())),
+                Some(SessionCommand::Stop(r)) => break End::Now((r, None)),
+                Some(SessionCommand::Finish(r)) => break End::Finish(r),
+                None => break End::Now((StopReason::Error, Some("session dropped".into()))),
             },
             _ = tick.tick() => {
                 if let Err(e) = media.check_decoder().await {
-                    break (StopReason::Error, Some(format!("{e:#}")));
+                    break End::Now((StopReason::Error, Some(format!("{e:#}"))));
                 }
                 if media.live {
                     let _ = events.send(SessionEvent::Stats(media.stats()));
                 }
+                // The cap by the clock as well: a stream that stalled near the end never
+                // delivers the frame that would show the take is full.
+                if let Some(rec) = recorder.as_deref_mut() {
+                    if rec.tick(events) {
+                        break End::Finish(StopReason::Done);
+                    }
+                }
             }
+        }
+    };
+    let outcome = match (end, recorder) {
+        (End::Now(outcome), _) => outcome,
+        // Not a record session: finishing is stopping.
+        (End::Finish(reason), None) => (reason, None),
+        (End::Finish(reason), Some(rec)) => {
+            // The decoder lets go of the camera first: the loop is about to write to it.
+            media.shutdown().await;
+            let link = Link { rtc_tx: &rtc_tx, rtc_rx: &mut rtc_rx, cmd_rx: &mut cmd_rx, pending: &mut pending };
+            rec.finish(reason, &deps, epoch, link, events).await
         }
     };
     let _ = rtc_tx.send(RtcCommand::Stop);
     media.shutdown().await;
     outcome
+}
+
+/// How the media loop of a session ended.
+enum End {
+    /// With this outcome.
+    Now(Outcome),
+    /// Record: the take is to be finished (the phone's or the desktop's Stop, the cap, the
+    /// phone hanging up). What comes of it is the outcome.
+    Finish(StopReason),
+}
+
+/// The connection and the command queue, for the part of a record session that comes after
+/// the media loop.
+struct Link<'a> {
+    rtc_tx: &'a mpsc::UnboundedSender<RtcCommand>,
+    rtc_rx: &'a mut mpsc::Receiver<RtcEvent>,
+    cmd_rx: &'a mut mpsc::UnboundedReceiver<SessionCommand>,
+    pending: &'a mut VecDeque<SessionCommand>,
+}
+
+// ---------------------------------------------------------------------------------------
+// Record session
+// ---------------------------------------------------------------------------------------
+
+/// What the tee wants after a frame.
+enum TeeStep {
+    Continue,
+    WantKeyframe,
+    /// The take is at its cap.
+    Full,
+}
+
+/// The recording side of a record session: the pre-roll, the tee file, and — once the take
+/// ends — the remux and the hand-over to the loop engine.
+struct Recorder {
+    files: FileDeps,
+    /// Set when the stream goes live; gone once the take has started.
+    pre_roll: Option<PreRoll>,
+    take: Take,
+    part: Option<PartFile>,
+    /// When the first frame was teed.
+    started: Option<Instant>,
+    /// The tee file could not be created or written: the take is lost, the live picture
+    /// goes on until the session is stopped.
+    broken: bool,
+    /// The path the loop engine loaded, once the take loops.
+    loaded: Option<PathBuf>,
+}
+
+impl Recorder {
+    fn new(files: FileDeps) -> Self {
+        Self { files, pre_roll: None, take: Take::new(), part: None, started: None, broken: false, loaded: None }
+    }
+
+    /// A frame reached the decoder.
+    async fn on_frame(&mut self, frame: TakeFrame, events: &mpsc::UnboundedSender<SessionEvent>) -> TeeStep {
+        if self.broken {
+            return TeeStep::Continue;
+        }
+        if self.started.is_none() {
+            let pre_roll = self.pre_roll.get_or_insert_with(|| PreRoll::new(frame.arrived));
+            let first = match pre_roll.push(frame) {
+                PreRollStep::Wait => return TeeStep::Continue,
+                PreRollStep::WantKeyframe => return TeeStep::WantKeyframe,
+                PreRollStep::Start(first) => first,
+            };
+            self.pre_roll = None;
+            match record::create_take_file(&self.files.store).await {
+                Ok(part) => self.part = Some(part),
+                Err(e) => {
+                    eprintln!("phone recording: could not create the take file: {e}");
+                    self.broken = true;
+                    return TeeStep::Continue;
+                }
+            }
+            self.started = Some(Instant::now());
+            eprintln!("phone recording: the take has started");
+            let _ = events.send(SessionEvent::Record { stage: RecordStage::Recording, elapsed_ms: 0 });
+            for f in &first {
+                if let TeeStep::Full = self.tee(f).await {
+                    return TeeStep::Full;
+                }
+            }
+            return TeeStep::Continue;
+        }
+        self.tee(&frame).await
+    }
+
+    async fn tee(&mut self, frame: &TakeFrame) -> TeeStep {
+        match self.take.push(frame) {
+            TakeStep::Skip => TeeStep::Continue,
+            TakeStep::Full => TeeStep::Full,
+            TakeStep::Write(bytes) => {
+                let written = match self.part.as_mut() {
+                    Some(part) => part.write(&bytes).await,
+                    None => Err(std::io::Error::other("no take file")),
+                };
+                if let Err(e) = written {
+                    eprintln!("phone recording: could not write the take file: {e}");
+                    self.broken = true;
+                    self.part = None; // deletes it
+                }
+                TeeStep::Continue
+            }
+        }
+    }
+
+    /// Once a second: report the take's length. `true` when the cap has passed on the clock.
+    fn tick(&mut self, events: &mpsc::UnboundedSender<SessionEvent>) -> bool {
+        let Some(started) = self.started else { return false };
+        if self.broken {
+            return false;
+        }
+        let _ = events.send(SessionEvent::Record { stage: RecordStage::Recording, elapsed_ms: self.take.elapsed_ms() });
+        started.elapsed() >= record::RECORD_CAP + Duration::from_secs(1)
+    }
+
+    /// The take is over: judge it, remux it, loop it. The connection is kept (and served)
+    /// meanwhile, so that the phone does not see it fail before it hears how this ended.
+    async fn finish(
+        &mut self,
+        reason: StopReason,
+        deps: &Arc<SessionDeps>,
+        epoch: u64,
+        link: Link<'_>,
+        events: &mpsc::UnboundedSender<SessionEvent>,
+    ) -> Outcome {
+        let Link { rtc_tx, rtc_rx, cmd_rx, pending } = link;
+        let part = self.part.take();
+        if !self.take.started() && !self.broken {
+            // Stopped during the pre-roll: an ordinary stop of a live stream.
+            return (if reason == StopReason::Done { StopReason::User } else { reason }, None);
+        }
+        let (summary, part) = match (self.take.verdict(), part) {
+            (Ok(summary), Some(part)) => (summary, part),
+            (Err(TakeFault::TooShort), _) if !self.broken => {
+                eprintln!("phone recording: stopped after {} ms; too short to loop", self.take.elapsed_ms());
+                return (StopReason::TooShort, Some(record::TOO_SHORT.into()));
+            }
+            (verdict, _) => {
+                eprintln!("phone recording: the take cannot be looped ({verdict:?}, {} frames, {} ms)", self.take.frames(), self.take.elapsed_ms());
+                return (StopReason::Incomplete, Some(record::INCOMPLETE.into()));
+            }
+        };
+        eprintln!("phone recording: {} frames, {} ms; preparing the loop", summary.frames, summary.duration_ms);
+        let _ = events.send(SessionEvent::Record { stage: RecordStage::Processing, elapsed_ms: summary.duration_ms });
+
+        // --- remux, serving the connection; a stop (a cancel) drops it, which kills ffmpeg
+        //     and deletes both files -----------------------------------------------------
+        let recorded = {
+            let remux = record::finalize(&deps.ffmpeg, &self.files.store, part, summary);
+            tokio::pin!(remux);
+            let mut connection_gone = false;
+            loop {
+                tokio::select! {
+                    r = &mut remux => break r,
+                    ev = rtc_rx.recv(), if !connection_gone => {
+                        if matches!(ev, None | Some(RtcEvent::Closed(_))) {
+                            connection_gone = true;
+                        }
+                    }
+                    cmd = next_command(pending, cmd_rx) => match cmd {
+                        Some(SessionCommand::Stop(r)) => return (r, None),
+                        Some(SessionCommand::RemoteCandidate(c)) => {
+                            let _ = rtc_tx.send(RtcCommand::RemoteCandidate(c));
+                        }
+                        // Already finishing.
+                        Some(SessionCommand::Finish(_) | SessionCommand::Offer(_)) => {}
+                        None => return (StopReason::Error, Some("session dropped".into())),
+                    },
+                }
+            }
+        };
+        let recorded = match recorded {
+            Ok(recorded) => recorded,
+            Err(e) => {
+                eprintln!("phone recording: could not remux the take: {e:#}");
+                return (StopReason::Incomplete, Some(record::INCOMPLETE.into()));
+            }
+        };
+
+        // --- the loop engine: the phone no longer owns the camera, the loop may start ----
+        deps.camera.yield_to_loop(epoch).await;
+        let request = (recorded.path.clone(), recorded.display_name.clone(), recorded.container);
+        let played = play_received(&self.files, request, rtc_tx, rtc_rx, cmd_rx).await;
+        // `recorded.hold` kept the file out of everybody's sweep until here; the session's
+        // own sweep (the caller's) runs next and keeps it only if it is loaded.
+        match played {
+            PlayEnd::Played(Played::Looping { path }) => {
+                // The camera stays as it is now: nothing of the handoff is undone.
+                deps.camera.keep_for_loop(epoch).await;
+                self.loaded = Some(path);
+                let _ = events.send(SessionEvent::Record { stage: RecordStage::Looping, elapsed_ms: summary.duration_ms });
+                (StopReason::Done, None)
+            }
+            PlayEnd::Played(Played::LoadedNotPlaying { path }) => {
+                deps.camera.keep_for_loop(epoch).await;
+                self.loaded = Some(path);
+                (StopReason::Error, Some(NOT_STARTED.into()))
+            }
+            // Cancelled in time: nothing was loaded, the loop is as it was.
+            PlayEnd::Stopped(reason) => (reason, None),
+            PlayEnd::TimedOut => (StopReason::Timeout, Some(PLAY_TIMED_OUT.into())),
+            PlayEnd::Failed(e) => {
+                eprintln!("phone recording: could not play the take: {e:#}");
+                (StopReason::Incomplete, Some(record::INCOMPLETE.into()))
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -479,7 +792,7 @@ async fn file_session(
                             candidates.push(c);
                         }
                     }
-                    Some(SessionCommand::Stop(r)) => return ((r, None), None),
+                    Some(SessionCommand::Stop(r) | SessionCommand::Finish(r)) => return ((r, None), None),
                     None => return ((StopReason::Error, Some("session dropped".into())), None),
                 },
                 _ = tokio::time::sleep_until(offer_deadline), if sdp.is_none() => {
@@ -583,7 +896,7 @@ fn queued_stop(
 ) -> Option<StopReason> {
     loop {
         match cmd_rx.try_recv() {
-            Ok(SessionCommand::Stop(reason)) => return Some(reason),
+            Ok(SessionCommand::Stop(reason) | SessionCommand::Finish(reason)) => return Some(reason),
             Ok(SessionCommand::RemoteCandidate(c)) => {
                 let _ = rtc_tx.send(RtcCommand::RemoteCandidate(c));
             }
@@ -693,7 +1006,7 @@ async fn receive_file(
                 }
                 Some(SessionCommand::Offer(_)) => log::debug!("phone video: ignoring a second offer (no renegotiation)"),
                 // The phone's or the user's cancel.
-                Some(SessionCommand::Stop(r)) => break Received::Ended((r, None)),
+                Some(SessionCommand::Stop(r) | SessionCommand::Finish(r)) => break Received::Ended((r, None)),
                 None => break Received::Ended((StopReason::Error, Some("session dropped".into()))),
             },
             _ = tick.tick() => {
@@ -768,6 +1081,8 @@ async fn play_received(
                     stopped = Some(r);
                     cancel.cancel();
                 }
+                // A take that is already being finished.
+                Some(SessionCommand::Finish(_)) => {}
                 Some(SessionCommand::RemoteCandidate(c)) => {
                     let _ = rtc_tx.send(RtcCommand::RemoteCandidate(c));
                 }
@@ -859,7 +1174,7 @@ async fn offer_and_camera(
                         candidates.push(c);
                     }
                 }
-                Some(SessionCommand::Stop(r)) => return Err(((r, None), true)),
+                Some(SessionCommand::Stop(r) | SessionCommand::Finish(r)) => return Err(((r, None), true)),
                 None => return Err(((StopReason::Error, Some("session dropped".into())), false)),
             },
             _ = tokio::time::sleep_until(offer_deadline), if offer.is_none() => {
@@ -891,7 +1206,7 @@ async fn phone_stop_reason(
     let deadline = tokio::time::Instant::now() + PEER_STOP_GRACE;
     loop {
         match tokio::time::timeout_at(deadline, next_command(pending, cmd_rx)).await {
-            Ok(Some(SessionCommand::Stop(reason))) => return reason,
+            Ok(Some(SessionCommand::Stop(reason) | SessionCommand::Finish(reason))) => return reason,
             Ok(Some(_)) => continue,
             Ok(None) | Err(_) => return StopReason::PeerStopped,
         }
@@ -1008,6 +1323,11 @@ struct MediaLoop {
     fps: f32,
     last_codec: Option<EncodedCodec>,
     last_dims: Option<(u32, u32)>,
+    /// A record session: keep what is written to the decoder for the tee.
+    tee: bool,
+    /// The frame the last [`Self::on_frame`] wrote to the decoder, when [`Self::tee`] is
+    /// set. Taken (or overwritten) before the next one.
+    written: Option<TakeFrame>,
 }
 
 impl MediaLoop {
@@ -1025,6 +1345,8 @@ impl MediaLoop {
             fps: 0.0,
             last_codec: None,
             last_dims: None,
+            tee: false,
+            written: None,
         }
     }
 
@@ -1074,7 +1396,8 @@ impl MediaLoop {
         events: &mpsc::UnboundedSender<SessionEvent>,
         cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
         pending: &mut VecDeque<SessionCommand>,
-    ) -> Result<Option<Outcome>> {
+    ) -> Result<Option<End>> {
+        self.written = None;
         self.count_frame();
         let codec_changed = self.decoder.as_ref().map(|d| d.writer.codec()) != Some(f.codec);
         if codec_changed {
@@ -1088,12 +1411,12 @@ impl MediaLoop {
         if !f.contiguous {
             dec.writer.require_keyframe();
         }
-        let bytes = match dec.writer.push(&f.data, f.rtp_ts) {
+        let (bytes, keyframe) = match dec.writer.push(&f.data, f.rtp_ts) {
             FrameOut::NeedKeyframe => {
                 self.keyframe();
                 return Ok(None);
             }
-            FrameOut::Write { bytes, .. } => bytes,
+            FrameOut::Write { bytes, keyframe } => (bytes, keyframe),
         };
         if let Some(d) = dec.writer.dimensions() {
             self.last_dims = Some(d);
@@ -1101,7 +1424,7 @@ impl MediaLoop {
         enum Written {
             Done(std::io::Result<()>),
             Stalled,
-            Interrupted(Outcome),
+            Interrupted(End),
         }
         let written = {
             let write = async {
@@ -1117,9 +1440,10 @@ impl MediaLoop {
                     biased;
                     r = &mut write => break Written::Done(r),
                     cmd = cmd_rx.recv() => match cmd {
-                        Some(SessionCommand::Stop(r)) => break Written::Interrupted((r, None)),
+                        Some(SessionCommand::Stop(r)) => break Written::Interrupted(End::Now((r, None))),
+                        Some(SessionCommand::Finish(r)) => break Written::Interrupted(End::Finish(r)),
                         Some(other) => pending.push_back(other),
-                        None => break Written::Interrupted((StopReason::Error, Some("session dropped".into()))),
+                        None => break Written::Interrupted(End::Now((StopReason::Error, Some("session dropped".into())))),
                     },
                     _ = &mut stalled => break Written::Stalled,
                 }
@@ -1129,10 +1453,25 @@ impl MediaLoop {
             Written::Done(Ok(())) => {}
             Written::Done(Err(e)) => return self.restart_after_crash(&format!("stopped reading ({e})")).await.map(|()| None),
             Written::Stalled => return self.restart_after_crash("stalled").await.map(|()| None),
-            Written::Interrupted(outcome) => return Ok(Some(outcome)),
+            Written::Interrupted(end) => return Ok(Some(end)),
         }
         self.restarts.on_good_write(Instant::now());
         self.frames_written += 1;
+        // What the decoder was given, for the tee: the Annex-B access unit as written, or
+        // the VP8 frame (its IVF record header is the decoder stream's, not the take's).
+        if self.tee {
+            self.written = Some(TakeFrame {
+                codec: f.codec,
+                keyframe,
+                rtp_ts: f.rtp_ts,
+                arrived: Instant::now(),
+                dims: self.last_dims,
+                data: match f.codec {
+                    EncodedCodec::H264 => bytes.into(),
+                    EncodedCodec::Vp8 => f.data.clone(),
+                },
+            });
+        }
         if !self.live {
             self.live = true;
             eprintln!(
@@ -1272,6 +1611,12 @@ mod tests {
                 );
                 self.released.fetch_add(1, Ordering::SeqCst);
             })
+        }
+        fn yield_to_loop(&self, epoch: u64) -> BoxFuture<'_, ()> {
+            Box::pin(async move { self.epochs.lock().unwrap().push(("yield", epoch)) })
+        }
+        fn keep_for_loop(&self, epoch: u64) -> BoxFuture<'_, ()> {
+            Box::pin(async move { self.epochs.lock().unwrap().push(("keep", epoch)) })
         }
     }
 
@@ -2251,5 +2596,309 @@ mod tests {
         let (reason, error) = closed(&mut ev_rx).await;
         assert_eq!((reason, error.as_deref()), (StopReason::Error, Some("the phone's offer does not match the request")));
         assert!(!tmp.path().join("phone-videos").exists(), "nothing was written");
+    }
+
+    // --- record sessions: the recorder, with real ffmpeg and no network ---------------------
+
+    use crate::remote::stream::record::testing::{ffmpeg_available, h264_frames};
+    use crate::remote::stream::file_receive::{LoopPlayer, LoopState};
+
+    /// A record session from the moment frames reach the decoder: the [`Recorder`], the
+    /// store, a fake loop, and the two queues [`Recorder::finish`] serves.
+    struct Booth {
+        rec: Recorder,
+        deps: Arc<SessionDeps>,
+        camera: Arc<ProbeCamera>,
+        player: Arc<FakeLoop>,
+        store: PhoneVideoStore,
+        events: mpsc::UnboundedSender<SessionEvent>,
+        seen: mpsc::UnboundedReceiver<SessionEvent>,
+        rtc_tx: mpsc::UnboundedSender<RtcCommand>,
+        _rtc_cmds: mpsc::UnboundedReceiver<RtcCommand>,
+        _rtc_events: mpsc::Sender<RtcEvent>,
+        rtc_rx: mpsc::Receiver<RtcEvent>,
+        cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+        cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
+        _app_data: tempfile::TempDir,
+    }
+
+    const BOOTH_EPOCH: u64 = 7;
+
+    impl Booth {
+        fn new(player: FakeLoop) -> Booth {
+            let app_data = tempfile::tempdir().unwrap();
+            let store = PhoneVideoStore::in_app_data(app_data.path());
+            let player = Arc::new(player);
+            let camera = ProbeCamera::new(false, Duration::ZERO);
+            let files = FileDeps::new(store.clone(), player.clone());
+            let mut d = SessionDeps::new(PathBuf::from("ffmpeg"), camera.clone(), Arc::new(NoStun));
+            d.files = Some(files.clone());
+            let (events, seen) = mpsc::unbounded_channel();
+            let (rtc_tx, _rtc_cmds) = mpsc::unbounded_channel();
+            let (_rtc_events, rtc_rx) = mpsc::channel(8);
+            let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+            Booth {
+                rec: Recorder::new(files),
+                deps: Arc::new(d),
+                camera,
+                player,
+                store,
+                events,
+                seen,
+                rtc_tx,
+                _rtc_cmds,
+                _rtc_events,
+                rtc_rx,
+                cmd_tx,
+                cmd_rx,
+                _app_data: app_data,
+            }
+        }
+
+        /// Frames reach the decoder. `true` once the take is full.
+        async fn feed(&mut self, frames: Vec<TakeFrame>) -> bool {
+            for f in frames {
+                if let TeeStep::Full = self.rec.on_frame(f, &self.events).await {
+                    return true;
+                }
+            }
+            false
+        }
+
+        /// The take ends, then the session's own sweep runs — as in `spawn_session`.
+        async fn finish(&mut self, reason: StopReason) -> Outcome {
+            let mut pending = VecDeque::new();
+            let link = Link { rtc_tx: &self.rtc_tx, rtc_rx: &mut self.rtc_rx, cmd_rx: &mut self.cmd_rx, pending: &mut pending };
+            let outcome = self.rec.finish(reason, &self.deps, BOOTH_EPOCH, link, &self.events).await;
+            self.rec.files.sweep_unused_keeping(self.rec.loaded.as_deref()).await;
+            outcome
+        }
+
+        /// The take's stages as the state machine was told, without the repeats.
+        fn stages(&mut self) -> Vec<(RecordStage, u64)> {
+            let mut v: Vec<(RecordStage, u64)> = Vec::new();
+            while let Ok(ev) = self.seen.try_recv() {
+                if let SessionEvent::Record { stage, elapsed_ms } = ev {
+                    v.push((stage, elapsed_ms));
+                }
+            }
+            v
+        }
+
+        fn files(&self) -> Vec<String> {
+            let Ok(dir) = std::fs::read_dir(self.store.dir()) else { return vec![] };
+            let mut v: Vec<String> = dir.map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+            v.sort();
+            v
+        }
+
+        fn camera_log(&self) -> Vec<(&'static str, u64)> {
+            self.camera.epochs.lock().unwrap().clone()
+        }
+    }
+
+    const THIRTY_FPS: Duration = Duration::from_micros(33_333);
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_take_is_remuxed_handed_to_the_loop_engine_and_keeps_looping() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let mut booth = Booth::new(FakeLoop::default());
+        // Five seconds reach the decoder; the first second at most is pre-roll.
+        assert!(!booth.feed(h264_frames(150, THIRTY_FPS, Instant::now())).await);
+        assert!(booth.rec.take.has_minimum());
+        assert_eq!(booth.files().len(), 1, "the take is being teed into the store: {:?}", booth.files());
+        assert!(booth.files()[0].starts_with("phone-") && booth.files()[0].ends_with(".part"), "{:?}", booth.files());
+        assert!(booth.player.calls().is_empty(), "nothing is loaded while the take runs");
+
+        // The phone taps Stop.
+        assert_eq!(booth.finish(StopReason::User).await, (StopReason::Done, None));
+        let stages = booth.stages();
+        assert_eq!(stages.first(), Some(&(RecordStage::Recording, 0)));
+        let teed_ms = booth.rec.take.elapsed_ms();
+        assert!((3900..5000).contains(&teed_ms), "{teed_ms}");
+        assert_eq!(&stages[stages.len() - 2..], &[(RecordStage::Processing, teed_ms), (RecordStage::Looping, teed_ms)]);
+
+        // The loop engine got an MP4 by content, under a name of the desktop's choosing.
+        assert_eq!(booth.player.calls(), vec!["play_file Phone recording.mp4"]);
+        assert_eq!(*booth.player.played_container.lock().unwrap(), Some(PhoneContainer::IsoBmff));
+        let played = booth.player.played_bytes.lock().unwrap().clone().expect("the file was there to be played");
+        assert!(matches!(file_receive::sniff(&played[..64], false), Sniff::Video { container: PhoneContainer::IsoBmff, ext: "mp4" }));
+        // The camera went from the phone to the loop: yielded before the load, kept after.
+        assert_eq!(booth.camera_log(), vec![("yield", BOOTH_EPOCH), ("keep", BOOTH_EPOCH)]);
+
+        // The session is over; the phone can go. What it left is the looping video, alone.
+        let loaded = booth.rec.loaded.clone().expect("loaded");
+        assert_eq!(booth.files().len(), 1, "{:?}", booth.files());
+        assert!(booth.files()[0].ends_with(".mp4") && loaded.exists() && booth.store.contains(&loaded));
+        let state = booth.player.state().await;
+        assert!(state.playing && state.path.as_deref() == Some(loaded.as_path()));
+        assert_eq!(state.name.as_deref(), Some("Phone recording.mp4"));
+        // A later sweep (another session ending, the window loading nothing) keeps it too.
+        assert_eq!(booth.rec.files.sweep_unused().await, 0);
+        assert!(loaded.exists());
+        // The duration the loader sees is the take's.
+        let info = crate::video_processor::probe_phone_video(loaded, "x.mp4".into(), PhoneContainer::IsoBmff, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert!(((info.duration * 1000.0) as i64 - teed_ms as i64).abs() < 150, "{info:?} vs {teed_ms} ms");
+    }
+
+    #[tokio::test]
+    async fn a_take_under_two_seconds_is_deleted_and_nothing_is_loaded() {
+        let mut booth = Booth::new(FakeLoop::default());
+        // 2.5 s at the decoder: at least half a second of it is pre-roll.
+        booth.feed(h264_frames(75, THIRTY_FPS, Instant::now())).await;
+        assert!(booth.rec.take.started() && !booth.rec.take.has_minimum(), "{} ms", booth.rec.take.elapsed_ms());
+        assert_eq!(booth.files().len(), 1);
+        assert_eq!(booth.finish(StopReason::User).await, (StopReason::TooShort, Some(record::TOO_SHORT.into())));
+        assert!(booth.files().is_empty(), "{:?}", booth.files());
+        assert!(booth.player.calls().is_empty());
+        assert!(booth.camera_log().is_empty(), "the camera handoff is left to the ordinary release");
+        assert!(!booth.stages().iter().any(|(s, _)| *s != RecordStage::Recording), "never processed");
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_the_pre_roll_is_an_ordinary_stop() {
+        let mut booth = Booth::new(FakeLoop::default());
+        booth.feed(h264_frames(5, THIRTY_FPS, Instant::now())).await;
+        assert!(!booth.rec.take.started());
+        assert_eq!(booth.finish(StopReason::User).await, (StopReason::User, None));
+        assert!(booth.files().is_empty() && booth.stages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_take_that_is_mostly_stalls_is_deleted_as_incomplete() {
+        let mut booth = Booth::new(FakeLoop::default());
+        let t0 = Instant::now();
+        // The stream starts, then delivers a third of a second every four seconds.
+        let mut frames = h264_frames(40, THIRTY_FPS, t0);
+        for burst in 1..4u32 {
+            let mut more = h264_frames(10, THIRTY_FPS, t0 + Duration::from_secs(4) * burst);
+            for f in &mut more {
+                f.rtp_ts = f.rtp_ts.wrapping_add(360_000 * burst);
+            }
+            frames.extend(more);
+        }
+        booth.feed(frames).await;
+        assert!(booth.rec.take.has_minimum(), "long enough — but frozen most of the time");
+        assert_eq!(booth.finish(StopReason::User).await, (StopReason::Incomplete, Some(record::INCOMPLETE.into())));
+        assert_eq!(record::INCOMPLETE, "The recording was too incomplete to loop. Try again.");
+        assert!(booth.files().is_empty(), "{:?}", booth.files());
+        assert!(booth.player.calls().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_take_the_loader_refuses_is_deleted_and_the_camera_is_handed_back() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        // Something was looping before; the loader's probe fails for the take.
+        let earlier = std::path::Path::new("/videos/earlier.mp4");
+        let player = FakeLoop { fail_play: true, ..FakeLoop::default() };
+        *player.state.lock().unwrap() = LoopState { playing: true, name: Some("earlier.mp4".into()), path: Some(earlier.into()) };
+        let mut booth = Booth::new(player);
+        booth.feed(h264_frames(150, THIRTY_FPS, Instant::now())).await;
+        assert_eq!(booth.finish(StopReason::User).await, (StopReason::Incomplete, Some(record::INCOMPLETE.into())));
+        assert_eq!(booth.player.calls(), vec!["play_file Phone recording.mp4"]);
+        assert!(booth.files().is_empty(), "the remuxed file goes with the session's sweep: {:?}", booth.files());
+        assert_eq!(booth.rec.loaded, None);
+        // Yielded for the attempt, never kept: the release that follows undoes the handoff
+        // (and resumes what played before).
+        assert_eq!(booth.camera_log(), vec![("yield", BOOTH_EPOCH)]);
+        assert_eq!(booth.player.state().await.name.as_deref(), Some("earlier.mp4"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_the_take_is_processed_deletes_it() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        // A cancel that is already waiting: found during the remux.
+        let mut booth = Booth::new(FakeLoop::default());
+        booth.feed(h264_frames(150, THIRTY_FPS, Instant::now())).await;
+        booth.cmd_tx.send(SessionCommand::Stop(StopReason::User)).unwrap();
+        assert_eq!(booth.finish(StopReason::User).await, (StopReason::User, None));
+        assert!(booth.files().is_empty(), "{:?}", booth.files());
+        assert!(booth.player.calls().is_empty());
+
+        // A cancel while the loop engine is loading it (a slow probe, a system prompt).
+        let mut booth = Booth::new(FakeLoop { play_delay: Duration::from_secs(30), ..FakeLoop::default() });
+        booth.feed(h264_frames(150, THIRTY_FPS, Instant::now())).await;
+        let (player, cmd_tx) = (booth.player.clone(), booth.cmd_tx.clone());
+        let cancel = async move {
+            while player.calls().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // A repeated finish is nothing; the stop is the cancel.
+            cmd_tx.send(SessionCommand::Finish(StopReason::User)).unwrap();
+            cmd_tx.send(SessionCommand::Stop(StopReason::User)).unwrap();
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(booth.finish(StopReason::User), cancel) })
+            .await
+            .expect("the cancel ends the load");
+        assert_eq!(outcome, (StopReason::User, None));
+        assert!(booth.files().is_empty(), "{:?}", booth.files());
+        assert!(!booth.player.state().await.playing);
+        assert_eq!(booth.camera_log(), vec![("yield", BOOTH_EPOCH)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_take_is_finalized_at_sixty_seconds_whatever_the_phone_does() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let mut booth = Booth::new(FakeLoop::default());
+        // 70 s of stream (10 fps keeps the test small): the tee says "full" at the cap.
+        let frames = h264_frames(700, Duration::from_millis(100), Instant::now());
+        assert!(booth.feed(frames).await, "the cap ends the take");
+        let teed_ms = booth.rec.take.elapsed_ms();
+        assert!((59_900..=60_000).contains(&teed_ms), "{teed_ms}");
+        assert_eq!(booth.finish(StopReason::Done).await, (StopReason::Done, None));
+        assert_eq!(booth.stages().last(), Some(&(RecordStage::Looping, teed_ms)));
+        let loaded = booth.rec.loaded.clone().unwrap();
+        let info = crate::video_processor::probe_phone_video(loaded, "x.mp4".into(), PhoneContainer::IsoBmff, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert!((59.5..=60.5).contains(&info.duration), "{info:?}");
+
+        // The cap by the clock, for a stream that stalled before its last frame came.
+        let mut booth = Booth::new(FakeLoop::default());
+        booth.feed(h264_frames(100, THIRTY_FPS, Instant::now())).await;
+        assert!(!booth.rec.tick(&booth.events));
+        booth.rec.started = Some(Instant::now() - record::RECORD_CAP - Duration::from_secs(2));
+        assert!(booth.rec.tick(&booth.events));
+    }
+
+    #[tokio::test]
+    async fn a_record_session_needs_a_store_and_claims_the_camera_like_a_live_one() {
+        // No store (no app data directory): an error, and the camera is never touched.
+        let camera = ProbeCamera::new(false, Duration::ZERO);
+        let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+        let _tx = spawn_session(deps(camera.clone(), Arc::new(NoStun)), 3, SessionKind::Record, ev_tx);
+        let (reason, error) = closed(&mut ev_rx).await;
+        assert_eq!(reason, StopReason::Error);
+        assert!(error.unwrap().contains("cannot record"));
+        assert!(camera.epochs.lock().unwrap().is_empty());
+
+        // With one: the live handoff, under the session's epoch; a stop before any media
+        // ends it as a stop, and nothing is left in the store.
+        let app_data = tempfile::tempdir().unwrap();
+        let store = PhoneVideoStore::in_app_data(app_data.path());
+        let camera = ProbeCamera::new(false, Duration::ZERO);
+        let mut d = SessionDeps::new(PathBuf::from("ffmpeg"), camera.clone(), Arc::new(NoStun));
+        d.rtc.bind_ips = Some(vec![std::net::Ipv4Addr::LOCALHOST]);
+        d.files = Some(FileDeps::new(store.clone(), Arc::new(FakeLoop::default())));
+        let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+        let tx = spawn_session(Arc::new(d), 9, SessionKind::Record, ev_tx);
+        tx.send(SessionCommand::Finish(StopReason::User)).unwrap();
+        assert_eq!(closed(&mut ev_rx).await, (StopReason::User, None));
+        assert_eq!(*camera.epochs.lock().unwrap(), vec![("acquire", 9), ("release", 9)]);
+        assert_eq!(store.sweep(None), 0);
     }
 }

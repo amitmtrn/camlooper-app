@@ -439,4 +439,50 @@ mod tests {
 
         assert!(stop_and_wait(Duration::from_secs(10)).await, "playback stops");
     }
+
+    /// Record mode's last step with nothing faked: real H.264 teed into a take, remuxed by
+    /// ffmpeg, and loaded and looped by the real engine (natural motion, the default) —
+    /// which keeps playing with no session and no phone anywhere.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_real_engine_loops_a_recorded_take() {
+        use crate::remote::stream::record::{self, testing::h264_frames, Take, TakeStep};
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let _engine = ENGINE_TEST.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = PhoneVideoStore::in_app_data(tmp.path());
+        // Three seconds of take.
+        let mut part = record::create_take_file(&store).await.unwrap();
+        let mut take = Take::new();
+        for f in h264_frames(90, Duration::from_micros(33_333), std::time::Instant::now()) {
+            if let TakeStep::Write(bytes) = take.push(&f) {
+                part.write(&bytes).await.unwrap();
+            }
+        }
+        let summary = take.verdict().expect("a good take");
+        let recorded = record::finalize(std::path::Path::new("ffmpeg"), &store, part, summary).await.expect("remux");
+
+        let host = Arc::new(TestHost::default());
+        let engine = Arc::new(EngineLoop::new(host.clone()));
+        let files = FileDeps::new(store.clone(), engine.clone());
+        let (_cancel, cancel) = Cancel::new();
+        let request = PlayRequest { path: recorded.path.clone(), display_name: recorded.display_name.clone(), container: recorded.container, cancel };
+        let played = engine.play_file(request).await.expect("the take plays");
+        let Played::Looping { path: loaded } = played else { panic!("{played:?}") };
+        assert_eq!(host.take(), vec!["ensure_camera", "video_loaded Phone recording.mp4 640x360 true"]);
+        drop(recorded.hold);
+        // The session's sweep keeps the looping take; the loop is the engine's own now.
+        assert_eq!(files.sweep_unused_keeping(Some(&loaded)).await, 0);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let state = engine.state().await;
+        assert!(state.playing, "still looping");
+        assert_eq!(state.name.as_deref(), Some("Phone recording.mp4"));
+        assert!(store.contains(state.path.as_deref().unwrap()) && loaded.exists(), "fromPhone, and on disk");
+        let playback = playback().await;
+        assert!(playback.playing, "{playback:?}");
+
+        assert!(stop_and_wait(Duration::from_secs(10)).await, "playback stops");
+    }
 }

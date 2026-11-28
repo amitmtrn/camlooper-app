@@ -546,8 +546,14 @@ impl PhoneVideoStore {
     /// [`PartFile::commit`], from the content. Refused with `StorageFull` when the disk
     /// has no room for the announced size.
     pub async fn create(&self, offer: &FileOffer) -> std::io::Result<PartFile> {
+        self.create_sized(offer.size).await
+    }
+
+    /// [`Self::create`] for a file that is not a transfer (a recorded take, its remux):
+    /// `size` is how much room it is expected to need.
+    pub async fn create_sized(&self, size: u64) -> std::io::Result<PartFile> {
         self.ensure_dir()?;
-        if !has_room(self.free_space(), offer.size) {
+        if !has_room(self.free_space(), size) {
             return Err(std::io::Error::new(std::io::ErrorKind::StorageFull, "not enough free disk space"));
         }
         let id: u64 = rand::random();
@@ -669,6 +675,12 @@ impl PartFile {
             }
             None => Err(std::io::Error::other("file already closed")),
         }
+    }
+
+    /// Where the partial file is, for a tool that reads it or fills it in place (ffmpeg,
+    /// for a recorded take). It keeps this name until [`Self::commit`].
+    pub fn path(&self) -> &Path {
+        &self.part
     }
 
     /// What the bytes written so far say the file is ([`sniff`]). `complete`: no more

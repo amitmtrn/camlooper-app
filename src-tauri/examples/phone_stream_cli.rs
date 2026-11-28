@@ -24,12 +24,21 @@
 //!   what the main window sets by default) on the same output as above. `loop_control`
 //!   (stop / start / status) from the phone acts on that loop and is answered with
 //!   `loop_status`. A live stream on `--device` pauses the loop and resumes it afterwards.
+//! * A `mode: "record"` request (the phone page's "Record a loop") is accepted automatically
+//!   too and runs the app's own path: the phone streams live to the output above while
+//!   `remote::stream::record` tees the stream into the same private directory; when the take
+//!   ends (the phone's Stop, 60 s, or this tool's deadline) it is remuxed with ffmpeg and
+//!   loaded by the same loop engine as a file. The loop then keeps playing after the phone
+//!   has disconnected, until `--seconds` or SIGINT.
 //! * stdout: one JSON object per line (events and a status line per second) and nothing
 //!   else. stderr: logs, including what the app itself prints to stdout.
 //!   Tokens are never printed. `--debug` adds debug logs (SDP and candidate addresses).
 //!   File mode adds `file_progress {received,size}`, `file_saved {path,sha256}`,
 //!   `video_loaded {video}`, `looping {name}`, `loop_status {playing,…}`, a `loop` line per
 //!   second while the loop plays, and `cleanup {deleted}` on exit.
+//!   Record mode adds `recording {elapsedMs}` (the take started), `processing {elapsedMs}`,
+//!   then the same `file_saved`, `video_loaded`, `looping`, `loop_status` and `cleanup` as
+//!   file mode — or `record_failed {error}`.
 //! * Exits after `--seconds` (default 300), on Ctrl-C / SIGTERM, or 10 s after a live stream
 //!   ended (`live_ended`) — unless the phone asks for something else within those seconds
 //!   (the page's "Stop, then Send & loop") or a video is loaded, whose loop then resumes.
@@ -48,7 +57,7 @@ use camlooper_lib::remote::stream::handoff::{ensure_virtual_camera, AppCamera};
 use camlooper_lib::remote::stream::loop_engine::{self, EngineLoop, LoopHost, VideoInfo};
 use camlooper_lib::remote::stream::rtc::resolve_stun;
 use camlooper_lib::remote::stream::file_receive::{PlayError, PlayRequest, Played};
-use camlooper_lib::remote::stream::signal::{LoopAction, OutboundFrame, StopReason, StreamMode, StreamSignal};
+use camlooper_lib::remote::stream::signal::{LoopAction, OutboundFrame, RecordPhase, StopReason, StreamMode, StreamSignal, APP_PROTOCOL};
 use camlooper_lib::remote::stream::{
     route_server_message, CameraControl, CameraTarget, Cancel, ChannelDecisions, DecisionEvent, FileDeps, FilePhase, IceSource,
     LoopDeps, LoopPlayer, LoopState, Phase, PhoneVideoStore, SessionDeps, StreamManager, StreamStatus,
@@ -317,6 +326,13 @@ impl CameraControl for CliCamera {
             Ok(self.target.clone())
         })
     }
+    /// A recorded take loops on the device now: the loop that was paused for the stream is
+    /// not the one to bring back.
+    fn keep_for_loop(&self, _epoch: u64) -> BoxFuture<'_, ()> {
+        Box::pin(async {
+            self.resume_loop.store(false, Ordering::SeqCst);
+        })
+    }
     fn release(&self, _epoch: u64) -> BoxFuture<'_, ()> {
         Box::pin(async {
             if self.resume_loop.swap(false, Ordering::SeqCst) {
@@ -483,7 +499,7 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
         Err(ConnectError::Revoked) => anyhow::bail!("the pairing was revoked"),
         Err(ConnectError::Other(e)) => anyhow::bail!("relay connection failed: {e}"),
     };
-    emit(json!({"event": "connected", "protocol": 2}));
+    emit(json!({"event": "connected", "protocol": 2, "appProtocol": APP_PROTOCOL}));
 
     let deadline = tokio::time::sleep(Duration::from_secs(args.seconds));
     tokio::pin!(deadline);
@@ -495,6 +511,8 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
     // The session that is (or was last) up is a file transfer; and the progress last printed.
     let mut file_session = false;
     let mut progress_shown: Option<(String, u64)> = None;
+    // Record mode: the take's phase last printed, per session.
+    let mut record_shown: Option<(Option<String>, RecordPhase)> = None;
     // Set when a live stream ended: the run ends then, unless the phone comes back first.
     let mut exit_at: Option<tokio::time::Instant> = None;
 
@@ -542,7 +560,27 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
             changed = status.changed() => {
                 if changed.is_err() { break }
                 let s = status.borrow_and_update().clone();
-                emit(json!({"event": "state", "state": s.state, "mode": s.mode, "filePhase": s.file.as_ref().map(|f| f.phase), "lastError": s.last_error}));
+                emit(json!({"event": "state", "state": s.state, "mode": s.mode, "filePhase": s.file.as_ref().map(|f| f.phase), "record": s.record, "lastError": s.last_error}));
+                // The take: started (its first second), being processed, failed. `looping`
+                // comes from the loop engine itself, as for a file.
+                match &s.record {
+                    Some(r) => {
+                        let started = r.phase != RecordPhase::Recording || (s.state == Phase::Live && r.elapsed_ms > 0);
+                        let key = (s.session_id.clone(), r.phase);
+                        // A finished session has no id: its outcome belongs to the last one shown.
+                        let same = record_shown.as_ref().is_some_and(|(id, phase)| *phase == r.phase && (s.session_id.is_none() || *id == s.session_id));
+                        if started && !same {
+                            match r.phase {
+                                RecordPhase::Recording => emit(json!({"event": "recording", "elapsedMs": r.elapsed_ms, "capMs": r.cap_ms})),
+                                RecordPhase::Processing => emit(json!({"event": "processing", "elapsedMs": r.elapsed_ms})),
+                                RecordPhase::Failed => emit(json!({"event": "record_failed", "error": r.error})),
+                                RecordPhase::Looping => {}
+                            }
+                            record_shown = Some(key);
+                        }
+                    }
+                    None => record_shown = None,
+                }
                 if let (Some(id), Some(f)) = (&s.session_id, &s.file) {
                     let shown = progress_shown.as_ref().filter(|(shown_id, _)| shown_id == id).map(|(_, n)| *n);
                     let moving = matches!(f.phase, FilePhase::Receiving | FilePhase::Processing | FilePhase::Looping);
@@ -553,7 +591,8 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
                 }
                 if matches!(s.state, Phase::Connecting | Phase::Live | Phase::Stopping) {
                     was_streaming = true;
-                    file_session = s.mode == StreamMode::File;
+                    // A record session ends like a file session: with a loop (or without).
+                    file_session = s.mode != StreamMode::Live;
                 } else if s.state.is_free() && stopping {
                     break;
                 } else if s.state.is_free() && was_streaming {
@@ -570,7 +609,7 @@ async fn stream(args: &Args, base: &Url, pairing: &Pairing, files: &FileMode) ->
             }
             _ = tick.tick() => {
                 let s = manager.status();
-                if s.state == Phase::Live && s.mode == StreamMode::Live {
+                if s.state == Phase::Live && s.mode != StreamMode::File {
                     emit(status_line(&s));
                 }
                 let p = loop_engine::playback().await;

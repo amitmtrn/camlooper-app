@@ -21,8 +21,11 @@
 //!   not by the window: the phone's `loop_control`, or a phone video that could not be
 //!   started after the earlier one had been stopped for it.
 //!
-//! [`StreamStatus`] also carries `mode` (`"live"` | `"file"`) and, for a file session,
-//! `file: {name, size, received, phase, error?}` — see `machine.rs`.
+//! [`StreamStatus`] also carries `mode` (`"live"` | `"file"` | `"record"`) and, for a file
+//! session, `file: {name, size, received, phase, error?}`; for a record session,
+//! `record: {elapsedMs, capMs, phase, error?}` (`phase`: `recording` | `processing` |
+//! `looping` | `failed`) — see `machine.rs`. A recorded take that loops is announced with
+//! the same `remote://phone-video-loaded` as a received file.
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -309,6 +312,9 @@ mod tests {
         assert_eq!(tray_state(Phase::Error, live), PhoneTray::Idle);
         // A file transfer can be stopped from the tray, but it is never "camera live";
         // idle with the last transfer's outcome still in the status is idle.
+        // A record session is the phone's camera, live, until it ends.
+        assert_eq!(tray_state(Phase::Live, StreamMode::Record), PhoneTray::Live);
+        assert_eq!(tray_state(Phase::Idle, StreamMode::Record), PhoneTray::Idle);
         assert_eq!(tray_state(Phase::Live, StreamMode::File), PhoneTray::Connecting);
         assert_eq!(tray_state(Phase::Stopping, StreamMode::File), PhoneTray::Stopping);
         assert_eq!(tray_state(Phase::Idle, StreamMode::File), PhoneTray::Idle);

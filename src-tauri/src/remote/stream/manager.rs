@@ -15,7 +15,7 @@ use super::machine::{Action, DecisionError, Machine, StreamRequest, StreamStatus
 use super::runner::{SessionCommand, SessionEvent, SessionKind};
 use super::signal::{
     clean_file_name, parse_signal, parse_stop, sanitize_label, LoopAction, OutboundFrame, RejectReason, SignalError, StopReason,
-    StreamMode, StreamSignal, MAX_DEVICE_LABEL, MAX_LOOP_ERROR,
+    StreamMode, StreamSignal, APP_PROTOCOL, MAX_DEVICE_LABEL, MAX_LOOP_ERROR,
 };
 
 /// Where "may this phone stream?" goes. The app's implementation (`commands::UiDecisions`)
@@ -97,6 +97,17 @@ const LOOP_QUEUE: usize = 16;
 /// would otherwise be an unmetered way to make this machine send.
 pub const MAX_REFUSALS: usize = 5;
 pub const REFUSAL_WINDOW: Duration = Duration::from_secs(10);
+/// `hello` is answered at most this often (a phone sends it once after pairing, and again
+/// after a reconnect); the rest are dropped unanswered.
+pub const MAX_HELLOS: usize = 5;
+pub const HELLO_WINDOW: Duration = Duration::from_secs(10);
+
+/// `hello_ok.features`: the request modes this desktop takes. `record` and `file` need a
+/// place to put the video.
+pub fn features(has_store: bool) -> Vec<String> {
+    let modes: &[&str] = if has_store { &["live", "record", "file"] } else { &["live"] };
+    modes.iter().map(|m| m.to_string()).collect()
+}
 
 /// At most `max` events per `window`.
 #[derive(Debug)]
@@ -310,6 +321,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
     let Wiring { self_tx, backend, decisions, out, status, loops, session_active, file_sessions } = wiring;
     let mut m = Machine::new();
     let mut refusals = RateLimit::new(MAX_REFUSALS, REFUSAL_WINDOW);
+    let mut hellos = RateLimit::new(MAX_HELLOS, HELLO_WINDOW);
     let mut last_loop_action: Option<Instant> = None;
     let queue = |job: LoopJob| {
         if loops.try_send(job).is_err() {
@@ -328,9 +340,24 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
                 match input {
                     Input::Signal(data) => match parse_signal(&data) {
                         // This desktop has nowhere to put a video (no app data directory).
-                        Ok(StreamSignal::StreamRequest { session_id, mode: StreamMode::File, .. }) if !file_sessions => {
+                        Ok(StreamSignal::StreamRequest { session_id, mode: StreamMode::File | StreamMode::Record, .. }) if !file_sessions => {
                             eprintln!("phone stream: refusing a video from the phone (no place to store it)");
                             refusal(&mut refusals, now, session_id, RejectReason::Unsupported)
+                        }
+                        // "Which app protocol do you speak?" — answered whatever else is
+                        // going on, with what this desktop takes.
+                        Ok(StreamSignal::Hello { session_id, app_protocol }) => {
+                            if hellos.allow(now) {
+                                log::debug!("phone stream: hello from the phone (app protocol {app_protocol})");
+                                vec![Action::Send(OutboundFrame::Signal(StreamSignal::HelloOk {
+                                    session_id,
+                                    app_protocol: APP_PROTOCOL,
+                                    features: features(file_sessions),
+                                }))]
+                            } else {
+                                log::debug!("phone stream: not answering a hello (too many lately)");
+                                vec![]
+                            }
                         }
                         Ok(sig) => m.on_signal(sig, now),
                         // A request this desktop cannot take (too large, not a video):
@@ -401,7 +428,11 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Input>, wiring: Wiring) {
                     let _ = out.send(frame);
                 }
                 Action::AskUser(req) => {
-                    let what = if req.file.is_some() { "loop a video" } else { "stream its camera" };
+                    let what = match req.mode {
+                        StreamMode::File => "loop a video",
+                        StreamMode::Record => "record a loop",
+                        StreamMode::Live => "stream its camera",
+                    };
                     eprintln!("phone stream: {} asks to {what}", req.device_name.as_deref().unwrap_or("the phone"));
                     decisions.request(req);
                 }
@@ -484,7 +515,7 @@ mod tests {
     use crate::remote::stream::runner::MediaStats;
     use crate::remote::stream::file_receive::testing::FakeLoop;
     use crate::remote::stream::machine::FilePhase;
-    use crate::remote::stream::runner::FileStage;
+    use crate::remote::stream::runner::{FileStage, RecordStage};
     use crate::remote::stream::signal::{StreamMode, StreamSignal};
     use serde_json::json;
     use std::sync::Mutex;
@@ -540,9 +571,20 @@ mod tests {
                                 frames: 1,
                                 decoder_restarts: 0,
                             }));
+                            // A record session: the take starts right after the pre-roll.
+                            if kind == SessionKind::Record {
+                                let _ = events.send(SessionEvent::Record { stage: RecordStage::Recording, elapsed_ms: 0 });
+                            }
                         }
                         SessionCommand::Stop(_) if hang_on_stop => {}
-                        SessionCommand::Stop(reason) => {
+                        // A take of 5 s that is finished: processed, looping, done.
+                        SessionCommand::Finish(_) if kind == SessionKind::Record => {
+                            let _ = events.send(SessionEvent::Record { stage: RecordStage::Processing, elapsed_ms: 5000 });
+                            let _ = events.send(SessionEvent::Record { stage: RecordStage::Looping, elapsed_ms: 5000 });
+                            let _ = events.send(SessionEvent::Closed { reason: StopReason::Done, error: None });
+                            return;
+                        }
+                        SessionCommand::Stop(reason) | SessionCommand::Finish(reason) => {
                             let _ = events.send(SessionEvent::Closed { reason, error: None });
                             return;
                         }
@@ -993,5 +1035,109 @@ mod tests {
             }
         }
         assert_eq!(rejects, MAX_REFUSALS);
+    }
+
+    #[tokio::test]
+    async fn hello_is_answered_with_what_this_desktop_takes() {
+        // With a place for videos: live, record and file.
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let (m, mut out, _drx) = with_loop(Arc::new(FakeBackend::default()), Arc::new(FakeLoop::default()), &store);
+        m.on_relay_signal(json!({"kind":"hello","sessionId":"h1","appProtocol":3}));
+        assert_eq!(
+            next_frame(&mut out).await,
+            json!({"type":"signal","data":{"kind":"hello_ok","sessionId":"h1","appProtocol":3,"features":["live","record","file"]}})
+        );
+        assert_eq!(m.status().state, Phase::Idle, "a hello is not a session");
+        // Malformed ones are dropped; the rest are answered, but not without end.
+        m.on_relay_signal(json!({"kind":"hello","sessionId":"h1"}));
+        m.on_relay_signal(json!({"kind":"hello","sessionId":"h1","appProtocol":"3"}));
+        for i in 0..(MAX_HELLOS * 2) {
+            m.on_relay_signal(json!({"kind":"hello","sessionId":format!("h{i}"),"appProtocol":4}));
+        }
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"after","action":"status"}));
+        let mut answered = 1;
+        loop {
+            let f = next_frame(&mut out).await;
+            if f["data"]["kind"] == "loop_status" {
+                break;
+            }
+            assert_eq!((f["data"]["kind"].as_str(), f["data"]["appProtocol"].as_u64()), (Some("hello_ok"), Some(3)));
+            answered += 1;
+        }
+        assert_eq!(answered, MAX_HELLOS);
+
+        // Without one: live only — the phone must not offer Record.
+        let (dtx, _drx) = mpsc::unbounded_channel();
+        let (m, mut out) = StreamManager::spawn(Arc::new(FakeBackend::default()), Arc::new(ChannelDecisions(dtx)));
+        m.on_relay_signal(json!({"kind":"hello","sessionId":"h1","appProtocol":3}));
+        assert_eq!(next_frame(&mut out).await["data"]["features"], json!(["live"]));
+        // …and a record request that comes anyway is refused, not taken for live.
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"r1","mode":"record"}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"r1","reason":"unsupported"}));
+        assert_eq!(m.status().state, Phase::Idle);
+        assert_eq!(features(true), vec!["live", "record", "file"]);
+    }
+
+    #[tokio::test]
+    async fn a_record_session_through_the_manager() {
+        let store = PhoneVideoStore::in_app_data(std::path::Path::new("/app-data"));
+        let backend = Arc::new(FakeBackend::default());
+        let player = FakeLoop::loaded("Phone recording.mp4", &store.dir().join("phone-00000000000000aa.mp4"), true);
+        let (m, mut out, mut drx) = with_loop(backend.clone(), player, &store);
+
+        // A mode nobody knows is answered `unsupported`; it never becomes a live session.
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"x1","mode":"timelapse"}));
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"stream_reject","sessionId":"x1","reason":"unsupported"}));
+
+        // No hello first: the request itself is unambiguous.
+        m.on_relay_signal(json!({"kind":"stream_request","sessionId":"r1","deviceLabel":"Pixel","mode":"record"}));
+        let DecisionEvent::Request(req) = drx.recv().await.unwrap() else { panic!() };
+        assert_eq!((req.mode, req.file.clone(), req.device_name.as_deref()), (StreamMode::Record, None, Some("Pixel")));
+        m.accept("r1").await.unwrap();
+        assert_eq!(next_frame(&mut out).await["data"]["kind"], "stream_accept");
+        assert_eq!(next_frame(&mut out).await["data"], json!({"kind":"status","sessionId":"r1","state":"connecting","mode":"record"}));
+        m.on_relay_signal(json!({"kind":"offer","sessionId":"r1","sdp":"v=0 offer"}));
+        assert_eq!(next_frame(&mut out).await["data"]["kind"], "answer");
+        // Live (the pre-roll), then the take starts.
+        let live = next_frame(&mut out).await;
+        assert_eq!((live["data"]["state"].as_str(), live["data"]["mode"].as_str(), live["data"].get("record")), (Some("live"), Some("record"), None));
+        assert_eq!(next_frame(&mut out).await["data"]["record"], json!({"elapsedMs":0,"capMs":60000,"phase":"recording"}));
+        wait_state(&m, Phase::Live).await;
+        let log = backend.commands.lock().unwrap().clone();
+        assert_eq!(log[0], "start Record", "a record session, not a live one: {log:?}");
+
+        // What the window gets while the take runs.
+        let v = serde_json::to_value(m.status()).unwrap();
+        assert_eq!((v["state"].as_str(), v["mode"].as_str()), (Some("live"), Some("record")));
+        assert_eq!(v["record"], json!({"elapsedMs":0,"capMs":60000,"phase":"recording"}));
+        assert_eq!(v["deviceName"], "Pixel");
+
+        // The phone stops: the take is finished, processed, loops; the phone hears `done`
+        // and what the loop is doing.
+        m.on_relay_stream_stop(Some(json!({"sessionId":"r1","reason":"user"})));
+        let mut kinds = vec![];
+        loop {
+            let f = next_frame(&mut out).await;
+            if f["type"] == "stream_stop" {
+                assert_eq!(f["data"], json!({"sessionId":"r1","reason":"done"}));
+                break;
+            }
+            kinds.push(f["data"]["record"]["phase"].as_str().unwrap_or("?").to_string());
+        }
+        assert!(kinds.contains(&"processing".to_string()), "{kinds:?}");
+        assert_eq!(
+            next_frame(&mut out).await["data"],
+            json!({"kind":"loop_status","sessionId":"r1","playing":true,"name":"Phone recording.mp4","fromPhone":true})
+        );
+        wait_state(&m, Phase::Idle).await;
+        let st = m.status();
+        assert_eq!((st.mode, st.last_error.clone(), st.ended_by_phone), (StreamMode::Record, None, false));
+        assert_eq!(serde_json::to_value(&st).unwrap()["record"], json!({"elapsedMs":5000,"capMs":60000,"phase":"looping"}));
+        let log = backend.commands.lock().unwrap().clone();
+        assert!(log.iter().any(|c| c == "Finish(User)") && !log.iter().any(|c| c.starts_with("Stop(")), "{log:?}");
+
+        // With the session over, the phone steers the loop as after a file.
+        m.on_relay_signal(json!({"kind":"loop_control","sessionId":"c1","action":"stop"}));
+        assert_eq!(next_frame(&mut out).await["data"]["playing"], false);
     }
 }
